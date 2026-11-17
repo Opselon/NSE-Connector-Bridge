@@ -1,0 +1,16 @@
+[project]
+name = "nse-bridge"
+version = "1.0.0"
+description = "NSE MT5 Bridge - secure local bridge between MetaTrader 5 terminal and the NSE Platform server"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "trade: tests that execute real trades on the connected account (demo-safe, 0.01 lots, auto-cleanup)",
+]
+log_cli = false
+
+[tool.ruff]
+line-length = 120

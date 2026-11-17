@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NSE MT5 Bridge — Control Panel</title>
+<style>
+:root{
+  --bg:#0a0e14;--bg2:#0d1220;--panel:#121a26;--panel2:#0f1520;--line:#1c2634;--line2:#253146;
+  --txt:#dde6f2;--dim:#7f93ac;--dim2:#54677e;
+  --green:#34d399;--red:#f87171;--amber:#fbbf24;--blue:#60a5fa;--violet:#a78bfa;--cyan:#22d3ee;
+  --shadow:0 8px 24px rgba(0,0,0,.35);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:radial-gradient(1200px 800px at 80% -10%, #101828 0%, var(--bg) 55%);color:var(--txt);
+  font:14px/1.5 'Segoe UI',system-ui,sans-serif;display:flex;overflow:hidden}
+::selection{background:#2b4a78}
+
+/* ---------- sidebar ---------- */
+aside{width:216px;min-width:216px;background:var(--panel2);border-right:1px solid var(--line);
+  display:flex;flex-direction:column;padding:18px 12px}
+.logo{display:flex;align-items:center;gap:10px;padding:4px 10px 18px}
+.logo .mark{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#2563eb,#7c3aed);
+  display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;color:#fff;box-shadow:var(--shadow)}
+.logo .t{font-weight:700;font-size:15px;letter-spacing:.3px}
+.logo .s{font-size:10.5px;color:var(--dim)}
+nav{display:flex;flex-direction:column;gap:4px;margin-top:6px}
+.navitem{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:10px;cursor:pointer;
+  color:var(--dim);font-weight:500;font-size:13.5px;border:1px solid transparent;transition:.15s}
+.navitem svg{width:17px;height:17px;flex:none}
+.navitem:hover{background:#131c2b;color:var(--txt)}
+.navitem.active{background:linear-gradient(90deg,rgba(37,99,235,.16),rgba(124,58,237,.10));
+  color:var(--txt);border-color:#223252}
+.navitem .pill{margin-left:auto;font-size:10.5px;padding:1px 8px;border-radius:999px;background:#1a2434;color:var(--dim)}
+.navitem.active .pill{background:#25314a;color:var(--txt)}
+.side-foot{margin-top:auto;padding:10px 12px;font-size:11px;color:var(--dim2);line-height:1.7}
+.side-foot b{color:var(--dim)}
+
+/* ---------- main ---------- */
+main{flex:1;display:flex;flex-direction:column;min-width:0}
+.topbar{display:flex;align-items:center;gap:10px;padding:12px 24px;border-bottom:1px solid var(--line);background:rgba(13,18,32,.7)}
+.topbar h1{font-size:16px;font-weight:700}
+.chip{display:inline-flex;align-items:center;gap:7px;padding:5px 12px;border-radius:999px;font-size:12px;
+  border:1px solid var(--line2);background:var(--panel2);color:var(--dim);font-variant-numeric:tabular-nums}
+.chip b{color:var(--txt)}
+.chip .dot{width:8px;height:8px;border-radius:50%;background:var(--red)}
+.chip .dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
+.chip .dot.warn{background:var(--amber);box-shadow:0 0 6px var(--amber)}
+.spacer{flex:1}
+.view{flex:1;overflow-y:auto;padding:20px 24px}
+.view::-webkit-scrollbar{width:9px}
+.view::-webkit-scrollbar-thumb{background:#1d2a3d;border-radius:8px}
+.page{display:none}.page.active{display:block;animation:fade .18s ease}
+@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1}}
+
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+.card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);
+  border-radius:14px;padding:16px 18px;box-shadow:var(--shadow)}
+.card h2{font-size:11.5px;text-transform:uppercase;letter-spacing:1.4px;color:var(--dim);margin-bottom:12px;
+  display:flex;justify-content:space-between;align-items:center}
+.kv{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed var(--line)}
+.kv:last-child{border-bottom:none}
+.kv .k{color:var(--dim)}
+.kv .v{font-weight:600;font-variant-numeric:tabular-nums}
+.up{color:var(--green)}.down{color:var(--red)}.warn{color:var(--amber)}
+
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{color:var(--dim2);text-align:left;font-weight:600;padding:7px 9px;border-bottom:1px solid var(--line2);
+  font-size:10.5px;text-transform:uppercase;letter-spacing:.9px}
+td{padding:7px 9px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#131c2b}
+.empty{color:var(--dim2);padding:14px 4px;font-size:13px}
+.badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:700}
+.badge.buy{background:#0a2e1d;color:var(--green)}.badge.sell{background:#3a0e0e;color:var(--red)}
+.badge.gray{background:#1a2434;color:var(--dim)}
+
+/* tickers */
+#tickers{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(215px,1fr))}
+.ticker{background:linear-gradient(180deg,#131c2b,#0f1520);border:1px solid var(--line2);border-radius:13px;
+  padding:13px 15px;position:relative;overflow:hidden}
+.ticker .sym{font-weight:700;font-size:13px;color:var(--cyan);letter-spacing:.5px}
+.ticker .px{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums;margin:3px 0 1px}
+.ticker .ba{display:flex;justify-content:space-between;font-size:11.5px;color:var(--dim)}
+.ticker .spark{margin-top:8px}
+.ticker .x{position:absolute;top:9px;right:11px;color:var(--dim2);cursor:pointer;font-size:13px}
+.ticker .x:hover{color:var(--red)}
+.fx-up{color:var(--green)!important}.fx-down{color:var(--red)!important}
+
+/* logs */
+#logs{font:11.5px/1.65 Consolas,'Cascadia Mono',monospace;max-height:calc(100vh - 210px);overflow:auto;
+  background:#0b0f17;border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+#logs div{padding:1px 0;white-space:pre-wrap;border-bottom:1px solid #0e1520}
+.lg-ERROR{color:var(--red)}.lg-WARNING{color:var(--amber)}.lg-INFO{color:#9db2cc}.lg-DEBUG{color:var(--dim2)}
+
+/* checks */
+.check{display:flex;gap:13px;align-items:flex-start;padding:13px 4px;border-bottom:1px solid var(--line)}
+.check:last-child{border-bottom:none}
+.check .ic{width:26px;height:26px;border-radius:8px;flex:none;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800}
+.check .ic.ok{background:#0a2e1d;color:var(--green)}
+.check .ic.fail{background:#3a0e0e;color:var(--red)}
+.check .ic.warn{background:#33230a;color:var(--amber)}
+.check .t{font-weight:600}
+.check .d{color:var(--dim);font-size:12.5px;margin-top:2px}
+.check .h{color:var(--cyan);font-size:12.5px;margin-top:5px;background:#0f1b2c;border:1px solid #1c3049;
+  border-radius:8px;padding:7px 10px}
+#overall{font-size:13px;font-weight:700;padding:6px 14px;border-radius:999px}
+#overall.ok{background:#0a2e1d;color:var(--green)}#overall.fail{background:#3a0e0e;color:var(--red)}#overall.warn{background:#33230a;color:var(--amber)}
+
+/* settings */
+form.settings{max-width:640px}
+.field{margin-bottom:15px}
+.field label{display:block;font-size:12px;color:var(--dim);margin-bottom:6px;font-weight:600;letter-spacing:.4px}
+.field label small{color:var(--dim2);font-weight:400}
+.field input,.field select{width:100%;background:#0b0f17;border:1px solid var(--line2);color:var(--txt);
+  padding:10px 12px;border-radius:10px;font-size:13.5px;outline:none;transition:.15s}
+.field input:focus,.field select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,165,250,.12)}
+.row{display:flex;gap:12px}.row .field{flex:1}
+.btn{display:inline-flex;align-items:center;gap:8px;background:linear-gradient(135deg,#2563eb,#4f46e5);
+  color:#fff;border:none;padding:10px 18px;border-radius:10px;font-size:13.5px;font-weight:700;cursor:pointer;transition:.15s}
+.btn:hover{filter:brightness(1.12)}
+.btn.ghost{background:transparent;border:1px solid var(--line2);color:var(--dim)}
+.btn.ghost:hover{color:var(--txt);border-color:var(--blue)}
+.btn.small{padding:7px 13px;font-size:12.5px}
+#saveMsg{font-size:12.5px;margin-left:12px}
+.tophint{background:#0f1b2c;border:1px solid #1c3049;color:#a9c3e8;border-radius:12px;padding:12px 16px;
+  font-size:13px;margin-bottom:16px;line-height:1.6}
+.tophint b{color:var(--cyan)}
+</style>
+</head>
+<body>
+<aside>
+  <div class="logo">
+    <div class="mark">N</div>
+    <div><div class="t">NSE Bridge</div><div class="s">MetaTrader 5 control</div></div>
+  </div>
+  <nav id="nav">
+    <div class="navitem active" data-page="overview">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
+      Overview</div>
+    <div class="navitem" data-page="positions">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>
+      Positions <span class="pill" id="pill-pos">0</span></div>
+    <div class="navitem" data-page="orders">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+      Pending Orders <span class="pill" id="pill-ord">0</span></div>
+    <div class="navitem" data-page="logs">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
+      Logs</div>
+    <div class="navitem" data-page="checks">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-5"/><circle cx="12" cy="12" r="9"/></svg>
+      Connection Checks</div>
+    <div class="navitem" data-page="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.9-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1-1.5 1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.9 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1 1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.9.3h0a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5h0a1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.9v0a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>
+      Settings</div>
+  </nav>
+  <div class="side-foot">
+    <b id="sfVer">v1.1.0</b><br>device <span id="sfDevice">—</span><br>
+    <a href="/docs" target="_blank" style="color:var(--blue);text-decoration:none">Swagger API ↗</a>
+  </div>
+</aside>
+
+<main>
+  <div class="topbar">
+    <h1 id="pageTitle">Overview</h1>
+    <div class="spacer"></div>
+    <span class="chip"><span class="dot" id="dotWs"></span> UI feed</span>
+    <span class="chip"><span class="dot" id="dotMt5"></span> MT5 <b id="chipMt5">—</b></span>
+    <span class="chip">Balance <b id="chipBal">—</b></span>
+    <span class="chip">Equity <b id="chipEq">—</b></span>
+    <span class="chip">Server <b id="chipSrv">—</b></span>
+  </div>
+
+  <div class="view">
+    <!-- ================= OVERVIEW ================= -->
+    <section class="page active" id="page-overview">
+      <div class="grid" style="margin-bottom:14px">
+        <div class="card">
+          <h2>MetaTrader 5</h2>
+          <div class="kv"><span class="k">State</span><span class="v" id="mt5State">—</span></div>
+          <div class="kv"><span class="k">Terminal</span><span class="v" id="termName">—</span></div>
+          <div class="kv"><span class="k">Login / Server</span><span class="v" id="accLogin">—</span></div>
+          <div class="kv"><span class="k">Uptime</span><span class="v" id="uptime">—</span></div>
+          <div class="kv"><span class="k">Floating PnL</span><span class="v" id="pnl">—</span></div>
+        </div>
+        <div class="card">
+          <h2>Account</h2>
+          <div class="kv"><span class="k">Balance</span><span class="v" id="balance">—</span></div>
+          <div class="kv"><span class="k">Equity</span><span class="v" id="equity">—</span></div>
+          <div class="kv"><span class="k">Margin / Free</span><span class="v" id="margins">—</span></div>
+          <div class="kv"><span class="k">Margin Level</span><span class="v" id="mLvl">—</span></div>
+          <div class="kv"><span class="k">Currency</span><span class="v" id="currency">—</span></div>
+        </div>
+        <div class="card">
+          <h2>NSE Server Channel</h2>
+          <div class="kv"><span class="k">State</span><span class="v" id="chState">—</span></div>
+          <div class="kv"><span class="k">URL</span><span class="v" id="chUrl">—</span></div>
+          <div class="kv"><span class="k">Reconnects</span><span class="v" id="chReconn">—</span></div>
+          <div class="kv"><span class="k">Last error</span><span class="v" id="chErr">—</span></div>
+          <div class="kv"><span class="k">API key</span><span class="v" id="chKey">—</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Live Tickers
+          <span><input id="symInput" placeholder="XAUUSD" list="symbols" style="width:120px">
+          <button class="btn small ghost" id="addSym">+ Watch</button></span>
+        </h2>
+        <div id="tickers"><div class="empty">No subscriptions — add a symbol above</div></div>
+        <datalist id="symbols"></datalist>
+      </div>
+    </section>
+
+    <!-- ================= POSITIONS ================= -->
+    <section class="page" id="page-positions">
+      <div class="card">
+        <h2>Open Positions <span id="posFloat" style="color:var(--dim)"></span></h2>
+        <table><thead><tr><th>Ticket</th><th>Symbol</th><th>Side</th><th>Volume</th><th>Open</th><th>Now</th><th>SL</th><th>TP</th><th>Swap</th><th>PnL</th><th>Magic</th></tr></thead>
+        <tbody id="posBody"><tr><td colspan="11" class="empty">—</td></tr></tbody></table>
+      </div>
+    </section>
+
+    <!-- ================= ORDERS ================= -->
+    <section class="page" id="page-orders">
+      <div class="card">
+        <h2>Pending Orders</h2>
+        <table><thead><tr><th>Ticket</th><th>Symbol</th><th>Type</th><th>Volume</th><th>Price</th><th>SL</th><th>TP</th><th>State</th><th>Magic</th></tr></thead>
+        <tbody id="ordBody"><tr><td colspan="9" class="empty">—</td></tr></tbody></table>
+      </div>
+    </section>
+
+    <!-- ================= LOGS ================= -->
+    <section class="page" id="page-logs">
+      <div class="card">
+        <h2>Bridge Logs
+          <span>
+            <select id="logLevel" style="background:#0b0f17;border:1px solid var(--line2);color:var(--txt);border-radius:8px;padding:5px 9px;font-size:12px">
+              <option value="">ALL</option><option>ERROR</option><option>WARNING</option><option>INFO</option>
+            </select>
+            <button class="btn small ghost" id="logRefresh">Refresh</button>
+          </span>
+        </h2>
+        <div id="logs"></div>
+      </div>
+    </section>
+
+    <!-- ================= CHECKS ================= -->
+    <section class="page" id="page-checks">
+      <div class="tophint">
+        Run the full <b>pre-flight checklist</b> before connecting the bridge to the NSE Platform:
+        terminal link, <b>Algo Trading</b> button, account permissions, market data and server-channel reachability.
+      </div>
+      <div class="card">
+        <h2>Connection Checks
+          <span style="display:flex;gap:10px;align-items:center">
+            <span id="overall"></span>
+            <button class="btn small" id="runChecks">Run checks</button>
+          </span>
+        </h2>
+        <div id="checkList"><div class="empty">Press “Run checks”</div></div>
+      </div>
+    </section>
+
+    <!-- ================= SETTINGS ================= -->
+    <section class="page" id="page-settings">
+      <div class="tophint">
+        Paste the <b>API key</b> generated on the <b>NSE Platform site</b> plus the bridge endpoint URL —
+        the bridge then dials <b>out</b> to your server (no inbound ports, firewall-friendly). Everything is
+        stored locally in <span style="color:var(--cyan)" id="cfgPath">config.json</span>.
+      </div>
+      <form class="settings card" onsubmit="return false">
+        <h2>NSE Platform Connection</h2>
+        <div class="field">
+          <label>Server endpoint URL <small>— e.g. wss://bridge.nse-platform.io/ws</small></label>
+          <input id="setUrl" placeholder="wss://…" spellcheck="false">
+        </div>
+        <div class="field">
+          <label>API key from the NSE Platform site <small>— sent as Bearer token</small></label>
+          <input id="setToken" type="password" placeholder="paste your API key" spellcheck="false">
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Magic number <small>— stamped on bridge orders</small></label>
+            <input id="setMagic" type="number">
+          </div>
+          <div class="field">
+            <label>Primary symbol</label>
+            <input id="setSymbol" placeholder="XAUUSD">
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Broker UTC offset <small>minutes</small></label>
+            <input id="setOffset" type="number">
+          </div>
+          <div class="field">
+            <label>Strict magic guard <small>— never touch foreign positions</small></label>
+            <select id="setGuard"><option value="false">Off</option><option value="true">On</option></select>
+          </div>
+          <div class="field">
+            <label>Log level</label>
+            <select id="setLogLevel"><option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;margin-top:6px">
+          <button class="btn" id="saveSettings">💾 Save & apply</button>
+          <button class="btn ghost" id="restartChannel">↻ Restart server channel</button>
+          <span id="saveMsg"></span>
+        </div>
+      </form>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = (v, d=2) => v == null ? '—' : Number(v).toFixed(d);
+const api = (cmd, params, method='POST') => fetch(`/api/v1/${cmd}`, {
+  method, headers:{'Content-Type':'application/json'}, body: params === undefined ? undefined : JSON.stringify(params || {})
+}).then(r => r.json()).then(j => j.ok ? j.data : Promise.reject(j.error));
+
+/* ---------- navigation ---------- */
+const titles = {overview:'Overview', positions:'Open Positions', orders:'Pending Orders', logs:'Bridge Logs', checks:'Connection Checks', settings:'Settings'};
+document.querySelectorAll('.navitem').forEach(el => el.onclick = () => {
+  document.querySelectorAll('.navitem').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  $('page-' + el.dataset.page).classList.add('active');
+  $('pageTitle').textContent = titles[el.dataset.page];
+  if (el.dataset.page === 'checks') runChecks();
+  if (el.dataset.page === 'settings') loadSettings();
+});
+
+/* ---------- websocket feed ---------- */
+let ws = null;
+function connectWs(){
+  ws = new WebSocket(`ws://${location.host}/ws/ui`);
+  ws.onopen = () => $('dotWs').className = 'dot on';
+  ws.onclose = () => { $('dotWs').className = 'dot off'; setTimeout(connectWs, 2000); };
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'tick') upsertTicker(m.data);
+    else if (m.type === 'account_update') paintAccount(m.data);
+    else if (m.type === 'positions_update') paintPositions(m.data);
+    else if (m.type === 'orders_update') paintOrders(m.data);
+    else if (m.type === 'status_update') paintStatusLite(m.data);
+    else if (m.type === 'trade_event') pushLogLine({ts:m.data.ts, level:'TRADE', message:`${m.data.op} → ${m.data.outcome} (retcode ${m.data.retcode}) ${m.data.symbol||''}`});
+  };
+}
+connectWs();
+
+/* ---------- overview ---------- */
+async function paintStatusLite(d){
+  $('mt5State').textContent = d.mt5_state;
+  $('mt5State').className = 'v ' + (d.mt5_connected ? 'up' : 'down');
+  $('dotMt5').className = 'dot ' + (d.mt5_connected ? 'on' : '');
+  $('chipMt5').textContent = d.mt5_state;
+  $('uptime').textContent = Math.floor(d.uptime_seconds) + 's';
+  const ch = d.server_channel || {};
+  $('chState').textContent = ch.enabled ? (ch.connected ? 'CONNECTED' : 'RECONNECTING') : 'DISABLED';
+  $('chState').className = 'v ' + (ch.connected ? 'up' : (ch.enabled ? 'warn' : 'down'));
+  $('chipSrv').textContent = ch.connected ? 'LIVE' : (ch.enabled ? 'RETRY' : 'OFF');
+  $('chipSrv').style.color = ch.connected ? 'var(--green)' : 'var(--dim)';
+  $('chUrl').textContent = ch.url || '—';
+  $('chReconn').textContent = ch.reconnects ?? 0;
+  $('chErr').textContent = ch.last_error ? String(ch.last_error).slice(0,40) : '—';
+}
+async function paintAccount(a){
+  if (!a) { try { a = (await api('get_trading_account_info')).account; } catch(e){ return; } }
+  $('balance').textContent = fmt(a.balance); $('chipBal').textContent = fmt(a.balance);
+  $('equity').textContent = fmt(a.equity); $('chipEq').textContent = fmt(a.equity);
+  $('pnl').textContent = fmt(a.profit); $('pnl').className = 'v ' + (a.profit >= 0 ? 'up' : 'down');
+  $('margins').textContent = `${fmt(a.margin)} / ${fmt(a.margin_free)}`;
+  $('currency').textContent = a.currency || '—';
+  $('accLogin').textContent = `${a.login || '—'} @ ${a.server || '—'}`;
+  if (a.margin > 0) $('mLvl').textContent = fmt((a.equity / a.margin) * 100, 1) + '%'; else $('mLvl').textContent = '∞';
+}
+async function paintTerminal(){
+  try {
+    const t = (await api('get_mt5_terminal_info')).terminal;
+    $('termName').textContent = t.name || '—';
+  } catch(e){}
+}
+
+/* ---------- tickers + sparklines ---------- */
+const tickers = {};   // symbol -> {el, prices:[], lastPx}
+function upsertTicker(t){
+  let o = tickers[t.symbol];
+  if (!o) {
+    if (Object.keys(tickers).length === 0) $('tickers').innerHTML = '';
+    const el = document.createElement('div');
+    el.className = 'ticker';
+    el.innerHTML = `<span class="x" title="remove">✕</span><div class="sym">${t.symbol}</div>
+      <div class="px">—</div><div class="ba"><span>bid —</span><span>ask —</span></div>
+      <svg class="spark" width="100%" height="26" preserveAspectRatio="none"></svg>`;
+    el.querySelector('.x').onclick = () => {
+      delete tickers[t.symbol]; el.remove();
+      ws.send(JSON.stringify({type:'unsubscribe', symbol:t.symbol}));
+      if (!Object.keys(tickers).length) $('tickers').innerHTML = '<div class="empty">No subscriptions</div>';
+    };
+    $('tickers').appendChild(el);
+    o = tickers[t.symbol] = {el, prices: [], lastPx: null};
+  }
+  const px = t.bid || t.last;
+  const pxEl = o.el.querySelector('.px');
+  if (px && o.lastPx != null && px !== o.lastPx)
+    pxEl.className = 'px ' + (px > o.lastPx ? 'fx-up' : 'fx-down');
+  pxEl.textContent = fmt(px, t.bid > 500 ? 2 : 5);
+  o.lastPx = px;
+  o.el.querySelector('.ba').children[0].textContent = 'bid ' + fmt(t.bid, 5);
+  o.el.querySelector('.ba').children[1].textContent = 'ask ' + fmt(t.ask, 5);
+  if (px) {
+    o.prices.push(px); if (o.prices.length > 80) o.prices.shift();
+    drawSpark(o);
+  }
+}
+function drawSpark(o){
+  const svg = o.el.querySelector('.spark');
+  const pts = o.prices;
+  if (pts.length < 2) return;
+  const min = Math.min(...pts), max = Math.max(...pts), range = (max - min) || 1e-9;
+  const w = svg.clientWidth || 190, h = 26;
+  const path = pts.map((p, i) => `${(i / (pts.length - 1)) * w},${h - 2 - ((p - min) / range) * (h - 4)}`).join(' ');
+  const up = pts[pts.length - 1] >= pts[0];
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svg.innerHTML = `<polyline points="${path}" fill="none" stroke="${up ? '#34d399' : '#f87171'}" stroke-width="1.6"/>
+    <polyline points="0,${h} ${path} ${w},${h}" fill="${up ? 'rgba(52,211,153,.08)' : 'rgba(248,113,113,.08)'}" stroke="none"/>`;
+}
+$('addSym').onclick = () => {
+  const s = $('symInput').value.trim().toUpperCase();
+  if (!s) return;
+  ws.send(JSON.stringify({type:'subscribe', symbol:s, interval_ms:500}));
+  $('symInput').value = '';
+};
+$('symInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('addSym').click(); });
+api('get_trading_symbols', {limit: 400}).then(d => {
+  $('symbols').innerHTML = d.symbols.map(s => `<option value="${s.name}">`).join('');
+  if (!$('symInput').value) $('symInput').value = 'XAUUSD';
+}).catch(()=>{});
+api('subscribe_market_ticks', {symbol:'XAUUSD', interval_ms:500}).catch(()=>{});
+
+/* ---------- positions & orders ---------- */
+function paintPositions(d){
+  if (d) {
+    $('pill-pos').textContent = d.count;
+    $('posFloat').textContent = d.count ? `floating: ${fmt(d.positions.reduce((s,p)=>s+(p.profit||0),0))}` : '';
+    $('posBody').innerHTML = d.count === 0 ? '<tr><td colspan="11" class="empty">No open positions</td></tr>' :
+      d.positions.map(p => `<tr><td>${p.ticket}</td><td>${p.symbol}</td>
+        <td><span class="badge ${String(p.type_label).startsWith('BUY')?'buy':'sell'}">${p.type_label}</span></td>
+        <td>${fmt(p.volume)}</td><td>${fmt(p.price_open)}</td><td>${fmt(p.price_current)}</td>
+        <td>${fmt(p.sl)}</td><td>${fmt(p.tp)}</td><td>${fmt(p.swap)}</td>
+        <td class="${p.profit>=0?'up':'down'}">${fmt(p.profit)}</td><td>${p.magic ?? ''}</td></tr>`).join('');
+  }
+}
+function paintOrders(d){
+  if (d) {
+    $('pill-ord').textContent = d.count;
+    $('ordBody').innerHTML = d.count === 0 ? '<tr><td colspan="9" class="empty">No pending orders</td></tr>' :
+      d.orders.map(o => `<tr><td>${o.ticket}</td><td>${o.symbol}</td><td>${o.type_label}</td>
+        <td>${fmt(o.volume_current)}</td><td>${fmt(o.price_open)}</td><td>${fmt(o.sl)}</td><td>${fmt(o.tp)}</td>
+        <td><span class="badge gray">${o.state_label||''}</span></td><td>${o.magic ?? ''}</td></tr>`).join('');
+  }
+}
+
+/* ---------- logs ---------- */
+let logLines = [];
+function pushLogLine(e){ logLines.push(e); if (logLines.length > 400) logLines.shift(); renderLogs(); }
+function renderLogs(){
+  const lvl = $('logLevel').value;
+  const rows = logLines.filter(e => !lvl || e.level === lvl).slice(-160);
+  $('logs').innerHTML = rows.map(e => `<div class="lg-${e.level}">${e.ts ? e.ts.slice(11,23) : ''} ${String(e.level).padEnd(7)} ${e.message.slice(0,220)}</div>`).join('');
+  $('logs').scrollTop = $('logs').scrollHeight;
+}
+async function paintLogs(){
+  try {
+    const d = await api('get_bridge_logs', {limit: 150});
+    logLines = d.entries; renderLogs();
+  } catch(e){}
+}
+$('logRefresh').onclick = paintLogs;
+$('logLevel').onchange = renderLogs;
+
+/* ---------- checks ---------- */
+async function runChecks(){
+  $('checkList').innerHTML = '<div class="empty">Running…</div>';
+  try {
+    const d = await api('run_connection_checks');
+    const o = $('overall');
+    o.textContent = d.overall.toUpperCase();
+    o.className = d.overall;
+    $('checkList').innerHTML = d.checks.map(c => `
+      <div class="check">
+        <div class="ic ${c.status}">${c.status === 'ok' ? '✓' : c.status === 'warn' ? '!' : '✕'}</div>
+        <div style="min-width:0">
+          <div class="t">${c.title}</div>
+          ${c.detail ? `<div class="d">${c.detail}</div>` : ''}
+          ${c.hint ? `<div class="h">💡 ${c.hint}</div>` : ''}
+        </div>
+      </div>`).join('');
+  } catch(e) {
+    $('checkList').innerHTML = `<div class="empty down">Checks failed: ${e.message || e}</div>`;
+  }
+}
+$('runChecks').onclick = runChecks;
+
+/* ---------- settings ---------- */
+async function loadSettings(){
+  try {
+    const d = await api('settings', undefined, 'GET');
+    $('setUrl').value = d.server_url || '';
+    $('setToken').placeholder = d.server_token_set ? `saved: ${d.server_token_masked}` : 'paste your API key';
+    $('setMagic').value = d.magic;
+    $('setSymbol').value = d.bot_symbol || '';
+    $('setOffset').value = d.broker_utc_offset_minutes;
+    $('setGuard').value = String(!!d.strict_magic_guard);
+    $('setLogLevel').value = d.log_level || 'INFO';
+    $('cfgPath').textContent = d.config_file || 'config.json';
+    $('sfDevice').textContent = d.device_id || '—';
+    $('chKey').textContent = d.server_token_set ? d.server_token_masked : 'not set';
+    $('chKey').className = 'v ' + (d.server_token_set ? 'up' : 'down');
+    $('sfVer').textContent = 'v' + (d.config_file ? '1.1.0' : '1.1.0');
+  } catch(e){}
+}
+$('saveSettings').onclick = async () => {
+  const body = {
+    server_url: $('setUrl').value.trim(),
+    magic: Number($('setMagic').value) || 0,
+    bot_symbol: $('setSymbol').value.trim(),
+    broker_utc_offset_minutes: Number($('setOffset').value) || 0,
+    strict_magic_guard: $('setGuard').value === 'true',
+    log_level: $('setLogLevel').value,
+  };
+  const tok = $('setToken').value.trim();
+  if (tok) body.server_token = tok;  // empty = keep existing
+  try {
+    const d = await api('settings', body, 'PUT');
+    $('saveMsg').textContent = d.changed.length ? `saved: ${d.changed.join(', ')}` : 'no changes';
+    $('saveMsg').className = d.changed.length ? 'up' : '';
+    $('setToken').value = '';
+    loadSettings();
+  } catch(e) {
+    $('saveMsg').textContent = 'failed: ' + (e.message || e);
+    $('saveMsg').className = 'down';
+  }
+};
+$('restartChannel').onclick = async () => {
+  $('saveMsg').textContent = 'restarting…';
+  try {
+    await api('server_channel/restart');
+    $('saveMsg').textContent = 'channel restarted';
+    $('saveMsg').className = 'up';
+  } catch(e) {
+    $('saveMsg').textContent = 'failed: ' + (e.message || e);
+    $('saveMsg').className = 'down';
+  }
+};
+
+/* ---------- boot ---------- */
+paintStatusLite({mt5_state:'…', mt5_connected:false, uptime_seconds:0, server_channel:{}});
+paintTerminal(); paintAccount(); paintPositions(null); paintOrders(null); paintLogs(); loadSettings();
+setInterval(paintTerminal, 5000);
+setInterval(() => api('get_bridge_status').then(st => paintStatusLite({
+  mt5_state: st.mt5_state, mt5_connected: st.mt5_connected,
+  uptime_seconds: st.uptime_seconds, server_channel: st.server_channel})).catch(()=>{}), 5000);
+setInterval(() => { if (!wsUpPlaceholder()) paintAccount(); }, 4000);
+function wsUpPlaceholder(){ return false; }
+setInterval(paintPositions, 2500); setInterval(paintOrders, 3500); setInterval(paintLogs, 4000);
+</script>
+</body>
+</html>

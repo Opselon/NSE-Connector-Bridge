@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NSE MT5 Bridge — API Reference (Swagger)</title>
+<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+<style>
+  body { margin: 0; background: #0a0e14; }
+  #topbar { background: linear-gradient(135deg,#111823,#0d1220); border-bottom: 1px solid #1c2634;
+            padding: 14px 24px; display: flex; align-items: center; gap: 14px; }
+  #topbar .mark { width: 34px; height: 34px; border-radius: 10px;
+            background: linear-gradient(135deg,#2563eb,#7c3aed); display: flex; align-items: center;
+            justify-content: center; font-weight: 800; color: #fff; font-family: system-ui; }
+  #topbar h1 { font: 700 16px system-ui; color: #dde6f2; margin: 0; }
+  #topbar .s { font: 12px system-ui; color: #7f93ac; }
+  #topbar a { margin-left: auto; font: 600 13px system-ui; color: #60a5fa; text-decoration: none;
+            border: 1px solid #1c2634; padding: 7px 13px; border-radius: 8px; }
+  #swagger { background: #fff; }
+</style>
+</head>
+<body>
+<div id="topbar">
+  <div class="mark">N</div>
+  <div>
+    <h1>NSE MT5 Bridge — API Reference</h1>
+    <div class="s">Secure client-side bridge between MetaTrader 5 and the NSE Platform · 90 commands · Opselon/NSE-Connector-Bridge</div>
+  </div>
+  <a href="https://github.com/Opselon/NSE-Connector-Bridge" target="_blank">GitHub repo ↗</a>
+</div>
+<div id="swagger"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js" crossorigin></script>
+<script>
+window.addEventListener('load', () => {
+  window.ui = SwaggerUIBundle({
+    url: './openapi.json',
+    dom_id: '#swagger',
+    docExpansion: 'none',
+    tagsSorter: 'alpha',
+    tryItOutEnabled: true,
+  });
+});
+</script>
+</body>
+</html>
