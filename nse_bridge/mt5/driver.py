@@ -355,6 +355,7 @@ class Mt5Driver:
 
         self._connected = True
         self._set_state("CONNECTED", "connected")
+        self._detect_broker_offset(mt5)
         logger.info(
             "Successfully connected to MT5 terminal process (pkg={} terminal={}).",
             pkg_ver, term_ver,
@@ -367,6 +368,39 @@ class Mt5Driver:
             "terminal_name": term_ver,
             "terminal_connected": bool(getattr(term_info, "connected", False)) if term_info else None,
         }
+
+    def _detect_broker_offset(self, mt5: Any) -> None:
+        """Auto-detect the broker server UTC offset from live tick epochs.
+
+        MT5 epochs (ticks/deals/history boundaries) are SERVER-LOCAL seconds;
+        the Python package treats datetime args as UTC (BUG-188 class). The
+        offset is measured as (freshest tick epoch - local UTC epoch) and
+        applied symmetrically at every history/display boundary. The config
+        value remains the fallback when no fresh tick is available (market
+        closed on all probe symbols).
+        """
+        try:
+            freshest = 0.0
+            for sym in (self.settings.bot_symbol, "EURUSD", "GBPUSD", "USDJPY"):
+                raw = mt5.symbol_info_tick(sym)
+                t = float(getattr(raw, "time", 0) or 0) if raw is not None else 0.0
+                if t > freshest:
+                    freshest = t
+            if freshest <= 0:
+                logger.info("[MT5] broker offset detection skipped — no ticks available")
+                return
+            offset = round((freshest - time.time()) / 60)
+            if not (-1440 <= offset <= 1440):
+                logger.warning("[MT5] broker offset {} min out of range — ignored", offset)
+                return
+            if offset != self.settings.broker_utc_offset_minutes:
+                logger.info(
+                    "[MT5] broker UTC offset detected: {} minutes (config had {})",
+                    offset, self.settings.broker_utc_offset_minutes,
+                )
+                self.settings.broker_utc_offset_minutes = offset
+        except Exception as exc:
+            logger.warning("[MT5] broker offset detection failed: {}", exc)
 
     def disconnect(self) -> dict[str, Any]:
         def job(mt5: Any) -> None:

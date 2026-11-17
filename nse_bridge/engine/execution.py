@@ -124,18 +124,20 @@ def validate_pending(
     tp: float,
     volume: float,
 ) -> list[str]:
-    """Pre-dispatch structural validation against the CURRENT market (ported BUG-226)."""
+    """Pre-dispatch structural validation against the CURRENT market (ported BUG-226).
+
+    Entry-side geometry is per-type: LIMIT orders enter BEYOND the market
+    (buy below ask / sell above bid), STOP orders enter THROUGH the market
+    (buy above ask / sell below bid) — each with the stops-level gap.
+    """
     spec = require_symbol_info(ctx, symbol)
     tick = _fresh_tick(ctx, symbol)
     reasons: list[str] = []
     point = float(spec.point or 0.0)
     stops_level = float(spec.trade_stops_level or 0)
     spread = float((tick.ask or 0) - (tick.bid or 0))
-    min_gap = max(stops_level * point, spread)
-    if stops_level == 0:
-        min_gap = max(min_gap, spread)
     safety_floor = 10 * point  # 10 broker points floor (ported)
-    min_gap = max(min_gap, safety_floor)
+    min_gap = max(stops_level * point, spread, safety_floor)
     min_stop_dist = max(stops_level * point, safety_floor)
 
     vol_min = float(spec.volume_min or 0.0)
@@ -151,11 +153,17 @@ def validate_pending(
             reasons.append("volume_not_multiple_of_step")
 
     is_buy = order_type.startswith("BUY")
-    market_ref = float(tick.ask) if is_buy else float(tick.bid)
-    if is_buy and price >= float(tick.ask):
-        reasons.append("price_not_below_ask")
-    if not is_buy and price <= float(tick.bid):
-        reasons.append("price_not_above_bid")
+    is_stop = order_type.endswith("STOP")
+    ask, bid = float(tick.ask), float(tick.bid)
+    if order_type == "BUY_LIMIT" and price >= ask - min_gap + 1e-9:
+        reasons.append("buy_limit_price_not_below_ask")
+    if order_type == "SELL_LIMIT" and price <= bid + min_gap - 1e-9:
+        reasons.append("sell_limit_price_not_above_bid")
+    if order_type == "BUY_STOP" and price <= ask + min_gap - 1e-9:
+        reasons.append("buy_stop_price_not_above_ask")
+    if order_type == "SELL_STOP" and price >= bid - min_gap + 1e-9:
+        reasons.append("sell_stop_price_not_below_bid")
+    market_ref = ask if is_buy else bid
     if abs(price - market_ref) < min_gap - 1e-9:
         reasons.append("entry_inside_stops_level")
 
@@ -194,8 +202,13 @@ def trade_send_pending_order(ctx: BridgeContext, params: PendingOrderRequest) ->
             details={"reasons": reasons, "symbol": symbol, "order_type": params.order_type, "price": params.price},
         )
 
+    # resolve filling BEFORE entering the worker job — never call driver.run()
+    # from inside a job (single-thread executor: nested run() deadlocks)
+    from .common import resolve_filling_mode
+
+    filling = resolve_filling_mode(ctx, symbol)
+
     def job(mt5: Any):
-        filling = _resolve_filling(ctx, mt5, symbol)
         request = {
             "action": mt5.TRADE_ACTION_PENDING,
             "symbol": symbol,
@@ -245,11 +258,22 @@ def _resolve_filling(ctx: BridgeContext, mt5: Any, symbol: str) -> int:
 
 
 def _pending_payload(ctx: BridgeContext, symbol: str, ticket: int) -> dict[str, Any]:
-    """Fetch the just-placed pending order for a rich execution payload."""
+    """Fetch the just-placed pending order for a rich execution payload.
+
+    The active book may lag the dispatch by a moment — retry briefly.
+    """
+    import time as _time
+
     from ..mt5.types import build_order_model
     from .orders import _fetch_order
 
-    raw = _fetch_order(ctx, ticket) if ticket else None
+    raw = None
+    if ticket:
+        for _ in range(6):
+            raw = _fetch_order(ctx, ticket)
+            if raw is not None:
+                break
+            _time.sleep(0.15)
     payload: dict[str, Any] = {
         "status": "done",
         "symbol": symbol,

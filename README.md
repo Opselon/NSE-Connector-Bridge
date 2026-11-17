@@ -135,11 +135,17 @@ tests are cleaned up automatically.
 
 ## Known environment notes
 
-- **Python 3.14 on dev machines with broken numpy/pip**: use a clean 3.12/3.13
-  (the venv here uses uv-managed CPython 3.13.15).
-- `terminal_info().trade_allowed` reflects the toolbar **Algo Trading button**;
-  when OFF every dispatch is rejected with `10027` + comment
-  "AutoTrading disabled by client" — no API can toggle it (UI security control).
-  The GUI's *Connection Checks* tab detects this and shows the exact fix.
+- **The hidden AutoTrading killer (MT5 build 6306+)**: *Tools → Options → Experts →*
+  ***"Disable algorithmic trading via external Python API"*** *— when this is CHECKED the*
+  *toolbar button looks green but every Python-API order is rejected with retcode 10027*
+  *"AutoTrading disabled by client".* Uncheck it. The GUI's *Connection Checks* tab
+  detects the failure and prints this exact fix. (Found by fixing `Api=1` → `Api=0`
+  in `common.ini [Experts]` + terminal restart.)
+- **Broker server time offset is auto-detected at connect** (from the freshest live
+  tick epoch vs local UTC): history windows (`history_deals_get`, `copy_ticks_range`,
+  `copy_rates_range`) and all display timestamps are shifted into the broker timebase
+  automatically — set `broker_utc_offset_minutes` manually only if detection is
+  impossible (all probe symbols closed).
+- **Python 3.14 on dev machines with broken numpy/pip**: use a clean 3.12/3.13.
 - Some brokers report unreliable `trade_tick_value` — the bridge computes value-
   per-unit via broker-native `order_calc_profit` instead.

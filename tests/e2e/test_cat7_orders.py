@@ -34,7 +34,7 @@ def test_55_get_trading_pending_orders(client):
 def test_56_57_61_62_pending_order_lifecycle(client):
     tick = call(client, "get_market_tick", {"symbol": SYMBOL})["tick"]
     ask = tick["ask"]
-    # BUY_STOP well above the market (validated entry side + safe distance)
+    # BUY_STOP above the market (validated entry side + safe distance)
     placed = call(
         client,
         "trade_send_pending_order",
@@ -64,18 +64,13 @@ def test_56_57_61_62_pending_order_lifecycle(client):
         info = call(client, "get_order_info", {"ticket": ticket})
         assert info["order"]["price_open"] == pytest.approx(round(ask + 2.1, 2), abs=0.02)
 
-        # 61 cancel
+        # 61 cancel -> the order moves to history with CANCELED state
         cancelled = call(client, "trade_cancel_pending_order", {"ticket": ticket})
         assert cancelled["status"] == "done" and cancelled["retcode"] == 10009
-        time.sleep(0.2)
-        err = call(client, "get_order_info", {"ticket": ticket}, expect_ok=False)
-        # cancelled order leaves the active book; may still exist in history
-        assert err["code"] == "TICKET_NOT_FOUND" or info is not None
-        if err["code"] == "TICKET_NOT_FOUND":
-            pass  # fully gone
-        else:
-            hist = call(client, "get_order_status", {"ticket": ticket})
-            assert hist["order"]["state_label"] == "CANCELED"
+        time.sleep(0.3)
+        hist = call(client, "get_order_status", {"ticket": ticket})
+        assert hist["source"] == "history"
+        assert hist["order"]["state_label"] == "CANCELED"
     except Exception:
         _cancel_ticket(client, ticket)
         raise

@@ -100,6 +100,9 @@ class TradeExecutionResponse(BaseModel):
     volume: float | None = None
     comment: str | None = None
     ambiguous_fill_recovered: bool = False
+    order: dict[str, Any] | None = None  # pending orders: full placed-order snapshot
+    ticket: int | None = None  # closes: the closed position ticket
+    closed_volume: float | None = None
 
 
 def _execution_payload(raw: Any, symbol: str, *, recovered: bool = False) -> dict[str, Any]:

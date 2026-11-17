@@ -31,9 +31,13 @@ def test_settings_put_updates_and_applies(client):
 
 
 def test_settings_put_partial_untouched_fields(client):
-    data = client.put("/api/v1/settings", json={"broker_utc_offset_minutes": 120}).json()["data"]
+    original = client.get("/api/v1/settings").json()["data"]["broker_utc_offset_minutes"]
+    new_value = (original + 30) % 721
+    data = client.put(
+        "/api/v1/settings", json={"broker_utc_offset_minutes": new_value}
+    ).json()["data"]
     assert data["changed"] == ["broker_utc_offset_minutes"]
-    client.put("/api/v1/settings", json={"broker_utc_offset_minutes": 0})
+    client.put("/api/v1/settings", json={"broker_utc_offset_minutes": original})
 
 
 def test_settings_put_invalid_log_level_422(client):

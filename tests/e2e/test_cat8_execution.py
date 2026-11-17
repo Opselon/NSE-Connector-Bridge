@@ -81,23 +81,23 @@ def test_67_trade_send_pending_order_and_validation(client):
         assert placed["status"] == "done" and placed["order_ticket"]
         assert placed["order"]["type_label"] == "BUY_LIMIT"
 
-        # structurally invalid: BUY_LIMIT ABOVE the ask -> rejected BEFORE dispatch
-        err = call(
-            client,
-            "trade_send_pending_order",
-            {"symbol": SYMBOL, "order_type": "BUY_LIMIT", "volume": 0.01, "price": round(ask + 2.5, 2)},
-            expect_ok=False,
+        # structurally invalid: BUY_LIMIT ABOVE the ask -> rejected BEFORE dispatch (422)
+        resp = client.post(
+            "/api/v1/trade_send_pending_order",
+            json={"symbol": SYMBOL, "order_type": "BUY_LIMIT", "volume": 0.01, "price": round(ask + 2.5, 2)},
         )
+        assert resp.status_code == 422
+        err = resp.json()["error"]
         assert err["code"] == "VALIDATION_ERROR"
-        assert "price_not_below_ask" in (err["details"] or {}).get("reasons", [])
+        assert "buy_limit_price_not_below_ask" in (err["details"] or {}).get("reasons", [])
 
-        # structurally invalid volume: not a multiple of volume_step
-        err = call(
-            client,
-            "trade_send_pending_order",
-            {"symbol": SYMBOL, "order_type": "BUY_LIMIT", "volume": 0.011, "price": round(ask - 2.5, 2)},
-            expect_ok=False,
+        # structurally invalid volume: not a multiple of volume_step (422)
+        resp = client.post(
+            "/api/v1/trade_send_pending_order",
+            json={"symbol": SYMBOL, "order_type": "BUY_LIMIT", "volume": 0.011, "price": round(ask - 2.5, 2)},
         )
+        assert resp.status_code == 422
+        err = resp.json()["error"]
         assert err["code"] == "VALIDATION_ERROR"
         assert "volume_not_multiple_of_step" in (err["details"] or {}).get("reasons", [])
 
@@ -116,9 +116,13 @@ def test_68_trade_close_partial_position(client):
         positions = call(client, "get_trading_open_positions", {"symbol": SYMBOL})["positions"]
         ticket = positions[-1]["ticket"]
 
-        # validation: partial volume must be smaller than position volume
-        err = call(client, "trade_close_partial_position", {"ticket": ticket, "volume": 0.02}, expect_ok=False)
-        assert err["code"] == "VALIDATION_ERROR"
+        # validation: partial volume must be smaller than position volume (422)
+        resp = client.post(
+            "/api/v1/trade_close_partial_position", json={"ticket": ticket, "volume": 0.02}
+        )
+        assert resp.status_code == 422
+        body = resp.json()
+        assert body["error"]["code"] == "VALIDATION_ERROR"
 
         result = call(client, "trade_close_partial_position", {"ticket": ticket, "volume": 0.01})
         assert result["status"] == "done" and result["retcode"] == 10009

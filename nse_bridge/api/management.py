@@ -129,9 +129,12 @@ class CheckResult(BaseModel):
 
 
 AUTOTRADING_HINT = (
-    "Enable the 'Algo Trading' button in the MT5 toolbar (shortcut Ctrl+E) so it turns green. "
-    "Also check Tools → Options → Expert Advisors → 'Allow algorithmic trading'. "
-    "No API can toggle this — it is a terminal security control."
+    "Three switches must all be right (no API can toggle them — terminal security controls): "
+    "1) the 'Algo Trading' toolbar button must be GREEN (Ctrl+E); "
+    "2) Tools → Options → Experts → 'Allow algorithmic trading' checked; "
+    "3) THE HIDDEN KILLER: in the same tab, 'Disable algorithmic trading via external "
+    "Python API' must be UNCHECKED — when it is checked, the toolbar shows green but every "
+    "Python-API order is rejected with retcode 10027 'AutoTrading disabled by client'."
 )
 
 
