@@ -372,6 +372,17 @@ if __name__ == "__main__":
 '''
 
 
+# The template is a multi-line string literal, so its line endings are
+# the source file's line endings. On a CRLF checkout (Windows CI) the
+# literal embeds \r\n; a text-mode write then translates each \n to
+# \r\n (\r\n -> \r\r\n) and a universal-newlines read turns \r\r\n
+# into \n\n — so the staged script no longer contains the template and
+# test_apply_script_replaces_dummy_target fails on Windows only.
+# Normalize once so the template is byte-identical on every platform.
+# (The template contains no intentional \r characters.)
+APPLY_SCRIPT_TEMPLATE = APPLY_SCRIPT_TEMPLATE.replace("\r\n", "\n")
+
+
 def _resolve_python_executable() -> str | None:
     """Interpreter for running the staged apply script.
 
@@ -729,7 +740,10 @@ class Updater:
         """
         self.staging_dir.mkdir(parents=True, exist_ok=True)
         script = self.staging_dir / "apply_update.py"
-        script.write_text(APPLY_SCRIPT_TEMPLATE, encoding="utf-8")
+        # newline="": write the template byte-exact. The default text-mode
+        # translation would turn the template's \n into \r\n on Windows,
+        # so the staged file would not round-trip to the template.
+        script.write_text(APPLY_SCRIPT_TEMPLATE, encoding="utf-8", newline="")
         return script
 
     def launch_restart_installer(self) -> dict[str, Any]:
