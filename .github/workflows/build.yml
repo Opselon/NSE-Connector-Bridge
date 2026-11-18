@@ -57,7 +57,14 @@ jobs:
         run: ruff format --check .
 
       - name: Static analysis (mypy)
-        run: python -m mypy nse_bridge
+        # The --platform win32 pass type-checks Windows-only branches
+        # (e.g. DevFallbackSecretStore refusing Windows) that Linux
+        # mypy treats as unreachable: without it a Windows-only type
+        # error passes test-linux and fails build-windows (seen at
+        # 1d1d213/a95ca31: "Cannot determine type of _path").
+        run: |
+          python -m mypy nse_bridge
+          python -m mypy nse_bridge --platform win32
 
       - name: Security checks (bandit + pip-audit)
         # Bandit skips (Low severity, reviewed individually):

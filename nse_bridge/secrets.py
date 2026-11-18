@@ -251,6 +251,11 @@ class DevFallbackSecretStore(SecretStore):
     loudly instead of silently downgrading to plaintext.
     """
 
+    # Declared here (not only assigned in __init__): __init__ raises on
+    # win32 before the assignment, so under --platform win32 mypy
+    # considers the assignment unreachable and cannot infer the type.
+    _path: Path
+
     def __init__(self, data_dir: Path) -> None:
         if sys.platform == "win32":
             raise SecretStoreError(
