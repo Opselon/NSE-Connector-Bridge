@@ -6,8 +6,12 @@ These tests cover the `errors` module only — no MT5, no HTTP layer.
 
 from __future__ import annotations
 
+import pytest
+
 from nse_bridge.errors import BridgeError, ErrorCode, not_connected
 from nse_bridge.retcodes import classify_retcode, translate_retcode
+
+pytestmark = pytest.mark.unit
 
 
 def _envelope(err: BridgeError) -> dict:

@@ -8,8 +8,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from nse_bridge.config import BridgeSettings
 from nse_bridge.timeutil import broker_dt, broker_epoch_to_utc, iso, normalize_utc
+
+pytestmark = pytest.mark.unit
 
 
 def test_broker_epoch_to_utc_zero_offset():

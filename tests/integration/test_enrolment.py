@@ -22,6 +22,8 @@ from nse_bridge.server.enrolment import EnrolmentManager
 from nse_bridge.server.rest import RestClient
 from nse_bridge.server.sync import SyncEngine
 
+pytestmark = pytest.mark.mock_integration
+
 
 def _settings(mock_server, **overrides):
     base = {

@@ -1,18 +1,35 @@
+# NSE MT5 Bridge — test, build, release.
+#
+# Jobs:
+#   test-linux    ruff + unit + mock-integration tests (Linux).
+#   build-windows ruff + the SAME unit/mock-integration tests on Windows
+#                 (proves Windows imports work) + PyInstaller exe build.
+#                 The real-MT5 e2e suite is NEVER run here: GitHub-hosted
+#                 runners have no MT5 terminal, and a required-MT5 test
+#                 fails loudly without one (tests/conftest.py). E2E is
+#                 manual, Windows-with-MT5-only (see docs/RELEASE.md).
+#   release       tags only (v*): exe + SHA-256 + release manifest +
+#                 release notes. Stable vs prerelease by tag name:
+#                 v1.2.3 = stable, v1.2.3-rc.1 = prerelease.
+#
+# Known gap (Phase 6): `ruff check .` still reports 15 pre-existing
+# findings in other phases' code (nse_bridge/engine, nse_bridge/mt5,
+# nse_bridge/timeutil, nse_bridge/main.py) — see docs/RELEASE.md.
+# The gate below lints exactly the scope that is clean: tests/ + scripts/.
 name: Build Windows exe
 
 on:
   push:
-    branches: [main]
+    branches: [main, "refactor/**"]
     tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
 
 jobs:
-  # Linux gate: unit tests + lint run FIRST; the Windows build waits on them.
-  # The Linux job installs only the pure-Python / Linux-runnable deps —
-  # MetaTrader5 is Windows-only (see requirements.txt sys_platform marker).
-  test:
+  # Linux gate: lint + unit + mock-integration tests run FIRST; the
+  # Windows build waits on them.
+  test-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,18 +45,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      - name: Lint new unit tests
-        # NOTE: `ruff check .` is not the gate yet — the pre-existing
-        # codebase has 138 ruff findings (tracked for a later phase;
-        # much of it lives in agent/, which Phase 3 deletes). The new
-        # unit-test code must be lint-clean from day one.
-        run: ruff check tests/unit
+      - name: Lint (tests + scripts)
+        run: ruff check tests/ scripts/
 
-      - name: Run unit tests
-        run: python -m pytest tests/unit -q
+      - name: Version files are fresh
+        run: python scripts/write_version_info.py --check
 
-  build:
-    needs: test
+      - name: OpenAPI schema matches the registry
+        run: |
+          python scripts/export_openapi.py /tmp/openapi-check.json
+          diff docs/openapi.json /tmp/openapi-check.json
+
+      - name: Run unit + mock-integration tests
+        run: python -m pytest tests/unit tests/integration -q
+
+      - name: Marker labelling is complete
+        # Covered by tests/unit/test_test_honesty.py inside the suite
+        # above; this explicit marker count makes the split visible.
+        run: |
+          python -m pytest tests/unit -q --collect-only -m unit 2>&1 | tail -1
+          python -m pytest tests/integration -q --collect-only -m mock_integration 2>&1 | tail -1
+
+  build-windows:
+    needs: test-linux
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -55,8 +83,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Lint (tests + scripts)
+        run: ruff check tests/ scripts/
+
+      # Same suites as Linux — proves the Windows imports work
+      # (MetaTrader5 is importable here; the driver import is lazy, so
+      # collection succeeds even without a terminal). The real-MT5 e2e
+      # suite is deliberately NOT run: no MT5 terminal on this runner.
+      - name: Run unit + mock-integration tests on Windows
+        run: python -m pytest tests/unit tests/integration -q
+
       - name: Build single-file exe
         run: pyinstaller bridge.spec --noconfirm --clean
+
+      - name: Smoke-check the frozen exe
+        # --help exits before any server/GUI starts; proves the frozen
+        # entry point (incl. the --diagnostic flag) parses.
+        run: dist/NSE-MT5-Bridge.exe --help
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -65,8 +108,44 @@ jobs:
           path: dist/NSE-MT5-Bridge.exe
           if-no-files-found: error
 
-      - name: Attach exe to release
-        if: startsWith(github.ref, 'refs/tags/v')
+  # Release: tags only. The exe is checksummed + manifested here, and
+  # all three files (exe, .sha256, manifest) are attached to the
+  # GitHub release. No release is ever cut from an untested build:
+  # this job needs build-windows, which needs test-linux.
+  release:
+    needs: build-windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Download exe artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: NSE-MT5-Bridge-windows
+          path: dist
+
+      - name: Checksum + release manifest
+        run: |
+          python scripts/write_release_manifest.py dist/NSE-MT5-Bridge.exe --tag ${{ github.ref_name }}
+          type dist/NSE-MT5-Bridge.exe.sha256
+          type dist/release-manifest.json
+
+      - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/NSE-MT5-Bridge.exe
+          files: |
+            dist/NSE-MT5-Bridge.exe
+            dist/NSE-MT5-Bridge.exe.sha256
+            dist/release-manifest.json
+          # v1.2.3-rc.1 (or any tag containing '-') is a prerelease;
+          # v1.2.3 is stable. The two are never mixed in one release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true

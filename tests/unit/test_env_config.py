@@ -17,6 +17,8 @@ from nse_bridge.config import (
     validate_server_url,
 )
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture(autouse=True)
 def _no_bridge_env(monkeypatch):

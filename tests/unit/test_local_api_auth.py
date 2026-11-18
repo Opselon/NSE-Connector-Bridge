@@ -18,6 +18,8 @@ from nse_bridge.config import BridgeSettings
 from nse_bridge.engine.common import BridgeContext
 from nse_bridge.mt5.driver import Mt5Driver
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture(autouse=True)
 def _no_bridge_env(monkeypatch):

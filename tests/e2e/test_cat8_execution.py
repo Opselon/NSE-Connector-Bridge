@@ -10,6 +10,8 @@ from starlette.testclient import TestClient
 
 from tests.conftest import call
 
+pytestmark = pytest.mark.real_mt5
+
 SYMBOL = "XAUUSD"
 
 
@@ -70,7 +72,7 @@ def test_65_66_buy_sell_orders(client):
 def test_67_trade_send_pending_order_and_validation(client):
     try:
         tick = call(client, "get_market_tick", {"symbol": SYMBOL})["tick"]
-        ask, bid = tick["ask"], tick["bid"]
+        ask = tick["ask"]
 
         # valid BUY_LIMIT well below the market
         placed = call(

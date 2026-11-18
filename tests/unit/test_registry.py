@@ -8,8 +8,12 @@ ever sends 3 of them remotely.
 
 from __future__ import annotations
 
+import pytest
+
 import nse_bridge.engine  # noqa: F401  (importing registers all commands)
 from nse_bridge.engine.registry import CATEGORY_ORDER, REGISTRY, all_commands, find
+
+pytestmark = pytest.mark.unit
 
 
 def test_registry_has_exactly_90_commands():

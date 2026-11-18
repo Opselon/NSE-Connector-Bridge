@@ -17,6 +17,8 @@ import pytest
 
 from nse_bridge.config import BridgeSettings
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture(autouse=True)
 def _no_bridge_env(monkeypatch):

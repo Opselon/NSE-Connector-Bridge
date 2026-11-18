@@ -29,6 +29,8 @@ from nse_bridge.server.chart import ChartService
 from nse_bridge.server.rest import RestClient
 from nse_bridge.server.sync import SyncEngine
 
+pytestmark = pytest.mark.mock_integration
+
 
 def _settings(mock_server, tmp_path, **overrides):
     base = {

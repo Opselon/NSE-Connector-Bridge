@@ -13,6 +13,8 @@ import pytest
 
 from nse_bridge.config import is_loopback_host, validate_bind_host
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.2", "127.1.2.3", "::1", "localhost"])
 def test_loopback_hosts_allowed_without_flag(host):

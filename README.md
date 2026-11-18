@@ -1,145 +1,201 @@
 # NSE MT5 Bridge
 
-**Secure client-side bridge between the user's MetaTrader 5 terminal and the NSE Platform server.**
-One endpoint per command (90 commands), full Swagger docs, real-time WebSocket channel to your server,
-client GUI with connection checks & settings — packaged as a **single-file Windows `.exe`**.
+**Secure, reliable, persistent communication infrastructure between the
+user's MetaTrader 5 terminal and the NSE Platform server.** The Bridge is
+the local communication gateway and execution agent; the server owns all
+intelligence, orchestration, and decisions. This is infrastructure, not a
+trading product: there is no local AI, no autonomous trading, no backtest,
+and no indicator/risk engine in the client.
 
-📖 **API Reference (hosted Swagger): https://opselon.github.io/NSE-Connector-Bridge/**
+- **Local capability:** 90 commands over a loopback REST API (see
+  [docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md)).
+- **Server channel:** exactly 3 operations in CONTRACT v1
+  (`close_position`, `modify_sl_tp`, `modify_pending` — the last
+  capability-gated) — see [docs/API_PROTOCOL.md](docs/API_PROTOCOL.md).
+  The full 90-command registry stays available **locally**; the server
+  channel enforces the 3-op allowlist at the boundary. Never the reverse.
+- **Packaged as a single-file Windows `.exe`** (x64), built by CI.
+
+> Contract source of truth: `NSE-CONNECTOR-CONTRACT.md` (CONTRACT v1,
+> NSE-Platform, merged via PR #102). Where this repo and the contract
+> disagree, the contract wins. Platform-side gaps are tracked in
+> [docs/PLATFORM-GAPS.md](docs/PLATFORM-GAPS.md).
 
 ```
 ┌──────────────────────────── Client PC ────────────────────────────┐
 │  MetaTrader 5 terminal64.exe                                      │
 │      ▲ official MetaTrader5 C++ IPC driver (serialized worker)    │
-│  NSE-MT5-Bridge.exe (single file)                                 │
+│  NSE-MT5-Bridge.exe (single file, console=False)                  │
 │   ├─ FastAPI 127.0.0.1:8788 — POST /api/v1/{command} + /docs      │
-│   ├─ /ws/ui            — live dashboard feed (ticks, account)     │
+│   ├─ /ui               — Connector Control Center (6 screens)     │
+│   ├─ /ws/ui            — live GUI feed (ticks, account)           │
 │   ├─ outbound WSS      — NSE server channel (no inbound ports)    │
-│   ├─ /ui               — client GUI (checks, settings, live data) │
-│   └─ logs/bridge.log + bridge.jsonl (structured)                  │
+│   └─ logs/bridge.log + bridge.jsonl (structured, redacted)        │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-- **All broker calls run on a dedicated worker thread** (the MT5 IPC channel is
-  process-global and not thread-safe) — the async API never blocks the event loop.
-- **Trade safety ported from the production adapter:** official retcode map
-  (10004–10031), `retcode 0` = IPC failure → `TRADE_UNVERIFIED` (never blind-retry),
-  ambiguous-fill recovery, close idempotency, filling-mode resolution from the
-  broker bitmask, stops/freeze-level pre-validation, ownership magic guard.
-- **Security:** localhost-only bind, optional `X-API-Key` gate, outbound-only
-  authenticated WebSocket to the platform (Bearer token = API key from the site),
-  registry-enforced command allowlist on the channel.
+- **All broker calls run on a dedicated worker thread** (the MT5 IPC
+  channel is process-global and not thread-safe) — the async API never
+  blocks the event loop.
+- **Execution safety (kept):** official retcode map (10004–10031),
+  `retcode 0` = IPC failure → `TRADE_UNVERIFIED` (never blind-retry),
+  ambiguous-fill recovery + MT5-state reconciliation, close idempotency,
+  filling-mode resolution from the broker bitmask, stops/freeze-level
+  pre-validation. A lost execution response ends in `UNKNOWN` first and
+  is reconciled against live MT5 state before any retry.
+- **Security:** loopback-only bind by default, **mandatory** `X-API-Key`
+  gate (auto-generated on first run, stored in the OS secret store),
+  secrets in Windows Credential Manager / DPAPI — never plaintext
+  `config.json`, never in logs; outbound-only authenticated WSS to the
+  Platform (Bearer API key + `X-NSE-Device-Id` headers, no `hello`
+  frame); TLS mandatory (`wss://`).
 
-## GUI (client)
+## Control Center GUI (6 screens)
 
-Sidebar dashboard with: **Overview** (live cards + tickers with sparklines),
-**Positions**, **Pending Orders**, **Logs**, **Connection Checks** (pre-flight
-checklist: driver, terminal link, **Algo Trading button**, permissions, market
-data, server reachability — with actionable hints), and **Settings** (paste the
-API key generated on the NSE Platform site + server URL, magic, symbols, log
-level — saved locally and applied immediately).
+**Connection** (Platform auth, device registration, WS status, last
+heartbeat, sync status, reconnect) · **MetaTrader** (detected terminals,
+path, version, running status, selected terminal, IPC status, account
+status; discover/select/open/connect/disconnect/retry) · **Account &
+Subscription** (READ-ONLY, server-driven) · **Diagnostics** (bridge/MT5/
+network/WS health, last errors, report, copy) · **Updates & Releases**
+(installed vs latest from `releases/latest`, notes, progress, status,
+restart requirement) · **Settings** (credentials entry, server URL, log
+level, GUI mode — secrets masked, stored via Credential Manager).
+
+No trading dashboard, no positions/orders screens, no AI screens, no
+Backtest screen. Guided MT5 diagnostics use structured codes
+(`MT5_NOT_FOUND`, `MT5_NOT_RUNNING`, `MT5_IPC_FAILED`,
+`MT5_ACCOUNT_NOT_READY`, `MT5_UNSUPPORTED_VERSION`) with retry +
+copy-diagnostics — no raw stack traces for ordinary users.
 
 ## Quick start (development)
 
 ```bash
-py -3.13 -m venv .venv          # any clean Python 3.12/3.13
-.venv/Scripts/python -m pip install MetaTrader5 numpy fastapi "uvicorn[standard]" \
-    pydantic-settings websockets loguru pywebview
+py -3.13 -m venv .venv          # Python 3.12/3.13
+.venv/Scripts/python -m pip install -r requirements-dev.txt
 .venv/Scripts/python -m nse_bridge            # bridge + GUI on http://127.0.0.1:8788
-.venv/Scripts/python scripts/mock_server.py   # reference NSE server on :9099
+.venv/Scripts/python scripts/mock_server.py   # CONTRACT-v1 mock NSE server (WS :9099, REST :9098)
 .venv/Scripts/python scripts/export_openapi.py docs/openapi.json   # re-export schema
 ```
 
-- Dashboard: http://127.0.0.1:8788/ui
+- Control Center: http://127.0.0.1:8788/ui
 - Swagger: http://127.0.0.1:8788/docs
 - OpenAPI schema: http://127.0.0.1:8788/openapi.json
+  (also committed as `docs/openapi.json`, re-exported from the registry)
 
 ## Single-file .exe
 
 ```bash
 .venv/Scripts/python -m PyInstaller bridge.spec --noconfirm --clean
 # → dist/NSE-MT5-Bridge.exe  (CI also builds it on every push — see Actions)
-dist\NSE-MT5-Bridge.exe            # GUI (native window, browser fallback)
-dist\NSE-MT5-Bridge.exe --gui none # headless service mode
+dist\NSE-MT5-Bridge.exe                  # GUI (native window, browser fallback)
+dist\NSE-MT5-Bridge.exe --gui none       # headless service mode
+dist\NSE-MT5-Bridge.exe --diagnostic     # diagnostic console mode (DEBUG telemetry + logs)
 ```
+
+Releases are cut from tags only (`v1.2.3` stable, `v1.2.3-rc.1`
+prerelease) and ship the exe + `.sha256` + `release-manifest.json`.
+See [docs/BUILD.md](docs/BUILD.md) and [docs/RELEASE.md](docs/RELEASE.md).
 
 ## Configuration
 
 `%LOCALAPPDATA%\NSEBridge\config.json` (dev: `~/.nse-bridge/config.json`),
-env overrides with `NSE_BRIDGE_` prefix, or edit live via the GUI Settings tab /
-`PUT /api/v1/settings`. Key fields:
+env overrides with `NSE_BRIDGE_` prefix, or live via the GUI Settings
+screen / `PUT /api/v1/settings`. Key fields:
 
 | Field | Default | Meaning |
 |---|---|---|
 | `port` | 8788 | local API port |
-| `local_api_key` | empty | optional `X-API-Key` gate for /api/v1 |
-| `server_url` | empty | `wss://…` NSE server channel URL (empty = disabled) |
-| `server_token` | empty | **API key issued on the NSE Platform site** (Bearer) |
+| `server_token` | (secret store) | **API key issued on the NSE Platform site** (Bearer) — never in config.json |
+| `local_api_key` | (secret store) | mandatory `X-API-Key` for /api/v1, auto-generated on first run |
+| `server_base_url` | `https://bridge.nexusverse.space` | REST base; WS is derived (`wss://…/api/v1/connector/ws`) |
+| `server_url` | empty | explicit WS URL override (empty = derived from base; must be `wss://`) |
 | `device_id` | auto | persistent bridge identity |
-| `magic` | 888101 | trading magic stamped on bridge orders |
-| `bot_symbol` | XAUUSD | primary chart symbol |
+| `magic` | none | NO default magic — stamped only when supplied per command or set explicitly |
+| `bot_symbol` | (empty) | NO default symbol — callers pass it per command |
 | `strict_magic_guard` | false | refuse to touch positions/orders with a foreign magic |
+| `diagnostic_mode` | false | DEBUG telemetry events (`NSE_BRIDGE_DIAGNOSTIC_MODE=1`, or `--diagnostic`) |
+| `update_public_key` | (none) | base64 Ed25519 release-signing public key — **not yet provisioned**; without it the updater can check but never install |
 | `broker_utc_offset_minutes` | 0 | broker server UTC offset for history windows |
 
-## Command surface (90)
+There is deliberately **no `mt5_password`** field: the user signs in
+through MT5 itself; the Bridge never asks for or stores the password.
+A terminal with no logged-in account surfaces `MT5_ACCOUNT_NOT_READY`
+with guidance instead.
 
-| # | Category | Commands |
-|---|---|---|
-| 1–9 | connection | bridge status, MT5 connect/disconnect/reconnect, terminal info/version, server info, MCP info |
-| 10–18 | account | full account, balance, equity, margin, free margin, margin level, profit, currency, permissions |
-| 19–27 | symbols | list, info, price, tick size, point, digits, spread, sessions, constraints |
-| 28–36 | market | tick, bid, ask, last price, depth (DOM), spread history, tick volume, watchlist, tick subscribe |
-| 37–45 | charts | candle history (pos/range), tick history, timeframes, OHLCV, MTF history, active context |
-| 46–54 | positions | open positions, info, profit, volume, SL/TP, risk, modify SL/TP, close single, close all (magic-filterable) |
-| 55–63 | orders | pending orders, order info/status, history orders, history positions (deals-reconstructed), deals, cancel, modify pending, execution details |
-| 64–72 | trading | market order, buy, sell, pending order (pre-validated), partial close, reverse, set SL, set TP, calc result |
-| 73–81 | risk | position size, trade risk, SL/TP price, margin, margin level after trade, pip value, PnL, validate request |
-| 82–90 | diagnostics | last error, logs, health, latency, connection metrics, execution metrics, capabilities, MCP tools, diagnostic report |
+## Command surface
 
-Plus bridge-management endpoints: `GET/PUT /api/v1/settings`,
-`POST /api/v1/run_connection_checks`, `POST /api/v1/server_channel/restart`,
-`GET /api/v1/commands`, `GET /health`.
+Local capability (90 commands, `POST /api/v1/{name}`) vs server channel
+(3 ops, CONTRACT v1 §6.1) — listed separately, never mixed, in
+[docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md). Every local
+response: `{"ok": true, "data": …}` or
+`{"ok": false, "error": {code, message, retcode?, details?}}`. Broker
+rejections carry the official MT5 retcode (10004–10031) + label.
 
-Every response: `{"ok": true, "data": …}` or `{"ok": false, "error": {code, message, retcode?, retcode_label?, details?}}`.
-Broker rejections carry the official MT5 retcode (10004–10031) + label.
+Bridge-management endpoints (same `/api/v1` prefix, same `X-API-Key`
+auth): `GET/PUT /settings`, `POST /run_connection_checks`,
+`POST /server_channel/restart`, `GET /account/subscription` (read-only),
+`POST /account/validate-key`, `GET /updates/latest|status`,
+`POST /updates/check|download`, `GET /mt5/terminals`,
+`POST /mt5/terminals/open`, `GET /diagnostics/summary`,
+`GET /health` (no auth — plain liveness probe).
 
-## WebSocket channel protocol (bridge ⇄ NSE server)
+## Server channel protocol (bridge ⇄ NSE Platform, CONTRACT v1 §5/§6)
 
-Outbound `wss`, Bearer token (= site API key) in the handshake.
+Outbound `wss://bridge.nexusverse.space/api/v1/connector/ws`, auth in the
+upgrade headers (`Authorization: Bearer <api_key>` +
+`X-NSE-Device-Id`). **No `hello` frame.** Client heartbeat every 15 s;
+session dead after 45 s. Server → client: `command` (§6.2 envelope),
+`sync_request`, `ack`, `heartbeat`, `chart.*`. Client → server: only
+`heartbeat`, `action.result` (§6.5), `chart.data`, `chart.tick`.
+Snapshots go over REST `POST /api/v1/connector/sync/batch` (§3.3) —
+the ONLY sync channel. Reconnect: fresh session, 500 ms doubling
+backoff → 30 s + jitter; the server re-sends only `pending` commands.
 
-| Direction | Message |
-|---|---|
-| bridge → server | `hello {device_id, bridge_version, protocol_version, mt5{state, connected, login}, capabilities}` |
-| server → bridge | `command {id, command, params}` — registry-enforced allowlist |
-| bridge → server | `command_result {id, ok, data\|error, latency_ms}` |
-| server → bridge | `subscribe {symbol, interval_ms}` / `unsubscribe {symbol}` |
-| server → bridge | `request_full_state` → bridge replies `full_state` (account + positions + orders + metrics) |
-| bridge → server | `tick {symbol, bid, ask, …}` · `account_update` (1s) · `positions_update` (2s) · `orders_update` (3s) · `status_update` (10s) · `trade_event` (on every dispatch) · `ping` heartbeat |
+`scripts/mock_server.py` speaks CONTRACT v1 and is the integration-test
+server. Full protocol reference: [docs/API_PROTOCOL.md](docs/API_PROTOCOL.md).
 
-`scripts/mock_server.py` is the working reference implementation.
+## Tests
 
-## Tests (end-to-end, live terminal)
+Every test is labelled `unit` / `mock_integration` / `real_mt5` /
+`manual` (enforced by `tests/unit/test_test_honesty.py`).
 
 ```bash
-.venv/Scripts/python -m pytest tests/e2e/ -v          # read-only + calculations + upgrades
-.venv/Scripts/python -m pytest tests/e2e/ -v -m trade # real-trade suites (0.01 lots, demo, auto-cleanup)
+python -m pytest tests/unit tests/integration -q   # Linux-runnable, no MT5 (CI gate)
+python -m pytest tests/e2e --collect-only -q       # 104 tests collect on Linux; they RUN only on Windows with a live MT5 terminal
 ```
 
-Trade suites (commands 46–72) execute real orders on the connected account and
-require **Algo Trading ON** in the terminal (`Ctrl+E` until the toolbar button is
-green — the Options checkbox alone is not enough). Positions/orders opened by
-tests are cleaned up automatically.
+A required-MT5 test **fails loudly** when no terminal is available —
+never silently skips or passes (`tests/conftest.py`). The e2e suites
+execute real orders on the connected account (0.01 lots, Demo only,
+auto-cleanup) and require Algo Trading ON in the terminal. They are
+manual, Windows-with-MT5-only, and are never run in CI (GitHub-hosted
+runners have no MT5 terminal). See [docs/RELEASE.md](docs/RELEASE.md)
+for the honest verification status.
 
-> ⚠ `trade_close_all_positions` supports `{"magic": …}` filtering — pass the
-> bridge magic so the user's manual positions are never touched (see
-> `strict_magic_guard`).
+## Documentation
+
+| Doc | Contents |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, data flow, state machines |
+| [docs/API_PROTOCOL.md](docs/API_PROTOCOL.md) | REST + WS contract (§3/§5/§6/§17.1), frames, retry policy |
+| [docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md) | all 90 local commands + the 3 server ops, separately |
+| [docs/SECURITY.md](docs/SECURITY.md) | secret store, auth, redaction, threat model |
+| [docs/BUILD.md](docs/BUILD.md) | local build, PyInstaller spec, versioning |
+| [docs/RELEASE.md](docs/RELEASE.md) | release process, verification status, known gaps |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | diagnostics codes, common failures |
+| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Windows/x64, Python, MT5 builds, ARM64 |
+| [docs/PLATFORM-GAPS.md](docs/PLATFORM-GAPS.md) | what must change on the Platform side |
+| [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) | verdict per acceptance criterion (§15) |
+| [docs/openapi.json](docs/openapi.json) | OpenAPI schema, re-exported from the registry |
 
 ## Known environment notes
 
 - **The hidden AutoTrading killer (MT5 build 6306+)**: *Tools → Options → Experts →*
   ***"Disable algorithmic trading via external Python API"*** *— when this is CHECKED the*
   *toolbar button looks green but every Python-API order is rejected with retcode 10027*
-  *"AutoTrading disabled by client".* Uncheck it. The GUI's *Connection Checks* tab
-  detects the failure and prints this exact fix. (Found by fixing `Api=1` → `Api=0`
+  *"AutoTrading disabled by client".* Uncheck it. The GUI's diagnostics
+  surface this failure with the fix. (Found by fixing `Api=1` → `Api=0`
   in `common.ini [Experts]` + terminal restart.)
 - **Broker server time offset is auto-detected at connect** (from the freshest live
   tick epoch vs local UTC): history windows (`history_deals_get`, `copy_ticks_range`,

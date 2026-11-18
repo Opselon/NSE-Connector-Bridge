@@ -24,6 +24,8 @@ from nse_bridge.tasks.registry import TaskKindRegistry
 from nse_bridge.tasks.validation import TaskValidator
 from nse_bridge.tasks.worker import TaskWorker
 
+pytestmark = pytest.mark.unit
+
 NOW = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
 DEVICE = "dev-1"
 

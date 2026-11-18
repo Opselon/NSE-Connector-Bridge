@@ -12,6 +12,8 @@ from starlette.testclient import TestClient
 
 from tests.conftest import call
 
+pytestmark = pytest.mark.real_mt5
+
 SYMBOL = "XAUUSD"
 
 

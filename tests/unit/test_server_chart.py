@@ -22,6 +22,8 @@ from nse_bridge.server.chart import (
 )
 from nse_bridge.server.uuid7 import new_uuid7_str
 
+pytestmark = pytest.mark.unit
+
 
 def _candles(n=3):
     return [

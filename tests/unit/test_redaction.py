@@ -18,6 +18,8 @@ from nse_bridge.logging_setup import (
     sanitize_payload,
 )
 
+pytestmark = pytest.mark.unit
+
 FAKE_TOKEN = "tok-fake-1234567890abcdef"
 FAKE_KEY = "key-fake-abcdef1234567890"
 

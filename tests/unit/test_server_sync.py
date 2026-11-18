@@ -24,6 +24,8 @@ from nse_bridge.server.sync import (
     parse_broker_time,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class FakeRest:
     """Records batches; optionally fails the next send."""

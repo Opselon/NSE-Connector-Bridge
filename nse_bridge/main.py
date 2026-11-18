@@ -21,7 +21,9 @@ from .mt5.driver import Mt5Driver
 from .secrets import ensure_local_api_key
 
 
-def main(argv=None) -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """CLI parser (Phase 6: factored out so the --diagnostic flag is
+    unit-testable without booting the bridge)."""
     parser = argparse.ArgumentParser(prog="nse-bridge", description="NSE MT5 Bridge")
     parser.add_argument("--host", default=None, help="bind host (default 127.0.0.1)")
     parser.add_argument("--port", type=int, default=None, help="bind port (default 8788)")
@@ -30,9 +32,46 @@ def main(argv=None) -> None:
         help="GUI mode (default: auto — native window, browser fallback)",
     )
     parser.add_argument("--no-connect", action="store_true", help="skip auto MT5 connect at boot")
-    args = parser.parse_args(argv)
+    parser.add_argument(
+        "--diagnostic", action="store_true",
+        help="diagnostic console mode: enable DEBUG telemetry events "
+        "(ARCHITECTURE-CONTRACT §8) and DEBUG logging; on a frozen "
+        "Windows build (console=False exe) also allocates a console "
+        "window so the logs are visible",
+    )
+    return parser
+
+
+def _enable_diagnostic_console() -> None:
+    """Best-effort console for a windowed (console=False) frozen exe.
+
+    On Windows, a PyInstaller windowed exe has no console: AllocConsole
+    gives --diagnostic somewhere to write. Non-Windows and unfrozen
+    runs already have a console, so this is a no-op there. Any failure
+    is swallowed — diagnostic mode itself (telemetry + log level)
+    works with or without the console.
+    """
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.AllocConsole()
+    except Exception:  # noqa: BLE001, S110 — console allocation is best-effort only
+        pass
+
+
+def main(argv=None) -> None:
+    args = build_parser().parse_args(argv)
 
     settings = load_settings()
+    if args.diagnostic:
+        settings.diagnostic_mode = True
+        # INFO is the default level; --diagnostic wants the verbose
+        # logs visible. An explicitly non-INFO level is respected.
+        if settings.log_level == "INFO":
+            settings.log_level = "DEBUG"
+        _enable_diagnostic_console()
     if args.host:
         settings.host = args.host
     if args.port:
@@ -58,6 +97,8 @@ def main(argv=None) -> None:
     driver = Mt5Driver(settings)
     ctx = BridgeContext(settings=settings, driver=driver)
     setup_logging(settings.resolved_log_dir, settings.log_level, extra_sink=ctx.logs.sink)
+    if settings.diagnostic_mode:
+        logger.info("[BOOT] diagnostic mode ON: DEBUG telemetry enabled, log level {}", settings.log_level)
     device_id = ctx.get_or_create_device_id()
     persist_settings(settings)
 

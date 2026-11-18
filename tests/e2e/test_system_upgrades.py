@@ -3,7 +3,11 @@ close-all magic safety filter."""
 
 from __future__ import annotations
 
+import pytest
+
 from tests.conftest import call
+
+pytestmark = pytest.mark.real_mt5
 
 SYMBOL = "XAUUSD"
 

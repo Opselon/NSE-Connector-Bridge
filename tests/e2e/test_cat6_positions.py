@@ -10,6 +10,8 @@ from starlette.testclient import TestClient
 
 from tests.conftest import call
 
+pytestmark = pytest.mark.real_mt5
+
 SYMBOL = "XAUUSD"
 TEST_MAGIC = 888101
 
@@ -39,7 +41,6 @@ def test_47_54_position_lifecycle_with_real_trade(client):
     opened = _open_test_position(client)
     assert opened["retcode"] == 10009
     assert opened["order_ticket"] and opened["order_ticket"] > 0
-    result = opened["deal_ticket"] or opened["order_ticket"]
     positions = call(client, "get_trading_open_positions", {"symbol": SYMBOL})["positions"]
     assert positions, "test position did not appear"
     ticket = positions[-1]["ticket"]

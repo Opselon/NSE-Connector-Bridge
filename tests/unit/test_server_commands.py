@@ -30,6 +30,8 @@ from nse_bridge.server.queue import BoundedPendingQueue
 from nse_bridge.server.rest import Entitlements
 from nse_bridge.server.uuid7 import new_uuid7_str
 
+pytestmark = pytest.mark.unit
+
 NOW = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
 DEVICE = "dev-1"
 ACCOUNT = "12345678901"

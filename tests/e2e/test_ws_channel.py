@@ -15,6 +15,8 @@ import websockets
 from nse_bridge.realtime.bus import EventBus, start_streaming, stop_streaming
 from nse_bridge.realtime.channel import ServerChannel
 
+pytestmark = pytest.mark.real_mt5
+
 
 @pytest.mark.asyncio
 async def test_server_channel_full_roundtrip(ctx, client):

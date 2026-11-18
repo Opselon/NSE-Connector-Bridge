@@ -22,6 +22,8 @@ from nse_bridge.realtime.channel import (
     backoff_with_jitter,
 )
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.unit
 def test_backoff_delay_doubles_from_500ms_and_caps_at_30s():

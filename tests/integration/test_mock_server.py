@@ -25,6 +25,8 @@ from nse_bridge.server.rest import RestClient
 from nse_bridge.server.sync import SyncEngine
 from nse_bridge.server.uuid7 import new_uuid7_str
 
+pytestmark = pytest.mark.mock_integration
+
 
 def _settings(mock_server, **overrides):
     base = {

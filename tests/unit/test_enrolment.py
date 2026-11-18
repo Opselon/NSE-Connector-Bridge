@@ -20,6 +20,8 @@ from nse_bridge.server.enrolment import EnrolmentManager, enrolment_backoff_dela
 from nse_bridge.server.errors import ServerErrorCode
 from nse_bridge.server.rest import RestClient
 
+pytestmark = pytest.mark.unit
+
 
 def _settings(**overrides) -> BridgeSettings:
     base = {

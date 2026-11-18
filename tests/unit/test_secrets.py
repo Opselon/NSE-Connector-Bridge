@@ -23,6 +23,8 @@ from nse_bridge.secrets import (
     migrate_plaintext_secrets,
 )
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture(autouse=True)
 def _no_bridge_env(monkeypatch):

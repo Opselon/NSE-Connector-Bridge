@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tests.conftest import call
+
+pytestmark = pytest.mark.real_mt5
 
 
 def test_01_connect_mt5(client):

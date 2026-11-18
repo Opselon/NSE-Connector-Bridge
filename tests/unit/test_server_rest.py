@@ -12,6 +12,8 @@ from nse_bridge.config import BridgeSettings
 from nse_bridge.server.errors import ServerError, ServerErrorCode
 from nse_bridge.server.rest import RestClient
 
+pytestmark = pytest.mark.unit
+
 
 def _settings(**overrides) -> BridgeSettings:
     base = {
