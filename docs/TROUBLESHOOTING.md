@@ -67,6 +67,24 @@ before running the e2e trade suites.
 | `SIGNATURE_MISSING` / `SHA256_MISSING` / `SHA256_MISMATCH` / `SIGNATURE_INVALID` | The release metadata or bytes are not authentic. Nothing is staged. Report it; do not install manually. |
 | `MIN_VERSION_NOT_SATISFIED` | The release needs a newer connector than the one installed. Update the connector first (or wait for a compatible release). |
 | `not_frozen_no_target` on install | A verified update is staged, but this is not a packaged exe run (Linux/dev). Restart install only applies to the frozen Windows exe. |
+| Update download fails (`DOWNLOAD_FAILED`, `NO_DOWNLOAD_URL`) | Nothing was staged, so a retry is safe: run the update check again. If it keeps failing, check the network / server reachability (see §3) — the download is idempotent and a failed attempt never leaves a half-installed update behind. |
+
+## 8. Self-healing scenarios (Diagnostics screen)
+
+The Diagnostics screen lists the last handling outcome of each
+self-healing scenario (`GET /api/v1/diagnostics/summary`). `ok` means
+the fault was detected and handled correctly — not that nothing
+happened. `degraded` / `failed` mean the Bridge stopped rather than
+guessed or faked a recovery.
+
+| Scenario | Meaning | Operator action |
+|---|---|---|
+| `account_disconnect` | Terminal is up but no account is logged in (or the account dropped) | Sign in through the MT5 terminal itself (see `MT5_ACCOUNT_NOT_READY` above). No execution happens while the account is down. |
+| `broker_connection_change` | The terminal re-connected to a different broker server | Check the account/broker on the MetaTrader screen. Nothing executes until a fresh sync confirms the new account; symbol mappings are refreshed, never carried over. If the broker changed unexpectedly, check the terminal's server setting. |
+| `symbol_unavailable` | A symbol a command names is not currently tradable/visible on this broker | The command was rejected, not re-routed to a similarly named symbol. Check the symbol on the Symbols screen (exact broker name, availability); if the broker renamed it, the server must send the exact new name. |
+| `diagnostic_queue_full` | The bounded diagnostic queue (128 events) hit its limit | Oldest events were evicted with a warning (counted, never silent). No action unless it recurs constantly — that means ERROR/WARN events are being produced faster than they can be delivered, and the underlying fault (not the queue) needs fixing. Note: with no diagnostics endpoint yet (D1), queued events age out by TTL; the queue is now durable across restarts (`pending_diagnostics.jsonl` in the data dir), so a restart no longer loses them. |
+| `update_failure` (download) | Update download failed | Retry the update check — safe, nothing staged. |
+| `update_failure` (verification) | Downloaded bytes failed SHA-256 / Ed25519 verification, or no signing key is configured | Nothing staged, nothing installed. Do **not** retry the same download or install manually. Report the code (`SHA256_MISMATCH`, `SIGNATURE_INVALID`, `NO_PUBLIC_KEY`, …); a new release — or the published signing key — is required. |
 
 ## 6. Logs and diagnostics
 

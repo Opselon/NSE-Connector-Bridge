@@ -34,6 +34,11 @@ existing truthful channels only (``action.result`` errors,
 heartbeat/liveness, manifest updates, sync/batch acks), and the
 local pipeline keeps ERROR/WARN events in a bounded queue with
 retry/backoff/dedup/limits/expiry for the day an endpoint exists.
+The queue's durable backing is
+:mod:`nse_bridge.reliability.diagnostic_store` (bounded JSONL, same
+pattern as the result store): queued events survive a Bridge restart
+and keep draining by TTL until an endpoint exists. Persistence
+preserves the events; it does not invent a delivery channel.
 
 The adapter for that future endpoint is :class:`DiagnosticsSink`:
 a protocol with a single method, ``send(event) -> bool``. The
@@ -315,6 +320,23 @@ class DiagnosticQueue:
     def snapshot(self) -> list[TelemetryEvent]:
         with self._lock:
             return [entry.event for entry in self._items]
+
+    def records(self) -> list[dict[str, Any]]:
+        """Queue contents as persistable records (event + dedup key +
+        attempt count), for the durable backing
+        (:mod:`nse_bridge.reliability.diagnostic_store`). The
+        ``next_attempt_at`` retry deadline is monotonic-clock based and
+        is deliberately NOT persisted — a reloaded entry is due
+        immediately and retries from its preserved attempt count."""
+        with self._lock:
+            return [
+                {
+                    "dedup_key": entry.dedup_key,
+                    "attempts": entry.attempts,
+                    "event": entry.event.to_dict(),
+                }
+                for entry in self._items
+            ]
 
     def stats(self) -> dict[str, Any]:
         with self._lock:
