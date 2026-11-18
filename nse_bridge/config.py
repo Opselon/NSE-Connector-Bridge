@@ -65,6 +65,12 @@ class BridgeSettings(BaseSettings):
     # --- streaming ------------------------------------------------------
     stream_account_interval_ms: int = 1000
 
+    # --- AI Agent ---------------------------------------------------------
+    server_rest_base: str = ""  # https://… platform REST base (decision audit)
+    agent_llm_base_url: str = ""  # OpenAI-compatible /v1/chat/completions base
+    agent_llm_api_key: str = ""  # empty = math-only mode (no LLM review)
+    agent_llm_model: str = "gpt-4o-mini"
+
     # --- logging --------------------------------------------------------
     log_level: str = "INFO"
     log_dir: str = ""  # default <data_dir>/logs
@@ -120,6 +126,7 @@ def persist_settings(settings: BridgeSettings) -> None:
         "device_id",
         "server_url",
         "server_token",
+        "server_rest_base",
         "host",
         "port",
         "local_api_key",
@@ -131,6 +138,9 @@ def persist_settings(settings: BridgeSettings) -> None:
         "log_level",
         "gui_mode",
         "broker_utc_offset_minutes",
+        "agent_llm_base_url",
+        "agent_llm_api_key",
+        "agent_llm_model",
     ):
         payload[key] = getattr(settings, key)
     settings.config_file.write_text(

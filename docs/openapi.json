@@ -120,6 +120,168 @@
         }
       }
     },
+    "/api/v1/agent/analyze": {
+      "post": {
+        "tags": [
+          "ai-agent"
+        ],
+        "summary": "Run the multi-engine AI Agent analysis",
+        "operationId": "agent_analyze_api_v1_agent_analyze_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AnalyzeRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Agent Analyze Api V1 Agent Analyze Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/status": {
+      "get": {
+        "tags": [
+          "ai-agent"
+        ],
+        "summary": "AI Agent status",
+        "operationId": "agent_status_api_v1_agent_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Agent Status Api V1 Agent Status Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/config": {
+      "put": {
+        "tags": [
+          "ai-agent"
+        ],
+        "summary": "Configure the AI Agent (mode/aggression/LLM/news)",
+        "operationId": "agent_config_api_v1_agent_config_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Agent Config Api V1 Agent Config Put"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/execute": {
+      "post": {
+        "tags": [
+          "ai-agent"
+        ],
+        "summary": "Execute the last approved proposal (mode=auto only)",
+        "operationId": "agent_execute_api_v1_agent_execute_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Agent Execute Api V1 Agent Execute Post"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/coach": {
+      "get": {
+        "tags": [
+          "ai-agent"
+        ],
+        "summary": "COACH verdict for the current session",
+        "operationId": "agent_coach_api_v1_agent_coach_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Agent Coach Api V1 Agent Coach Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/health": {
       "get": {
         "tags": [
@@ -4600,6 +4762,130 @@
   },
   "components": {
     "schemas": {
+      "AgentConfigRequest": {
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode",
+            "description": "one of ('observe', 'advisory', 'auto')"
+          },
+          "aggression": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 100.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Aggression",
+            "description": "0 = sniper, 100 = degen"
+          },
+          "symbol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Symbol"
+          },
+          "llm_base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Base Url",
+            "description": "OpenAI-compatible /v1 base; empty keeps current"
+          },
+          "llm_api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Api Key",
+            "description": "empty/absent keeps the current key"
+          },
+          "llm_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Model"
+          },
+          "news_items": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "News Items",
+            "description": "news items for the sentiment engine: {title, impact, time_utc}"
+          },
+          "auto_execute": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auto Execute",
+            "description": "explicit consent for mode=auto to dispatch orders"
+          }
+        },
+        "type": "object",
+        "title": "AgentConfigRequest"
+      },
+      "AnalyzeRequest": {
+        "properties": {
+          "symbol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Symbol",
+            "description": "default: the configured agent symbol"
+          }
+        },
+        "type": "object",
+        "title": "AnalyzeRequest"
+      },
       "AvailableTimeframesResponse": {
         "properties": {
           "timeframes": {

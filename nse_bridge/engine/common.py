@@ -171,6 +171,7 @@ class BridgeContext:
     subscriptions: SubscriptionManager = field(default_factory=SubscriptionManager)
     trade_metrics: TradeExecMetrics = field(default_factory=TradeExecMetrics)
     bus: Any = None  # EventBus, wired at app startup (loop-bound; set once)
+    agent: Any = None  # AgentService, wired at app startup
     server_channel_state: dict[str, Any] = field(
         default_factory=lambda: {
             "enabled": False, "connected": False, "url": "", "last_connected_at": None,

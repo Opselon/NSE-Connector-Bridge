@@ -40,6 +40,7 @@ from ..realtime.bus import EventBus, start_streaming, stop_streaming
 from ..realtime.channel import ServerChannel
 from ..gui.dashboard import register_dashboard
 from .management import router as management_router
+from .agent_routes import router as agent_router
 
 T = TypeVar("T")
 
@@ -158,7 +159,14 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.ctx = ctx
+    from ..agent.engine import AgentService
+    from ..agent.llm import LlmClient
+
+    ctx.agent = AgentService(ctx)
+    ctx.agent.config.llm = LlmClient.from_config(ctx.settings)
+    ctx.agent.config.symbol = ctx.settings.bot_symbol
     app.include_router(management_router)
+    app.include_router(agent_router)
     register_dashboard(app)
 
     # --- middleware: request id + latency logs + optional API key -------
