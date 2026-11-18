@@ -703,6 +703,27 @@ def test_build_account_model_margin_mode():
     assert model.margin_so_mode == 0  # stop-out mode stays separate
 
 
+def test_build_account_model_trade_mode_uses_account_enum_not_symbol_enum():
+    # Real-MT5 defect 2 (2026-11-18): TRADE_MODE_LABELS is the
+    # ENUM_SYMBOL_TRADE_MODE labelling (0=DISABLED) but was also used
+    # for accounts — the MetaQuotes-Demo account (trade_mode=0) was
+    # labelled DISABLED. ENUM_ACCOUNT_TRADE_MODE says 0=DEMO.
+    demo = build_account_model(_account())
+    assert demo.trade_mode == 0
+    assert demo.trade_mode_label == "DEMO"
+    contest_raw = _account()
+    contest_raw.trade_mode = 1
+    assert build_account_model(contest_raw).trade_mode_label == "CONTEST"
+    real_raw = _account()
+    real_raw.trade_mode = 2
+    assert build_account_model(real_raw).trade_mode_label == "REAL"
+    # The symbol side is a DIFFERENT enum and must not move: a symbol
+    # with trade_mode=0 is still DISABLED (metadata.py, inventory.py).
+    symbol = build_symbol_model(_symbol_row("EURUSD", trade_mode=0), 0)
+    assert symbol.trade_mode == 0
+    assert symbol.trade_mode_label == "DISABLED"
+
+
 def test_trading_permissions_returns_real_margin_mode(ctx):
     from nse_bridge.engine.account import get_trading_permissions
 
