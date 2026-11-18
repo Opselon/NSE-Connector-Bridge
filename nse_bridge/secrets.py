@@ -149,7 +149,7 @@ class DpapiSecretStore(SecretStore):
             ctypes.windll.crypt32  # noqa: B018 — availability probe
         except Exception as exc:
             raise SecretStoreError(f"DPAPI is unavailable: {exc}") from exc
-        self._path = Path(data_dir) / DPAPI_FILENAME
+        self._path: Path = Path(data_dir) / DPAPI_FILENAME
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
     # -- ctypes plumbing (loaded lazily; windll does not exist on Linux) --
@@ -171,13 +171,19 @@ class DpapiSecretStore(SecretStore):
         blob_in = DATA_BLOB(len(data), (ctypes.c_ubyte * len(data)).from_buffer_copy(data))
         blob_out = DATA_BLOB()
         if not crypt32.CryptProtectData(
-            ctypes.byref(blob_in), None, None, None, None, 0x01, ctypes.byref(blob_out)  # CRYPTPROTECT_UI_FORBIDDEN
+            ctypes.byref(blob_in),
+            None,
+            None,
+            None,
+            None,
+            0x01,
+            ctypes.byref(blob_out),  # CRYPTPROTECT_UI_FORBIDDEN
         ):
             raise SecretStoreError("CryptProtectData failed")
         try:
             return bytes(bytearray(blob_out.pbData[: blob_out.cbData]))
         finally:
-            ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+            ctypes.windll.kernel32.LocalFree(blob_out.pbData)  # type: ignore[attr-defined] # Windows-only API
 
     @staticmethod
     def _unprotect(data: bytes) -> bytes:  # pragma: no cover — Windows-only
@@ -191,13 +197,19 @@ class DpapiSecretStore(SecretStore):
         blob_in = DATA_BLOB(len(data), (ctypes.c_ubyte * len(data)).from_buffer_copy(data))
         blob_out = DATA_BLOB()
         if not crypt32.CryptUnprotectData(
-            ctypes.byref(blob_in), None, None, None, None, 0x01, ctypes.byref(blob_out)  # CRYPTPROTECT_UI_FORBIDDEN
+            ctypes.byref(blob_in),
+            None,
+            None,
+            None,
+            None,
+            0x01,
+            ctypes.byref(blob_out),  # CRYPTPROTECT_UI_FORBIDDEN
         ):
             raise SecretStoreError("CryptUnprotectData failed")
         try:
             return bytes(bytearray(blob_out.pbData[: blob_out.cbData]))
         finally:
-            ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+            ctypes.windll.kernel32.LocalFree(blob_out.pbData)  # type: ignore[attr-defined] # Windows-only API
 
     def _read_all(self) -> dict[str, str]:
         if not self._path.is_file():
@@ -294,8 +306,7 @@ def get_secret_store(data_dir: Path, *, allow_dev_fallback: bool = True) -> Secr
             return DpapiSecretStore(data_dir)
         except SecretStoreError:
             raise SecretStoreError(
-                "no usable Windows secret store: Windows Credential Manager "
-                "(keyring) and DPAPI are both unavailable"
+                "no usable Windows secret store: Windows Credential Manager (keyring) and DPAPI are both unavailable"
             )
     if _keyring_usable():
         return KeyringSecretStore()

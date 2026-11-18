@@ -85,17 +85,17 @@ class SyncCheckpointStore:
             return None
         if len(raw) > self.max_bytes:
             logger.warning(
-                "[SYNC] sync checkpoint store {} is {} bytes (max {}) — ignoring it, "
-                "falling back to a full backfill",
-                self.path, len(raw), self.max_bytes,
+                "[SYNC] sync checkpoint store {} is {} bytes (max {}) — ignoring it, falling back to a full backfill",
+                self.path,
+                len(raw),
+                self.max_bytes,
             )
             return None
         try:
             record = json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             logger.warning(
-                "[SYNC] corrupt sync checkpoint store {} — ignoring it, "
-                "falling back to a full backfill",
+                "[SYNC] corrupt sync checkpoint store {} — ignoring it, falling back to a full backfill",
                 self.path,
             )
             return None

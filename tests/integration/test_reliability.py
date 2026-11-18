@@ -61,17 +61,19 @@ async def test_restart_mid_operation_persisted_result_redelivered(mock_server, t
     persisted_id = "01900000-0000-7000-8000-000000000099"
     store_path = tmp_path / "pending_results.jsonl"
     store_path.write_text(
-        json.dumps({
-            "protocol_version": "1.0",
-            "schema_version": "2026-11-17",
-            "message_id": "01900000-0000-7000-8000-000000000098",
-            "correlation_id": persisted_id,
-            "event_type": "action.result",
-            "device_id": ctx.device_id,
-            "account_id": "12345678901",
-            "source_tool": "trade_close_single_position",
-            "status": "executed",
-        })
+        json.dumps(
+            {
+                "protocol_version": "1.0",
+                "schema_version": "2026-11-17",
+                "message_id": "01900000-0000-7000-8000-000000000098",
+                "correlation_id": persisted_id,
+                "event_type": "action.result",
+                "device_id": ctx.device_id,
+                "account_id": "12345678901",
+                "source_tool": "trade_close_single_position",
+                "status": "executed",
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -80,7 +82,11 @@ async def test_restart_mid_operation_persisted_result_redelivered(mock_server, t
     engine = SyncEngine(rest, ctx)
     chart = ChartService(fetch_candles=lambda *a: [], fetch_ticks=lambda *a: [])
     channel = ServerChannel(
-        ctx, EventBus(), rest_client=rest, sync_engine=engine, chart_service=chart,
+        ctx,
+        EventBus(),
+        rest_client=rest,
+        sync_engine=engine,
+        chart_service=chart,
         dead_after_s=45.0,
     )
     # Construction re-queued the persisted result and recorded the
@@ -92,17 +98,17 @@ async def test_restart_mid_operation_persisted_result_redelivered(mock_server, t
 
     channel.start()
     try:
-        result = await asyncio.to_thread(
-            mock_server.state.wait_for_result, persisted_id, timeout=10.0
-        )
+        result = await asyncio.to_thread(mock_server.state.wait_for_result, persisted_id, timeout=10.0)
         assert result is not None, "mock never received the persisted result"
         assert result["correlation_id"] == persisted_id
         assert result["status"] == "executed"
         # Delivered results leave the durable store (safe cleanup).
         deadline = asyncio.get_running_loop().time() + 5.0
-        while store_path.exists() and store_path.read_text(
-            encoding="utf-8"
-        ).strip() and asyncio.get_running_loop().time() < deadline:
+        while (
+            store_path.exists()
+            and store_path.read_text(encoding="utf-8").strip()
+            and asyncio.get_running_loop().time() < deadline
+        ):
             await asyncio.sleep(0.1)
         assert persisted_id not in store_path.read_text(encoding="utf-8")
     finally:

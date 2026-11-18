@@ -41,7 +41,10 @@ def git_commit() -> str | None:
     try:
         out = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=REPO_ROOT, capture_output=True, text=True, timeout=30,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
             check=True,
         )
         return out.stdout.strip()

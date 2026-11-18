@@ -22,7 +22,8 @@ from .trading import (
 class PositionsRequest(BaseModel):
     symbol: str | None = Field(None, description="Filter by symbol")
     magic_filter: str = Field(
-        "all", pattern="^(all|bot)$",
+        "all",
+        pattern="^(all|bot)$",
         description="all = every position (dashboard); bot = our magic only "
         "(matches nothing while no bridge magic is configured)",
     )
@@ -84,8 +85,12 @@ class ClosePositionRequest(BaseModel):
 
 class CloseAllRequest(BaseModel):
     symbol: str | None = None
-    magic: int | None = Field(None, ge=0, description="Only close positions carrying this magic "
-    "(RECOMMENDED: pass the bridge magic so the user's manual positions are untouched)")
+    magic: int | None = Field(
+        None,
+        ge=0,
+        description="Only close positions carrying this magic "
+        "(RECOMMENDED: pass the bridge magic so the user's manual positions are untouched)",
+    )
 
 
 class CloseAllResponse(BaseModel):
@@ -222,6 +227,7 @@ def get_position_risk(ctx: BridgeContext, params: TicketRequest) -> dict[str, An
     risk_amount = None
     note = None
     if sl > 0 and entry > 0:
+
         def calc_job(mt5: Any):
             return mt5.order_calc_profit(pos_type, symbol, volume, entry, sl)
 
@@ -286,10 +292,7 @@ def trade_close_all_positions(ctx: BridgeContext, params: CloseAllRequest | None
     symbol = params.symbol.strip() if (params and params.symbol) else None
     raw = fetch_positions(ctx, symbol)
     magic_filter = params.magic if params else None
-    targets = [
-        row for row in raw
-        if magic_filter is None or int(_f(row, "magic", -1)) == int(magic_filter)
-    ]
+    targets = [row for row in raw if magic_filter is None or int(_f(row, "magic", -1)) == int(magic_filter)]
     closed, failed = 0, 0
     failures: list[dict[str, Any]] = []
     for row in targets:

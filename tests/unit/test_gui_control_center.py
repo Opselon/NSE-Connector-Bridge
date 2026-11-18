@@ -53,9 +53,7 @@ def _no_bridge_env(monkeypatch):
 
 @pytest.fixture
 def client(tmp_path):
-    settings = BridgeSettings(
-        _env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs")
-    )
+    settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
     driver = Mt5Driver(settings)
     ctx = BridgeContext(settings=settings, driver=driver)
     app = create_app(ctx)
@@ -71,8 +69,7 @@ def _auth(ctx):
 class FakeRestClient:
     """Minimal stand-in for the Phase 2 REST client."""
 
-    def __init__(self, *, validate_result=None, validate_error=None,
-                 release=None, release_error=None):
+    def __init__(self, *, validate_result=None, validate_error=None, release=None, release_error=None):
         self.validate_result = validate_result
         self.validate_error = validate_error
         self.release = release
@@ -184,9 +181,7 @@ def _validated_client(client):
                 "billing_status": "active",
                 "expires_at": "2027-01-01T00:00:00Z",
             },
-            entitlements=Entitlements(
-                history_sync=True, position_manager=True, max_devices=3, max_accounts=2
-            ),
+            entitlements=Entitlements(history_sync=True, position_manager=True, max_devices=3, max_accounts=2),
         )
     )
     fake.session_expires_at = "2026-11-19T00:00:00Z"
@@ -279,9 +274,7 @@ def test_updates_latest_check_failed_and_not_configured(client):
     # Key configured but the server fails -> check_failed, never a fake version.
     ctx.settings.server_token = "sk-test-secret-abcdef123456"
     ctx.rest_client = FakeRestClient(
-        release_error=ServerError(
-            ServerErrorCode.SERVER_UNAVAILABLE, "server down", http_status=503
-        )
+        release_error=ServerError(ServerErrorCode.SERVER_UNAVAILABLE, "server down", http_status=503)
     )
     resp = http.get("/api/v1/updates/latest", headers=_auth(ctx))
     assert resp.status_code == 200, resp.text

@@ -236,11 +236,15 @@ class SelfHealingRegistry:
         ctx = ctx or HealingContext()
         handler = getattr(self, f"_handle_{scenario.value}", None)
         try:
-            status, action, error_code, detail = handler(ctx) if handler else (
-                "failed",
-                "no handler registered for this scenario",
-                "self_healing_error",
-                None,
+            status, action, error_code, detail = (
+                handler(ctx)
+                if handler
+                else (
+                    "failed",
+                    "no handler registered for this scenario",
+                    "self_healing_error",
+                    None,
+                )
             )
         except Exception as exc:  # noqa: BLE001 — a handler failure is a recorded outcome, never a crash
             status, action, error_code, detail = (
@@ -292,15 +296,16 @@ class SelfHealingRegistry:
         if ctx.platform_reachable is False:
             return (
                 "degraded",
-                ("waiting for network; WS reconnect backoff (§5.4) continues; "
-                "no commands executed while offline; sync batches stay queued"),
+                (
+                    "waiting for network; WS reconnect backoff (§5.4) continues; "
+                    "no commands executed while offline; sync batches stay queued"
+                ),
                 "network_unreachable",
                 "REST + WS both unreachable",
             )
         return (
             "degraded",
-            ("connectivity probe unavailable — cannot confirm internet loss; "
-            "WS reconnect backoff (§5.4) continues"),
+            ("connectivity probe unavailable — cannot confirm internet loss; WS reconnect backoff (§5.4) continues"),
             "network_unknown",
             None,
         )
@@ -309,23 +314,29 @@ class SelfHealingRegistry:
         if ctx.platform_reachable is True and not ctx.ws_connected:
             return (
                 "recovering",
-                ("REST reachable but WS down — REST heartbeat (§3.4) keeps liveness; "
-                "WS reconnect backoff (§5.4) continues"),
+                (
+                    "REST reachable but WS down — REST heartbeat (§3.4) keeps liveness; "
+                    "WS reconnect backoff (§5.4) continues"
+                ),
                 "platform_ws_down",
                 None,
             )
         if ctx.platform_reachable is False:
             return (
                 "degraded",
-                ("platform unreachable from here — indistinguishable from internet loss "
-                "locally; see internet_loss; no unauthenticated fallback attempted"),
+                (
+                    "platform unreachable from here — indistinguishable from internet loss "
+                    "locally; see internet_loss; no unauthenticated fallback attempted"
+                ),
                 "platform_unreachable",
                 None,
             )
         return (
             "degraded",
-            ("platform reachability unknown — WS reconnect backoff (§5.4) continues; "
-            "REST heartbeat (§3.4) keeps liveness"),
+            (
+                "platform reachability unknown — WS reconnect backoff (§5.4) continues; "
+                "REST heartbeat (§3.4) keeps liveness"
+            ),
             "platform_unknown",
             None,
         )
@@ -387,8 +398,7 @@ class SelfHealingRegistry:
         if ctx.mt5_ipc_ok:
             return "ok", "MT5 IPC healthy", None, None
         action = (
-            "MT5 process up but IPC failed — guided diagnostic MT5_IPC_FAILED "
-            "exposed; no execution while IPC is down"
+            "MT5 process up but IPC failed — guided diagnostic MT5_IPC_FAILED exposed; no execution while IPC is down"
         )
         if ctx.on_mt5_reconnect is not None:
             ctx.on_mt5_reconnect()
@@ -418,8 +428,7 @@ class SelfHealingRegistry:
             # territory; auth_expiry must not retry it.
             return (
                 "failed",
-                ("key is invalid/revoked (FAILED_AUTH) — no retry with the same key (§3.1); "
-                "a new key is required"),
+                ("key is invalid/revoked (FAILED_AUTH) — no retry with the same key (§3.1); a new key is required"),
                 "key_invalid",
                 None,
             )
@@ -439,8 +448,10 @@ class SelfHealingRegistry:
             return "ok", "device registration valid", None, None
         return (
             "failed",
-            ("registration invalid (FAILED_AUTH) — terminal for this key: no retry, "
-            "no unauthenticated fallback, sync stopped (§3.1); user must enter a new key"),
+            (
+                "registration invalid (FAILED_AUTH) — terminal for this key: no retry, "
+                "no unauthenticated fallback, sync stopped (§3.1); user must enter a new key"
+            ),
             "registration_invalid",
             None,
         )
@@ -450,8 +461,10 @@ class SelfHealingRegistry:
         if ctx.reconcile is None:
             return (
                 "failed",
-                ("execution response lost and no MT5 reconciler is wired — command stays "
-                "UNKNOWN; result mcp_failed retry_safe=false; server intervention required"),
+                (
+                    "execution response lost and no MT5 reconciler is wired — command stays "
+                    "UNKNOWN; result mcp_failed retry_safe=false; server intervention required"
+                ),
                 "TRADE_UNVERIFIED",
                 None,
             )
@@ -459,15 +472,19 @@ class SelfHealingRegistry:
         if recovered is not None:
             return (
                 "ok",
-                ("reconciled against live MT5 state — op confirmed landed; "
-                "result reported executed (recovered), never re-executed"),
+                (
+                    "reconciled against live MT5 state — op confirmed landed; "
+                    "result reported executed (recovered), never re-executed"
+                ),
                 None,
                 f"recovered payload keys: {sorted(recovered.keys())}",
             )
         return (
             "degraded",
-            ("MT5 reconciliation inconclusive — command stays UNKNOWN; result "
-            "mcp_failed retry_safe=false; server intervention required; never blind-retried"),
+            (
+                "MT5 reconciliation inconclusive — command stays UNKNOWN; result "
+                "mcp_failed retry_safe=false; server intervention required; never blind-retried"
+            ),
             "TRADE_UNVERIFIED",
             None,
         )
@@ -477,8 +494,10 @@ class SelfHealingRegistry:
             return "ok", "no duplicate detected", None, None
         return (
             "ok",
-            ("duplicate command rejected as Replayed (§6.3 step 7); never executed; "
-            "replay id was consumed only by the original successful validation"),
+            (
+                "duplicate command rejected as Replayed (§6.3 step 7); never executed; "
+                "replay id was consumed only by the original successful validation"
+            ),
             "Replayed",
             f"command_id={ctx.command_id}",
         )
@@ -488,8 +507,10 @@ class SelfHealingRegistry:
             return "ok", "command within its validity window", None, None
         return (
             "ok",
-            ("expired command rejected as Expired (§6.3 step 2); never executed; "
-            "server must re-issue with a new command_id if still wanted"),
+            (
+                "expired command rejected as Expired (§6.3 step 2); never executed; "
+                "server must re-issue with a new command_id if still wanted"
+            ),
             "Expired",
             f"command_id={ctx.command_id}",
         )
@@ -499,8 +520,10 @@ class SelfHealingRegistry:
             return "ok", "local config valid", None, None
         return (
             "failed",
-            ("invalid local config — explicit structured error; the affected "
-            "subsystem refused to start (fail closed); no silent defaults applied"),
+            (
+                "invalid local config — explicit structured error; the affected "
+                "subsystem refused to start (fail closed); no silent defaults applied"
+            ),
             "invalid_config",
             "; ".join(ctx.config_errors),
         )
@@ -510,8 +533,10 @@ class SelfHealingRegistry:
             return "ok", "no persisted unacknowledged results to re-queue", None, None
         return (
             "recovering",
-            (f"re-queued {ctx.persisted_results} persisted unacknowledged result(s) "
-            "for delivery on reconnect (§6.5); nothing silently dropped"),
+            (
+                f"re-queued {ctx.persisted_results} persisted unacknowledged result(s) "
+                "for delivery on reconnect (§6.5); nothing silently dropped"
+            ),
             "restart_recovery",
             None,
         )
@@ -564,8 +589,10 @@ class SelfHealingRegistry:
                 )
             return (
                 "degraded",
-                ("broker server unknown — cannot confirm the connection did "
-                "not change; no execution against unconfirmed broker state"),
+                (
+                    "broker server unknown — cannot confirm the connection did "
+                    "not change; no execution against unconfirmed broker state"
+                ),
                 "broker_server_unknown",
                 None,
             )
@@ -605,8 +632,10 @@ class SelfHealingRegistry:
             action += "; symbol refresh requested"
         detail = f"symbol={ctx.symbol}" if ctx.symbol else None
         if ctx.symbol_unavailable_reason:
-            detail = f"{detail}; reason={ctx.symbol_unavailable_reason}" if detail else (
-                f"reason={ctx.symbol_unavailable_reason}"
+            detail = (
+                f"{detail}; reason={ctx.symbol_unavailable_reason}"
+                if detail
+                else (f"reason={ctx.symbol_unavailable_reason}")
             )
         return ("degraded", action, "symbol_unavailable", detail)
 
@@ -639,8 +668,7 @@ class SelfHealingRegistry:
             ctx.on_drain_diagnostics()
             action += "; drain requested"
         else:
-            action += ("; no drain wired — events age out by TTL "
-                       "(no diagnostics endpoint exists yet, D1)")
+            action += "; no drain wired — events age out by TTL (no diagnostics endpoint exists yet, D1)"
         return ("recovering", action, "diagnostic_queue_full", detail)
 
     def _handle_update_failure(self, ctx: HealingContext) -> _Outcome:
@@ -657,27 +685,23 @@ class SelfHealingRegistry:
         signing key); installing manually is never the recovery."""
         stage = ctx.update_stage
         code = ctx.update_error_code
-        is_verify = stage == "verify" or (
-            stage is None and code is not None and code in _UPDATE_VERIFY_CODES
-        )
+        is_verify = stage == "verify" or (stage is None and code is not None and code in _UPDATE_VERIFY_CODES)
         version = f" version={ctx.update_version}" if ctx.update_version else ""
         if is_verify:
             return (
                 "failed",
-                ("update verification failed — artifact REFUSED: nothing "
-                 "staged, nothing installed; the same bytes must never be "
-                 "retried or installed manually; a new release (or the "
-                 "signing key) is required"),
+                (
+                    "update verification failed — artifact REFUSED: nothing "
+                    "staged, nothing installed; the same bytes must never be "
+                    "retried or installed manually; a new release (or the "
+                    "signing key) is required"
+                ),
                 code or "update_verification_failed",
-                (f"stage=verify{version}; {ctx.update_error}" if ctx.update_error else
-                 f"stage=verify{version}"),
+                (f"stage=verify{version}; {ctx.update_error}" if ctx.update_error else f"stage=verify{version}"),
             )
         # Download / check stage (or an unclassified updater error with
         # no verification code): nothing staged, retry is safe.
-        action = (
-            "update download failed — nothing staged, nothing installed; "
-            "download is idempotent so a retry is safe"
-        )
+        action = "update download failed — nothing staged, nothing installed; download is idempotent so a retry is safe"
         if ctx.on_retry_update is not None:
             ctx.on_retry_update()
             action += "; update retry requested"
@@ -687,6 +711,9 @@ class SelfHealingRegistry:
             "recovering",
             action,
             code or "update_download_failed",
-            (f"stage={stage or 'download'}{version}; {ctx.update_error}"
-             if ctx.update_error else f"stage={stage or 'download'}{version}"),
+            (
+                f"stage={stage or 'download'}{version}; {ctx.update_error}"
+                if ctx.update_error
+                else f"stage={stage or 'download'}{version}"
+            ),
         )

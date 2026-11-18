@@ -210,9 +210,7 @@ def test_queue_dedups_identical_events():
 
 def test_queue_expires_stale_events_on_drain():
     queue = DiagnosticQueue(max_items=10, ttl_s=3600.0)
-    stale = _event(
-        timestamp=(datetime.now(UTC) - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
-    )
+    stale = _event(timestamp=(datetime.now(UTC) - timedelta(hours=2)).isoformat().replace("+00:00", "Z"))
     queue.put(stale)
     queue.put(_event(event_type="test.fresh", correlation_id="fresh"))
     sink = RecordingSink()
@@ -225,7 +223,10 @@ def test_queue_expires_stale_events_on_drain():
 def test_queue_retries_with_backoff_then_abandons():
     now = [1000.0]
     queue = DiagnosticQueue(
-        max_items=10, max_attempts=3, backoff_base_s=10.0, backoff_cap_s=60.0,
+        max_items=10,
+        max_attempts=3,
+        backoff_base_s=10.0,
+        backoff_cap_s=60.0,
         clock=lambda: now[0],
     )
     queue.put(_event())

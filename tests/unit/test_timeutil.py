@@ -18,9 +18,7 @@ pytestmark = pytest.mark.unit
 
 def test_broker_epoch_to_utc_zero_offset():
     assert broker_epoch_to_utc(0, 0) == datetime(1970, 1, 1, tzinfo=UTC)
-    assert broker_epoch_to_utc(1_700_000_000, 0) == datetime(
-        2023, 11, 14, 22, 13, 20, tzinfo=UTC
-    )
+    assert broker_epoch_to_utc(1_700_000_000, 0) == datetime(2023, 11, 14, 22, 13, 20, tzinfo=UTC)
 
 
 def test_broker_epoch_to_utc_applies_offset():
@@ -31,9 +29,7 @@ def test_broker_epoch_to_utc_applies_offset():
 def test_normalize_utc_epoch_seconds_and_milliseconds():
     assert normalize_utc(0) == datetime(1970, 1, 1, tzinfo=UTC)
     # values > 1e12 are treated as milliseconds
-    assert normalize_utc(1_700_000_000_000) == datetime(
-        2023, 11, 14, 22, 13, 20, tzinfo=UTC
-    )
+    assert normalize_utc(1_700_000_000_000) == datetime(2023, 11, 14, 22, 13, 20, tzinfo=UTC)
 
 
 def test_normalize_utc_iso_string_with_z():
@@ -46,9 +42,7 @@ def test_normalize_utc_iso_string_with_z():
 
 
 def test_normalize_utc_naive_datetime_assumed_utc():
-    assert normalize_utc(datetime(2026, 5, 1, 12, 0)) == datetime(
-        2026, 5, 1, 12, 0, tzinfo=UTC
-    )
+    assert normalize_utc(datetime(2026, 5, 1, 12, 0)) == datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 
 
 def test_normalize_utc_invalid_inputs_return_none():
@@ -60,9 +54,7 @@ def test_normalize_utc_invalid_inputs_return_none():
 
 
 def test_normalize_utc_applies_offset():
-    assert normalize_utc(0, offset_minutes=120) == datetime(
-        1969, 12, 31, 22, 0, tzinfo=UTC
-    )
+    assert normalize_utc(0, offset_minutes=120) == datetime(1969, 12, 31, 22, 0, tzinfo=UTC)
 
 
 def test_broker_dt_round_trips_through_settings_offset():

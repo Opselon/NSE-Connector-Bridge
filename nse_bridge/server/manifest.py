@@ -90,15 +90,11 @@ def build_manifest(device_id: str, *, driver: Mt5Driver | None = None) -> dict[s
         "device_id": device_id,
         "manifest_hash": manifest_hash(),
         "action_count": len(commands),
-        "actions": [
-            {"name": c.name, "number": c.number, "category": c.category} for c in commands
-        ],
+        "actions": [{"name": c.name, "number": c.number, "category": c.category} for c in commands],
     }
 
 
-def build_manifest_update_envelope(
-    manifest: dict[str, Any], *, user_id: str | None = None
-) -> dict[str, Any]:
+def build_manifest_update_envelope(manifest: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]:
     """Build the ``manifest.update`` MessageEnvelope (contract §4.1).
 
     §4.1: "The Connector also sends a ``manifest.update`` envelope

@@ -273,6 +273,7 @@ def get_mt5_server_info(ctx: BridgeContext, params: None) -> dict[str, Any]:
     tick = None
     latency = None
     if ctx.settings.bot_symbol:
+
         def tick_job(mt5: Any):
             return mt5.symbol_info_tick(ctx.settings.bot_symbol)
 

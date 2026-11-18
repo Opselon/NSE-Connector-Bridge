@@ -124,9 +124,12 @@ async def test_checkpoint_survives_second_engine_instance(tmp_path: Path):
     seen_from: list[datetime] = []
     orders, positions = _history_fetchers(seen_from)
     engine1 = SyncEngine(
-        FakeRest(), None, sleep=_no_sleep,
+        FakeRest(),
+        None,
+        sleep=_no_sleep,
         checkpoint_store=store,
-        history_orders=orders, history_positions=positions,
+        history_orders=orders,
+        history_positions=positions,
     )
     assert engine1.checkpoint.iso == EPOCH_ISO  # fresh start
     await engine1.sync_history()
@@ -137,9 +140,12 @@ async def test_checkpoint_survives_second_engine_instance(tmp_path: Path):
     # A second engine over the same directory resumes — no full backfill.
     seen_from.clear()
     engine2 = SyncEngine(
-        FakeRest(), None, sleep=_no_sleep,
+        FakeRest(),
+        None,
+        sleep=_no_sleep,
         checkpoint_store=_store(tmp_path),
-        history_orders=orders, history_positions=positions,
+        history_orders=orders,
+        history_positions=positions,
     )
     assert engine2.checkpoint.iso == "2026-11-16T12:00:00Z"
     await engine2.sync_history()
@@ -153,9 +159,12 @@ async def test_corrupt_checkpoint_falls_back_to_full_backfill(tmp_path: Path):
     seen_from: list[datetime] = []
     orders, positions = _history_fetchers(seen_from)
     engine = SyncEngine(
-        FakeRest(), None, sleep=_no_sleep,
+        FakeRest(),
+        None,
+        sleep=_no_sleep,
         checkpoint_store=_store(tmp_path),
-        history_orders=orders, history_positions=positions,
+        history_orders=orders,
+        history_positions=positions,
     )
     assert engine.checkpoint.iso == EPOCH_ISO  # corrupt → epoch, no crash
     await engine.sync_history()  # the backfill itself still works
@@ -196,8 +205,11 @@ async def test_engine_without_store_keeps_in_memory_behaviour(tmp_path: Path):
     seen_from: list[datetime] = []
     orders, positions = _history_fetchers(seen_from)
     engine = SyncEngine(
-        FakeRest(), None, sleep=_no_sleep,
-        history_orders=orders, history_positions=positions,
+        FakeRest(),
+        None,
+        sleep=_no_sleep,
+        history_orders=orders,
+        history_positions=positions,
     )
     assert engine.checkpoint_store is None
     await engine.sync_history()

@@ -41,7 +41,9 @@ class SettingsUpdate(BaseModel):
     """
 
     server_url: str | None = Field(None, description="NSE server channel URL (wss://...; empty = disabled)")
-    server_token: str | None = Field(None, description="API key issued on the NSE Platform site (stored in the secret store)")
+    server_token: str | None = Field(
+        None, description="API key issued on the NSE Platform site (stored in the secret store)"
+    )
     local_api_key: str | None = Field(None, description="Local X-API-Key gate (mandatory; stored in the secret store)")
     environment: Literal["production", "staging", "dev"] | None = Field(
         None, description="Server environment (production | staging | dev)"
@@ -104,7 +106,9 @@ async def get_settings(request: Request) -> dict[str, Any]:
     }
 
 
-@router.put("/settings", summary="Update bridge settings",
+@router.put(
+    "/settings",
+    summary="Update bridge settings",
     description="Partial update. Non-secret fields are persisted to config.json. "
     "Secrets (server_token, local_api_key) are routed through the secret store and "
     "never written to config.json. Server-channel fields apply immediately "
@@ -112,17 +116,18 @@ async def get_settings(request: Request) -> dict[str, Any]:
     "(mt5_terminal_path, mt5_custom_terminal_dirs) re-run discovery immediately "
     "(fresh list returned in this response); changing the terminal path while the "
     "driver is connected disconnects it from the old terminal instead of keeping "
-    "a stale selection.")
+    "a stale selection.",
+)
 async def update_settings(request: Request, update: SettingsUpdate) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
     s = ctx.settings
     changed: list[str] = []
     channel_needs_restart = False
-    values = update.model_dump(exclude_none=True)
+    # model_dump() is typed as a TypedDict by the pydantic plugin;
+    # this is a dynamic partial update, so treat it as a plain dict.
+    values: dict[str, Any] = update.model_dump(exclude_none=True)
     # Secrets go through the secret store, never persist_settings.
-    secret_updates = {
-        key: values.pop(key) for key in ("server_token", "local_api_key") if key in values
-    }
+    secret_updates = {key: values.pop(key) for key in ("server_token", "local_api_key") if key in values}
     if secret_updates:
         store = get_secret_store(s.data_dir)
         for key, value in secret_updates.items():
@@ -140,21 +145,19 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict[str,
             raise BridgeError(ErrorCode.VALIDATION, str(exc), http_status=422)
     if "server_base_url" in values:
         try:
-            validate_server_base_url(
-                values["server_base_url"], environment=values.get("environment", s.environment)
-            )
+            validate_server_base_url(values["server_base_url"], environment=values.get("environment", s.environment))
         except ValueError as exc:
             raise BridgeError(ErrorCode.VALIDATION, str(exc), http_status=422)
     # environment / server_base_url are baked into the REST client at
     # construction — they take effect after a bridge restart (never a
     # silent mid-flight switch). The response flags that honestly.
     restart_required = "environment" in values or "server_base_url" in values
-    for key, value in values.items():
-        if key not in EDITABLE_KEYS or getattr(s, key) == value:
+    for field, value in values.items():
+        if field not in EDITABLE_KEYS or getattr(s, field) == value:
             continue
-        setattr(s, key, value)
-        changed.append(key)
-        if key in ("server_url", "server_token"):
+        setattr(s, field, value)
+        changed.append(field)
+        if field in ("server_url", "server_token"):
             channel_needs_restart = True
     if changed:
         try:
@@ -189,9 +192,7 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict[str,
     # stale selected terminal (the next connect attaches to the new
     # path). A custom-dirs-only change leaves the attached terminal
     # alone — the selection did not move.
-    terminals_rediscovered = bool(
-        {"mt5_terminal_path", "mt5_custom_terminal_dirs"} & set(changed)
-    )
+    terminals_rediscovered = bool({"mt5_terminal_path", "mt5_custom_terminal_dirs"} & set(changed))
     discovery: dict[str, Any] | None = None
     driver_disconnected = False
     if terminals_rediscovered:
@@ -199,10 +200,7 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict[str,
         if "mt5_terminal_path" in changed and ctx.driver.connected:
             ctx.driver.disconnect()
             driver_disconnected = True
-            logger.info(
-                "[SETTINGS] terminal path changed while connected — "
-                "driver disconnected from the old terminal"
-            )
+            logger.info("[SETTINGS] terminal path changed while connected — driver disconnected from the old terminal")
     return {
         "ok": True,
         "data": {
@@ -238,12 +236,17 @@ AUTOTRADING_HINT = (
 )
 
 
-@router.post("/run_connection_checks", summary="Run pre-flight connection checks",
+@router.post(
+    "/run_connection_checks",
+    summary="Run pre-flight connection checks",
     description="Full readiness checklist: driver attach, terminal link, AutoTrading button, account "
-    "permissions, symbol availability, tick freshness, server-channel reachability.")
+    "permissions, symbol availability, tick freshness, server-channel reachability.",
+)
 async def run_connection_checks(request: Request) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
-    checks: list[CheckResult] = []
+    # CheckResult is the schema; the endpoint collects plain dicts
+    # (model_dump) and indexes them as dicts below.
+    checks: list[dict[str, Any]] = []
 
     def add(cid: str, title: str, status: str, detail: str | None = None, hint: str | None = None) -> None:
         checks.append(CheckResult(id=cid, title=title, status=status, detail=detail, hint=hint).model_dump())
@@ -253,19 +256,26 @@ async def run_connection_checks(request: Request) -> dict[str, Any]:
         add("mt5_attached", "MT5 driver attached", "ok", "Official MetaTrader5 IPC driver is attached.")
     else:
         state = ctx.driver.connection_state_dict()
-        add("mt5_attached", "MT5 driver attached", "fail",
+        add(
+            "mt5_attached",
+            "MT5 driver attached",
+            "fail",
             f"State: {state['state']}" + (f" — {state['detail']}" if state["detail"] else ""),
-            "Run connect_mt5 (or restart the bridge) — check the terminal is running.")
+            "Run connect_mt5 (or restart the bridge) — check the terminal is running.",
+        )
 
     # 2. terminal link
     terminal = ctx.driver.refresh_terminal() or {}
     if terminal.get("connected"):
-        add("terminal_connected", "Terminal connected to broker", "ok",
-            f"{terminal.get('name') or 'MetaTrader 5'}")
+        add("terminal_connected", "Terminal connected to broker", "ok", f"{terminal.get('name') or 'MetaTrader 5'}")
     elif ctx.driver.connected:
-        add("terminal_connected", "Terminal connected to broker", "fail",
+        add(
+            "terminal_connected",
+            "Terminal connected to broker",
+            "fail",
             "Terminal reports disconnected from the trade server.",
-            "Check the terminal's connection indicator (bottom-right) and broker login.")
+            "Check the terminal's connection indicator (bottom-right) and broker login.",
+        )
     else:
         add("terminal_connected", "Terminal connected to broker", "fail", "Driver not attached.")
 
@@ -274,10 +284,14 @@ async def run_connection_checks(request: Request) -> dict[str, Any]:
     if trade_allowed is True:
         add("autotrading_enabled", "Algo Trading enabled", "ok", "Terminal AutoTrading button is ON.")
     elif trade_allowed is False:
-        add("autotrading_enabled", "Algo Trading enabled", "fail",
+        add(
+            "autotrading_enabled",
+            "Algo Trading enabled",
+            "fail",
             "Terminal AutoTrading button is OFF — every trade command is rejected "
             '(retcode 10027, "AutoTrading disabled by client").',
-            AUTOTRADING_HINT)
+            AUTOTRADING_HINT,
+        )
     else:
         add("autotrading_enabled", "Algo Trading enabled", "warn", "Unknown (driver not attached).")
 
@@ -289,10 +303,14 @@ async def run_connection_checks(request: Request) -> dict[str, Any]:
             acc = await asyncio.to_thread(account_info_model, ctx)
             ok = bool(acc.trade_allowed) and bool(acc.trade_expert)
             add(
-                "account_permissions", "Account trading permissions", "ok" if ok else "fail",
+                "account_permissions",
+                "Account trading permissions",
+                "ok" if ok else "fail",
                 f"trade_allowed={acc.trade_allowed}, trade_expert={acc.trade_expert}, "
                 f"trade_mode={acc.trade_mode_label}",
-                None if ok else "The account itself restricts trading (investor password? trade mode?). "
+                None
+                if ok
+                else "The account itself restricts trading (investor password? trade mode?). "
                 "Log in with the master password and an account that allows expert trading.",
             )
         except BridgeError as exc:
@@ -303,9 +321,13 @@ async def run_connection_checks(request: Request) -> dict[str, Any]:
     # 5. bot symbol availability + tick freshness (skipped with a warn
     # when no bot_symbol is configured — there is no default symbol).
     if not ctx.settings.bot_symbol:
-        add("symbol_market", "Market data: (no symbol configured)", "warn",
+        add(
+            "symbol_market",
+            "Market data: (no symbol configured)",
+            "warn",
             "No bot_symbol is configured — set one in Settings to probe market data.",
-            "Settings → Primary symbol, e.g. the symbol the server trades on this device.")
+            "Settings → Primary symbol, e.g. the symbol the server trades on this device.",
+        )
     elif ctx.driver.connected:
         try:
             from ..engine.common import require_symbol_info
@@ -315,41 +337,65 @@ async def run_connection_checks(request: Request) -> dict[str, Any]:
             tick = await asyncio.to_thread(_fresh_tick, ctx, ctx.settings.bot_symbol)
             fresh = (tick.freshness_ms or 1e9) < 30_000
             add(
-                "symbol_market", f"Market data: {ctx.settings.bot_symbol}",
+                "symbol_market",
+                f"Market data: {ctx.settings.bot_symbol}",
                 "ok" if fresh else "warn",
                 f"digits={spec.digits}, point={spec.point}, bid={tick.bid}, freshness={round(tick.freshness_ms or -1)}ms",
                 None if fresh else "Tick older than 30s — market may be closed or the symbol is stale.",
             )
         except BridgeError as exc:
-            add("symbol_market", f"Market data: {ctx.settings.bot_symbol}", "fail", exc.message,
-                "Add the symbol to Market Watch (right-click → Symbols) or check its exact name.")
+            add(
+                "symbol_market",
+                f"Market data: {ctx.settings.bot_symbol}",
+                "fail",
+                exc.message,
+                "Add the symbol to Market Watch (right-click → Symbols) or check its exact name.",
+            )
     else:
         add("symbol_market", f"Market data: {ctx.settings.bot_symbol}", "fail", "Driver not attached.")
 
     # 6. server channel configuration + reachability
     s = ctx.settings
     if not s.server_url or not s.server_token:
-        add("server_channel", "NSE server channel", "warn",
+        add(
+            "server_channel",
+            "NSE server channel",
+            "warn",
             "Not configured — set the server URL and the API key from the NSE Platform site "
             "(Settings tab). The bridge works standalone without it.",
-            "Settings → paste the API key generated on the NSE Platform site.")
+            "Settings → paste the API key generated on the NSE Platform site.",
+        )
     else:
         state = ctx.server_channel_state
         if state.get("connected"):
-            add("server_channel", "NSE server channel", "ok",
-                f"Connected to {s.server_url} (reconnects: {state.get('reconnects', 0)}).")
+            add(
+                "server_channel",
+                "NSE server channel",
+                "ok",
+                f"Connected to {s.server_url} (reconnects: {state.get('reconnects', 0)}).",
+            )
         else:
             reachable, err = await _probe_server(s.server_url, s.server_token)
             if reachable:
-                add("server_channel", "NSE server channel", "warn",
-                    f"URL reachable but the persistent channel is not connected — {err or 'reconnecting'}.")
+                add(
+                    "server_channel",
+                    "NSE server channel",
+                    "warn",
+                    f"URL reachable but the persistent channel is not connected — {err or 'reconnecting'}.",
+                )
             else:
-                add("server_channel", "NSE server channel", "fail",
+                add(
+                    "server_channel",
+                    "NSE server channel",
+                    "fail",
                     f"Cannot reach {s.server_url}: {err}",
-                    "Verify the URL (wss://...) and that the API key is valid on the NSE Platform site.")
+                    "Verify the URL (wss://...) and that the API key is valid on the NSE Platform site.",
+                )
 
-    overall = "ok" if all(c["status"] == "ok" for c in checks) else (
-        "fail" if any(c["status"] == "fail" for c in checks) else "warn"
+    overall = (
+        "ok"
+        if all(c["status"] == "ok" for c in checks)
+        else ("fail" if any(c["status"] == "fail" for c in checks) else "warn")
     )
     return {
         "ok": True,
@@ -380,8 +426,11 @@ async def _probe_server(url: str, token: str, timeout: float = 5.0) -> tuple[boo
 # ---------------------------------------------------------------------------
 # server channel control
 # ---------------------------------------------------------------------------
-@router.post("/server_channel/restart", summary="Restart the NSE server channel",
-    description="Disconnect and reconnect the outbound server channel with current settings.")
+@router.post(
+    "/server_channel/restart",
+    summary="Restart the NSE server channel",
+    description="Disconnect and reconnect the outbound server channel with current settings.",
+)
 async def restart_server_channel(request: Request) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
     channel = getattr(request.app.state, "channel", None)
@@ -408,30 +457,31 @@ MT5_DIAGNOSTICS: dict[str, dict[str, Any]] = {
         ),
         "recovery": [
             "Install MetaTrader 5 from your broker, then press Retry diagnostics.",
-            ("If MT5 lives in a custom folder, select it on the MetaTrader screen "
-            "(it is saved as the terminal path)."),
-            ("Portable installs: set the NSE_MT5_TERMINAL_PATH environment variable "
-            "to the terminal64.exe path and restart the bridge."),
+            ("If MT5 lives in a custom folder, select it on the MetaTrader screen (it is saved as the terminal path)."),
+            (
+                "Portable installs: set the NSE_MT5_TERMINAL_PATH environment variable "
+                "to the terminal64.exe path and restart the bridge."
+            ),
         ],
     },
     "MT5_NOT_RUNNING": {
         "title": "Terminal found but not running",
         "explanation": (
-            "A terminal was found on this machine, but it is not running or the "
-            "bridge could not attach to it yet."
+            "A terminal was found on this machine, but it is not running or the bridge could not attach to it yet."
         ),
         "recovery": [
             "Start the MetaTrader 5 terminal and wait for it to finish loading.",
             "Then press Connect on the MetaTrader screen.",
-            ("If it still fails, close the terminal completely (check the system "
-            "tray icon) and start it again, then retry."),
+            (
+                "If it still fails, close the terminal completely (check the system "
+                "tray icon) and start it again, then retry."
+            ),
         ],
     },
     "MT5_IPC_FAILED": {
         "title": "Terminal attach (IPC) failed",
         "explanation": (
-            "The bridge found the terminal but the local IPC attach failed — "
-            "initialize() was rejected by the terminal."
+            "The bridge found the terminal but the local IPC attach failed — initialize() was rejected by the terminal."
         ),
         "recovery": [
             "Close the terminal completely (check the system tray icon) and start it again.",
@@ -442,12 +492,10 @@ MT5_DIAGNOSTICS: dict[str, dict[str, Any]] = {
     "MT5_ACCOUNT_NOT_READY": {
         "title": "No trading account logged in",
         "explanation": (
-            "The terminal is running, but no trading account is logged in, so the "
-            "bridge cannot read account data."
+            "The terminal is running, but no trading account is logged in, so the bridge cannot read account data."
         ),
         "recovery": [
-            ("Open the MT5 terminal and log in to your trading account "
-            "(File → Login to Trade Account)."),
+            ("Open the MT5 terminal and log in to your trading account (File → Login to Trade Account)."),
             "The bridge never asks for your MT5 password — sign in through MT5 itself.",
             "Then press Connect on the MetaTrader screen.",
         ],
@@ -459,8 +507,7 @@ MT5_DIAGNOSTICS: dict[str, dict[str, Any]] = {
             "bridge supports, so some calls may behave unexpectedly."
         ),
         "recovery": [
-            ("Update MetaTrader 5 (Help → Check for Updates) or install the latest "
-            "build from your broker."),
+            ("Update MetaTrader 5 (Help → Check for Updates) or install the latest build from your broker."),
             "Then reconnect and press Retry diagnostics.",
         ],
     },
@@ -531,9 +578,7 @@ def _discover_terminals(ctx: BridgeContext) -> dict[str, Any]:
     }
 
 
-def _derive_mt5_diagnostic(
-    ctx: BridgeContext, terminals: list[dict[str, Any]]
-) -> tuple[str | None, str]:
+def _derive_mt5_diagnostic(ctx: BridgeContext, terminals: list[dict[str, Any]]) -> tuple[str | None, str]:
     """Map driver state + discovery onto one structured code.
 
     Returns ``(code, severity)``; ``(None, "ok")`` when healthy. The
@@ -613,18 +658,24 @@ def _account_subscription_payload(ctx: BridgeContext) -> dict[str, Any]:
     }
 
 
-@router.get("/account/subscription", summary="Read-only account & subscription (server-resolved)",
+@router.get(
+    "/account/subscription",
+    summary="Read-only account & subscription (server-resolved)",
     description="Last stored validate-key result (§3.1): identity, subscription, entitlements, "
-    "device allowance, masked key status. No payment processing; nothing is invented server-side.")
+    "device allowance, masked key status. No payment processing; nothing is invented server-side.",
+)
 async def get_account_subscription(request: Request) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
     return {"ok": True, "data": _account_subscription_payload(ctx)}
 
 
-@router.post("/account/validate-key", summary="Validate the API key against NSE Platform",
+@router.post(
+    "/account/validate-key",
+    summary="Validate the API key against NSE Platform",
     description="Calls CONTRACT v1 §3.1 validate-key through the REST client and stores the "
     "server-resolved result on the bridge context for the read-only Account screen. "
-    "Never returns key material.")
+    "Never returns key material.",
+)
 async def validate_api_key(request: Request) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
     rest = ctx.rest_client
@@ -687,9 +738,12 @@ def _is_newer(latest: str | None, installed: str) -> bool:
     return (a + (0,) * (n - len(a))) > (b + (0,) * (n - len(b)))
 
 
-@router.get("/updates/latest", summary="Latest stable release (CONTRACT v1 §3.5 releases/latest)",
+@router.get(
+    "/updates/latest",
+    summary="Latest stable release (CONTRACT v1 §3.5 releases/latest)",
     description="Read-only update check via the REST client. Download + install belong to the "
-    "Phase 5 updater — this endpoint only reports status and never downloads anything.")
+    "Phase 5 updater — this endpoint only reports status and never downloads anything.",
+)
 async def get_updates_latest(request: Request) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
     installed = BRIDGE_VERSION
@@ -756,25 +810,34 @@ def _get_updater(request: Request) -> Updater:
     return updater
 
 
-@router.get("/updates/status", summary="Verified updater status",
+@router.get(
+    "/updates/status",
+    summary="Verified updater status",
     description="Current updater state: check result, staged (verified) update, "
-    "restart requirement, and whether an update public key is configured. Pollable by the GUI.")
+    "restart requirement, and whether an update public key is configured. Pollable by the GUI.",
+)
 async def get_updates_status(request: Request) -> dict[str, Any]:
     return {"ok": True, "data": _get_updater(request).status()}
 
 
-@router.post("/updates/check", summary="Check for updates (CONTRACT v1 §3.5 releases/latest)",
+@router.post(
+    "/updates/check",
+    summary="Check for updates (CONTRACT v1 §3.5 releases/latest)",
     description="Polls releases/latest through the REST client. Reports availability or "
-    "incompatibility (min_connector_version). Never downloads anything.")
+    "incompatibility (min_connector_version). Never downloads anything.",
+)
 async def post_updates_check(request: Request) -> dict[str, Any]:
     return {"ok": True, "data": await _get_updater(request).check()}
 
 
-@router.post("/updates/download", summary="Download + verify + stage the latest release",
+@router.post(
+    "/updates/download",
+    summary="Download + verify + stage the latest release",
     description="Downloads the release artifact, verifies SHA-256 AND the Ed25519 signature, "
     "then stages it for install on restart. Refuses with a structured error (nothing staged) "
     "when no public key is configured, the signature/SHA-256 is missing, verification fails, "
-    "or min_connector_version is not satisfied. Never executes the downloaded bytes.")
+    "or min_connector_version is not satisfied. Never executes the downloaded bytes.",
+)
 async def post_updates_download(request: Request) -> dict[str, Any]:
     return {"ok": True, "data": await _get_updater(request).download()}
 
@@ -782,13 +845,16 @@ async def post_updates_download(request: Request) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # MetaTrader terminals (discovery + open)
 # ---------------------------------------------------------------------------
-@router.get("/mt5/terminals", summary="Detected MetaTrader 5 terminals",
+@router.get(
+    "/mt5/terminals",
+    summary="Detected MetaTrader 5 terminals",
     description="All discovered terminals (Phase 5): configured path, env var, standard install "
     "locations, App Paths registry, custom/portable directories, running processes — each with "
     "version, data directory (when determinable, else null — never guessed), + running status. "
     "Discovery re-runs on every request, and PUT /settings re-runs it immediately when the "
     "terminal path or custom terminal dirs change. Selection stays user-driven "
-    "(PUT /settings mt5_terminal_path).")
+    "(PUT /settings mt5_terminal_path).",
+)
 async def list_mt5_terminals(request: Request) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
     state = ctx.driver.connection_state_dict()
@@ -807,10 +873,13 @@ class TerminalOpenRequest(BaseModel):
     path: str = Field(..., min_length=1)
 
 
-@router.post("/mt5/terminals/open", summary="Open the selected MT5 terminal",
+@router.post(
+    "/mt5/terminals/open",
+    summary="Open the selected MT5 terminal",
     description="Launches the terminal executable. The path must be one of the discovered / "
     "configured terminals — arbitrary paths are rejected. Windows only; on Linux this "
-    "reports honestly instead of pretending to launch.")
+    "reports honestly instead of pretending to launch.",
+)
 async def open_mt5_terminal(request: Request, body: TerminalOpenRequest) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
     allowed = {t["path"] for t in _discover_terminals(ctx)["terminals"]}
@@ -833,22 +902,21 @@ async def open_mt5_terminal(request: Request, body: TerminalOpenRequest) -> dict
             http_status=404,
         )
     try:
-        await asyncio.to_thread(
-            subprocess.Popen, [body.path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+        await asyncio.to_thread(subprocess.Popen, [body.path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as exc:
-        raise BridgeError(
-            ErrorCode.INTERNAL, f"Could not launch the terminal: {exc}", http_status=500
-        ) from exc
+        raise BridgeError(ErrorCode.INTERNAL, f"Could not launch the terminal: {exc}", http_status=500) from exc
     return {"ok": True, "data": {"launched": body.path}}
 
 
 # ---------------------------------------------------------------------------
 # Diagnostics summary (guided diagnostics for the Control Center)
 # ---------------------------------------------------------------------------
-@router.get("/diagnostics/summary", summary="Guided diagnostics summary",
+@router.get(
+    "/diagnostics/summary",
+    summary="Guided diagnostics summary",
     description="Bridge / MT5 / network / WebSocket health, sync status, last errors, and the "
-    "structured MT5 diagnostic code with human-readable guidance. No stack traces.")
+    "structured MT5 diagnostic code with human-readable guidance. No stack traces.",
+)
 async def diagnostics_summary(request: Request) -> dict[str, Any]:
     from ..engine.connection import get_mt5_connection_status
     from ..engine.diagnostics import get_bridge_health
@@ -892,9 +960,16 @@ async def diagnostics_summary(request: Request) -> dict[str, Any]:
     telemetry_summary = (
         telemetry.summary()
         if telemetry is not None
-        else {"device_id": None, "diagnostic_mode": False, "sink_attached": False,
-              "sink_inert": True, "emitted": 0, "info_local_only": 0,
-              "debug_dropped": 0, "queue": {"queued": 0}}
+        else {
+            "device_id": None,
+            "diagnostic_mode": False,
+            "sink_attached": False,
+            "sink_inert": True,
+            "emitted": 0,
+            "info_local_only": 0,
+            "debug_dropped": 0,
+            "queue": {"queued": 0},
+        }
     )
     self_healing = getattr(ctx, "self_healing", None)
     if self_healing is not None:
@@ -906,9 +981,13 @@ async def diagnostics_summary(request: Request) -> dict[str, Any]:
 
         self_healing_summary = {
             scenario.value: {
-                "scenario": scenario.value, "status": "ok", "occurrences": 0,
-                "last_occurrence": None, "last_action": None,
-                "last_error_code": None, "detail": None,
+                "scenario": scenario.value,
+                "status": "ok",
+                "occurrences": 0,
+                "last_occurrence": None,
+                "last_action": None,
+                "last_error_code": None,
+                "detail": None,
             }
             for scenario in SCENARIOS
         }

@@ -31,7 +31,10 @@ class MarketOrderRequest(BaseModel):
     tp: float = Field(0.0, ge=0.0)
     deviation: int = Field(20, ge=0, le=1000)
     comment: str = Field("NSE_MARKET", max_length=31)
-    magic: int | None = Field(None, description="Override magic; default = explicitly configured bridge magic, or no magic stamped when none is configured")
+    magic: int | None = Field(
+        None,
+        description="Override magic; default = explicitly configured bridge magic, or no magic stamped when none is configured",
+    )
 
 
 @command(
@@ -81,8 +84,15 @@ class SimpleOrderRequest(BaseModel):
 )
 def trade_send_buy_order(ctx: BridgeContext, params: SimpleOrderRequest) -> dict[str, Any]:
     return market_order(
-        ctx, symbol=params.symbol, side="buy", volume=params.volume, sl=params.sl,
-        tp=params.tp, deviation=params.deviation, comment=params.comment, magic=params.magic,
+        ctx,
+        symbol=params.symbol,
+        side="buy",
+        volume=params.volume,
+        sl=params.sl,
+        tp=params.tp,
+        deviation=params.deviation,
+        comment=params.comment,
+        magic=params.magic,
     )
 
 
@@ -98,8 +108,15 @@ def trade_send_buy_order(ctx: BridgeContext, params: SimpleOrderRequest) -> dict
 )
 def trade_send_sell_order(ctx: BridgeContext, params: SimpleOrderRequest) -> dict[str, Any]:
     return market_order(
-        ctx, symbol=params.symbol, side="sell", volume=params.volume, sl=params.sl,
-        tp=params.tp, deviation=params.deviation, comment=params.comment, magic=params.magic,
+        ctx,
+        symbol=params.symbol,
+        side="sell",
+        volume=params.volume,
+        sl=params.sl,
+        tp=params.tp,
+        deviation=params.deviation,
+        comment=params.comment,
+        magic=params.magic,
     )
 
 
@@ -349,8 +366,14 @@ def trade_reverse_position(ctx: BridgeContext, params: TicketOnlyRequest) -> dic
     side = "sell" if pos_type == 0 else "buy"
     closed = close_position(ctx, params.ticket)
     opened = market_order(
-        ctx, symbol=symbol, side=side, volume=volume, sl=0.0, tp=0.0,
-        comment="NSE_REVERSE", magic=magic or None,
+        ctx,
+        symbol=symbol,
+        side=side,
+        volume=volume,
+        sl=0.0,
+        tp=0.0,
+        comment="NSE_REVERSE",
+        magic=magic or None,
     )
     return {
         "status": "done",
@@ -435,9 +458,7 @@ def trade_calculate_order_result(ctx: BridgeContext, params: CalcResultRequest) 
             op_type, params.symbol, float(params.volume), float(params.price_open), float(params.price_close)
         )
 
-    raw = ctx.driver.run(
-        job, op="order_calc_profit", context={"symbol": params.symbol, "volume": params.volume}
-    )
+    raw = ctx.driver.run(job, op="order_calc_profit", context={"symbol": params.symbol, "volume": params.volume})
     if raw is None:
         raise BridgeError(
             ErrorCode.MT5_CALL_FAILED,

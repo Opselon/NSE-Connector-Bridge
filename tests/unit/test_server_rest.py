@@ -47,15 +47,22 @@ def _record_sleep(sleeps: list[float]):
 def _ok_validate(request: httpx.Request) -> httpx.Response:
     assert request.headers["Authorization"] == "Bearer tok-SECRET"
     assert request.headers["X-NSE-Device-Id"] == "dev-1"
-    return httpx.Response(200, json={
-        "valid": True,
-        "user_id": "user-1",
-        "subscription": {"active": True, "plan": "pro"},
-        "entitlements": {
-            "history_sync": True, "ai_coach": False, "position_manager": True,
-            "auto_trade": True, "max_devices": 3, "max_accounts": 2,
+    return httpx.Response(
+        200,
+        json={
+            "valid": True,
+            "user_id": "user-1",
+            "subscription": {"active": True, "plan": "pro"},
+            "entitlements": {
+                "history_sync": True,
+                "ai_coach": False,
+                "position_manager": True,
+                "auto_trade": True,
+                "max_devices": 3,
+                "max_accounts": 2,
+            },
         },
-    })
+    )
 
 
 @pytest.mark.unit
@@ -128,9 +135,13 @@ async def test_validate_key_valid_false_is_not_success():
 async def test_register_device_success():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/connector/register-device"
-        return httpx.Response(200, json={
-            "registered": True, "session_expires_at": "2099-01-01T00:00:00Z",
-        })
+        return httpx.Response(
+            200,
+            json={
+                "registered": True,
+                "session_expires_at": "2099-01-01T00:00:00Z",
+            },
+        )
 
     client = _client(handler)
     result = await client.register_device()
@@ -166,7 +177,9 @@ async def test_send_batch_5xx_retried_then_gives_up():
         calls.append(request.url.path)
         return httpx.Response(503, json={"error": {"code": "unavailable", "message": "down"}})
 
-    client = _client(handler, )
+    client = _client(
+        handler,
+    )
     with pytest.raises(ServerError) as excinfo:
         await client.send_batch({"batch_id": "b1", "kind": "account", "items": {}, "count": 1})
     assert excinfo.value.code is ServerErrorCode.SERVER_UNAVAILABLE
@@ -213,10 +226,14 @@ async def test_send_batch_401_reenrol_fails_with_revoked_key():
 @pytest.mark.unit
 async def test_send_batch_accepted_false_raises():
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={
-            "accepted": False, "batch_id": "b1",
-            "error": {"code": "validation_failed", "message": "bad kind"},
-        })
+        return httpx.Response(
+            200,
+            json={
+                "accepted": False,
+                "batch_id": "b1",
+                "error": {"code": "validation_failed", "message": "bad kind"},
+            },
+        )
 
     client = _client(handler)
     with pytest.raises(ServerError):
@@ -228,9 +245,14 @@ async def test_send_batch_accepted_false_raises():
 async def test_heartbeat_reports_pending_commands():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/connector/heartbeat"
-        return httpx.Response(200, json={
-            "ok": True, "server_time": "2026-11-18T00:00:00Z", "pending_commands": 3,
-        })
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "server_time": "2026-11-18T00:00:00Z",
+                "pending_commands": 3,
+            },
+        )
 
     client = _client(handler)
     result = await client.heartbeat()
@@ -247,9 +269,13 @@ async def test_session_refresh_and_revoke():
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request.url.path)
         if request.url.path.endswith("session/refresh"):
-            return httpx.Response(200, json={
-                "refreshed": True, "session_expires_at": "2099-06-01T00:00:00Z",
-            })
+            return httpx.Response(
+                200,
+                json={
+                    "refreshed": True,
+                    "session_expires_at": "2099-06-01T00:00:00Z",
+                },
+            )
         return httpx.Response(200, json={"revoked": True})
 
     client = _client(handler)
@@ -265,11 +291,18 @@ async def test_session_refresh_and_revoke():
 async def test_releases_latest_parsed_for_updater():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
-        return httpx.Response(200, json={
-            "version": "0.2.0", "download_url": "https://example.invalid/x.exe",
-            "sha256": "a" * 64, "size_bytes": 123, "min_connector_version": "0.1.0",
-            "signature": "YmFzZTY0", "released_at": "2026-11-18T00:00:00Z",
-        })
+        return httpx.Response(
+            200,
+            json={
+                "version": "0.2.0",
+                "download_url": "https://example.invalid/x.exe",
+                "sha256": "a" * 64,
+                "size_bytes": 123,
+                "min_connector_version": "0.1.0",
+                "signature": "YmFzZTY0",
+                "released_at": "2026-11-18T00:00:00Z",
+            },
+        )
 
     client = _client(handler)
     release = await client.releases_latest()

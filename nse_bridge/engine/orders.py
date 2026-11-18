@@ -56,12 +56,11 @@ def _history_orders(ctx: BridgeContext, from_dt: datetime, to_dt: datetime, grou
             return mt5.history_orders_get(from_dt, to_dt, group=group)
         return mt5.history_orders_get(from_dt, to_dt)
 
-    raw = ctx.driver.run(
-        job, op="history_orders_get", context={"group": group, "from": str(from_dt), "to": str(to_dt)}
-    )
+    raw = ctx.driver.run(job, op="history_orders_get", context={"group": group, "from": str(from_dt), "to": str(to_dt)})
     if raw is None:
         raise BridgeError(
-            ErrorCode.MT5_CALL_FAILED, "history_orders_get() failed.",
+            ErrorCode.MT5_CALL_FAILED,
+            "history_orders_get() failed.",
             details={"group": group},
         )
     return list(raw)
@@ -73,12 +72,11 @@ def _history_deals(ctx: BridgeContext, from_dt: datetime, to_dt: datetime, group
             return mt5.history_deals_get(from_dt, to_dt, group=group)
         return mt5.history_deals_get(from_dt, to_dt)
 
-    raw = ctx.driver.run(
-        job, op="history_deals_get", context={"group": group, "from": str(from_dt), "to": str(to_dt)}
-    )
+    raw = ctx.driver.run(job, op="history_deals_get", context={"group": group, "from": str(from_dt), "to": str(to_dt)})
     if raw is None:
         raise BridgeError(
-            ErrorCode.MT5_CALL_FAILED, "history_deals_get() failed.",
+            ErrorCode.MT5_CALL_FAILED,
+            "history_deals_get() failed.",
             details={"group": group},
         )
     return list(raw)
@@ -105,7 +103,9 @@ class OrderInfoResponse(BaseModel):
 class HistoryRequest(BaseModel):
     from_utc: str | None = Field(None, description="Default: last 24h")
     to_utc: str | None = None
-    symbol: str | None = Field(None, description="MT5 group filter (a broker symbol name, or a prefix wildcard such as EUR*)")
+    symbol: str | None = Field(
+        None, description="MT5 group filter (a broker symbol name, or a prefix wildcard such as EUR*)"
+    )
 
 
 class HistoryOrdersResponse(BaseModel):
@@ -246,7 +246,7 @@ def get_trading_history_orders(ctx: BridgeContext, params: HistoryRequest | None
     now = datetime.now(UTC) + timedelta(minutes=offset)
     from_dt = broker_dt(p.from_utc, ctx.settings) if p.from_utc else now - timedelta(days=1)
     to_dt = broker_dt(p.to_utc, ctx.settings) if p.to_utc else now
-    if from_dt is None or to_dt < from_dt:
+    if from_dt is None or to_dt is None or to_dt < from_dt:
         raise BridgeError(ErrorCode.VALIDATION, "Invalid history window", http_status=422)
     raw = _history_orders(ctx, from_dt, to_dt, p.symbol.strip() if p.symbol else None)
     orders = [build_history_order_model(o, ctx.settings.broker_utc_offset_minutes).model_dump() for o in raw]
@@ -274,6 +274,8 @@ def get_trading_history_positions(ctx: BridgeContext, params: HistoryRequest | N
     now = datetime.now(UTC) + timedelta(minutes=offset)
     from_dt = broker_dt(p.from_utc, ctx.settings) if p.from_utc else now - timedelta(days=1)
     to_dt = broker_dt(p.to_utc, ctx.settings) if p.to_utc else now
+    if from_dt is None or to_dt is None or to_dt < from_dt:
+        raise BridgeError(ErrorCode.VALIDATION, "Invalid history window", http_status=422)
     raw = _history_deals(ctx, from_dt, to_dt, p.symbol.strip() if p.symbol else None)
 
     grouped: dict[int, list[Any]] = defaultdict(list)
@@ -345,6 +347,8 @@ def get_trading_deals_history(ctx: BridgeContext, params: HistoryRequest | None)
     now = datetime.now(UTC) + timedelta(minutes=offset)
     from_dt = broker_dt(p.from_utc, ctx.settings) if p.from_utc else now - timedelta(days=1)
     to_dt = broker_dt(p.to_utc, ctx.settings) if p.to_utc else now
+    if from_dt is None or to_dt is None or to_dt < from_dt:
+        raise BridgeError(ErrorCode.VALIDATION, "Invalid history window", http_status=422)
     raw = _history_deals(ctx, from_dt, to_dt, p.symbol.strip() if p.symbol else None)
     deals = [build_deal_model(d, offset).model_dump() for d in raw]
     return {"count": len(deals), "deals": deals}
@@ -476,9 +480,7 @@ def get_order_execution_details(ctx: BridgeContext, params: TicketRequest) -> di
     now = datetime.now(UTC) + timedelta(minutes=offset)
     deals_raw = _history_deals(ctx, now - timedelta(days=365), now, None)
     deals = [
-        build_deal_model(d, offset).model_dump()
-        for d in deals_raw
-        if int(_f(d, "order", 0) or 0) == params.ticket
+        build_deal_model(d, offset).model_dump() for d in deals_raw if int(_f(d, "order", 0) or 0) == params.ticket
     ]
     slippage = None
     note = None

@@ -88,13 +88,9 @@ class PositionSizeResponse(BaseModel):
 )
 def calculate_position_size(ctx: BridgeContext, params: PositionSizeRequest) -> dict[str, Any]:
     if params.risk_percent is None and params.risk_amount is None:
-        raise BridgeError(
-            ErrorCode.VALIDATION, "Provide risk_percent or risk_amount.", http_status=422
-        )
+        raise BridgeError(ErrorCode.VALIDATION, "Provide risk_percent or risk_amount.", http_status=422)
     if params.stop_points is None and params.stop_price is None:
-        raise BridgeError(
-            ErrorCode.VALIDATION, "Provide stop_points or stop_price.", http_status=422
-        )
+        raise BridgeError(ErrorCode.VALIDATION, "Provide stop_points or stop_price.", http_status=422)
     symbol = params.symbol.strip()
     spec = require_symbol_info(ctx, symbol)
     tick = _fresh_tick(ctx, symbol)
@@ -105,16 +101,22 @@ def calculate_position_size(ctx: BridgeContext, params: PositionSizeRequest) -> 
         if stop_distance <= 0:
             raise BridgeError(ErrorCode.VALIDATION, "stop_price equals entry price.", http_status=422)
     else:
-        stop_distance = float(params.stop_points) * float(spec.point or 0.0)
+        # Guarded above: stop_price None implies stop_points is set.
+        stop_points = params.stop_points
+        assert stop_points is not None, "stop_points is required when stop_price is absent"
+        stop_distance = float(stop_points) * float(spec.point or 0.0)
 
     from .common import account_info_model
 
     acc = account_info_model(ctx)
-    risk_money = (
-        float(params.risk_amount)
-        if params.risk_amount is not None
-        else float(acc.balance or 0.0) * float(params.risk_percent) / 100.0
-    )
+    risk_amount = params.risk_amount
+    risk_percent = params.risk_percent
+    # Guarded above: one of the two is always set.
+    if risk_amount is not None:
+        risk_money = float(risk_amount)
+    else:
+        assert risk_percent is not None, "risk_amount or risk_percent is required"
+        risk_money = float(acc.balance or 0.0) * float(risk_percent) / 100.0
     vpu = _value_per_price_unit(ctx, symbol, spec, tick)
     if vpu <= 0:
         raise BridgeError(
@@ -197,7 +199,11 @@ def calculate_trade_risk(ctx: BridgeContext, params: TradeRiskRequest) -> dict[s
     if params.stop_price:
         stop = float(params.stop_price)
     elif params.stop_points:
-        stop = entry - float(params.stop_points) * point if params.side == "buy" else entry + float(params.stop_points) * point
+        stop = (
+            entry - float(params.stop_points) * point
+            if params.side == "buy"
+            else entry + float(params.stop_points) * point
+        )
     else:
         raise BridgeError(ErrorCode.VALIDATION, "Provide stop_price or stop_points.", http_status=422)
     risk_points = abs(entry - stop) / point if point > 0 else None
@@ -553,12 +559,16 @@ def validate_trade_request(ctx: BridgeContext, params: ValidateTradeRequest) -> 
 
     symbol = params.symbol.strip()
     # structural geometry (shared with the pending-order validator; price None = market check)
-    price_for_check = params.price or 0.0
     structural_reasons: list[str] = []
     if params.price is not None:
         structural_reasons = validate_pending(
-            ctx, symbol, "BUY_LIMIT" if params.side == "buy" else "SELL_LIMIT",
-            params.price, params.sl, params.tp, params.volume,
+            ctx,
+            symbol,
+            "BUY_LIMIT" if params.side == "buy" else "SELL_LIMIT",
+            params.price,
+            params.sl,
+            params.tp,
+            params.volume,
         )
     else:
         spec = require_symbol_info(ctx, symbol)
@@ -580,15 +590,17 @@ def validate_trade_request(ctx: BridgeContext, params: ValidateTradeRequest) -> 
 
     def job(mt5: Any):
         op_type = mt5.ORDER_TYPE_BUY if params.side == "buy" else mt5.ORDER_TYPE_SELL
-        return mt5.order_check({
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": float(params.volume),
-            "type": op_type,
-            "price": float(price),
-            "sl": float(params.sl),
-            "tp": float(params.tp),
-        })
+        return mt5.order_check(
+            {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": float(params.volume),
+                "type": op_type,
+                "price": float(price),
+                "sl": float(params.sl),
+                "tp": float(params.tp),
+            }
+        )
 
     check = ctx.driver.run(job, op="order_check", context={"symbol": symbol})
     broker = {}

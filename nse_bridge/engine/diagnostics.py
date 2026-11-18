@@ -236,10 +236,7 @@ def get_bridge_capabilities(ctx: BridgeContext, params: None) -> dict[str, Any]:
             "retcode_diagnostics": True,
             "ambiguous_fill_recovery": True,
         },
-        "commands": [
-            {"number": c.number, "name": c.name, "category": c.category, "mutates": c.mutates}
-            for c in cmds
-        ],
+        "commands": [{"number": c.number, "name": c.name, "category": c.category, "mutates": c.mutates} for c in cmds],
     }
 
 
@@ -287,6 +284,7 @@ def get_mt5_diagnostic_report(ctx: BridgeContext, params: None) -> dict[str, Any
     account = None
     if ctx.driver.connected:
         try:
+
             def job(mt5: Any):
                 return mt5.terminal_info()
 
@@ -299,11 +297,11 @@ def get_mt5_diagnostic_report(ctx: BridgeContext, params: None) -> dict[str, Any
                 "path": _f(raw, "path"),
                 "data_path": _f(raw, "data_path"),
             }
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — a failing probe degrades to {"error": ...}, never fails the summary
             terminal = {"error": str(exc)}
         try:
             account = account_info_model(ctx).model_dump()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — a failing probe degrades to {"error": ...}, never fails the summary
             account = {"error": str(exc)}
     subs = [
         {"symbol": s.symbol, "interval_ms": s.interval_ms, "sent": s.sent, "created_at": s.created_at}

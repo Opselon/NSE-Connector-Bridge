@@ -144,8 +144,7 @@ class DurableResultStore:
         while len(encoded) > self.max_bytes and items:
             dropped = items.pop(0)
             logger.warning(
-                "[RESULTS] durable result store over {} bytes: evicted oldest "
-                "result correlation_id={}",
+                "[RESULTS] durable result store over {} bytes: evicted oldest result correlation_id={}",
                 self.max_bytes,
                 _correlation_id(dropped),
             )

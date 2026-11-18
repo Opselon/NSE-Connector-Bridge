@@ -30,9 +30,7 @@ def _no_bridge_env(monkeypatch):
 
 @pytest.fixture
 def client(tmp_path):
-    settings = BridgeSettings(
-        _env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs")
-    )
+    settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
     driver = Mt5Driver(settings)
     ctx = BridgeContext(settings=settings, driver=driver)
     app = create_app(ctx)
@@ -62,9 +60,7 @@ def test_wrong_api_key_is_401(client):
 
 def test_correct_api_key_is_200(client):
     http, ctx = client
-    resp = http.get(
-        "/api/v1/commands", headers={"X-API-Key": ctx.settings.local_api_key}
-    )
+    resp = http.get("/api/v1/commands", headers={"X-API-Key": ctx.settings.local_api_key})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
 

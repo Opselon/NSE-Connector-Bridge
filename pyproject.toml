@@ -37,3 +37,18 @@ log_cli = false
 
 [tool.ruff]
 line-length = 120
+
+[tool.mypy]
+# Pragmatic baseline (spec §20 static analysis): mypy runs in CI and
+# must pass. The pydantic plugin is required — without it mypy treats
+# `Field(...)` defaults as required `__init__` arguments and reports
+# false "missing named argument" errors on every request model.
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = "keyring.*"
+# keyring ships no type stubs; its Windows backend is loaded at
+# runtime only (see secrets.py). Nothing else in nse_bridge imports
+# an untyped third-party module, so this stays narrow on purpose.
+ignore_missing_imports = true

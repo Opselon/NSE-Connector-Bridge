@@ -62,9 +62,9 @@ def test_translate_retcode_known_and_unknown():
 
 
 def test_classify_retcode_cause_classes():
-    assert classify_retcode(10004) == "TRANSIENT"   # requote
-    assert classify_retcode(10012) == "TRANSIENT"   # timeout
-    assert classify_retcode(10031) == "TRANSIENT"   # no connection
+    assert classify_retcode(10004) == "TRANSIENT"  # requote
+    assert classify_retcode(10012) == "TRANSIENT"  # timeout
+    assert classify_retcode(10031) == "TRANSIENT"  # no connection
     assert classify_retcode(10016) == "REPAIRABLE"  # invalid stops
     assert classify_retcode(10013) == "REPAIRABLE"  # invalid request
     assert classify_retcode(10006) == "HARD_REJECT"  # rejected

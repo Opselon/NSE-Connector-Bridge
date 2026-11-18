@@ -105,13 +105,15 @@ def test_checkpoint_never_moves_backwards():
 @pytest.mark.unit
 def test_checkpoint_advances_to_max_broker_time_in_items():
     cp = SyncCheckpoint()
-    moved = cp.advance_from_items({
-        "orders": [
-            {"ticket": 1, "time_setup": "2026-11-16T10:00:00"},
-            {"ticket": 2, "time_setup": "2026-11-16T12:00:00"},
-        ],
-        "deals": [{"ticket": 9, "time": "2026-11-16T11:00:00"}],
-    })
+    moved = cp.advance_from_items(
+        {
+            "orders": [
+                {"ticket": 1, "time_setup": "2026-11-16T10:00:00"},
+                {"ticket": 2, "time_setup": "2026-11-16T12:00:00"},
+            ],
+            "deals": [{"ticket": 9, "time": "2026-11-16T11:00:00"}],
+        }
+    )
     assert moved == 1
     assert cp.value == datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
 
@@ -186,9 +188,7 @@ async def test_sync_history_pages_500_with_250ms_pause():
     async def fake_history_positions(from_dt, to_dt):
         return {"positions": []}
 
-    engine = _engine(
-        rest, history_orders=fake_history_orders, history_positions=fake_history_positions
-    )
+    engine = _engine(rest, history_orders=fake_history_orders, history_positions=fake_history_positions)
     sent = await engine.sync_history()
     assert sent["history_orders"] == 3  # 500 + 500 + 200
     assert [b["count"] for b in rest.sent] == [500, 500, 200]
@@ -237,7 +237,9 @@ def test_reset_for_account_switch_discards_old_batches():
 @pytest.mark.unit
 def test_chunk_items_pages():
     assert chunk_items(list(range(1200)), 500) == [
-        list(range(500)), list(range(500, 1000)), list(range(1000, 1200)),
+        list(range(500)),
+        list(range(500, 1000)),
+        list(range(1000, 1200)),
     ]
     assert chunk_items([], 500) == []
 

@@ -72,9 +72,7 @@ def _valid_record(record: Any) -> bool:
         return False
     event = record.get("event")
     return (
-        isinstance(event, dict)
-        and isinstance(event.get("event_type"), str)
-        and isinstance(event.get("timestamp"), str)
+        isinstance(event, dict) and isinstance(event.get("event_type"), str) and isinstance(event.get("timestamp"), str)
     )
 
 
@@ -115,9 +113,7 @@ class DurableDiagnosticStore:
             try:
                 record = json.loads(line)
             except ValueError:
-                logger.warning(
-                    "[DIAGNOSTICS] skipping corrupt line in durable diagnostic store {}", self.path
-                )
+                logger.warning("[DIAGNOSTICS] skipping corrupt line in durable diagnostic store {}", self.path)
                 continue
             if _valid_record(record):
                 records.append(record)
@@ -168,8 +164,7 @@ class DurableDiagnosticStore:
             valid = [r for r in records if _valid_record(r)]
             if len(valid) != len(records):
                 logger.warning(
-                    "[DIAGNOSTICS] dropping {} invalid record(s) while rewriting "
-                    "the durable diagnostic store",
+                    "[DIAGNOSTICS] dropping {} invalid record(s) while rewriting the durable diagnostic store",
                     len(records) - len(valid),
                 )
             self._rewrite_locked(valid)
@@ -189,8 +184,7 @@ class DurableDiagnosticStore:
         while len(encoded) > self.max_bytes and records:
             dropped = records.pop(0)
             logger.warning(
-                "[DIAGNOSTICS] durable diagnostic store over {} bytes: evicted oldest "
-                "event_type={}",
+                "[DIAGNOSTICS] durable diagnostic store over {} bytes: evicted oldest event_type={}",
                 self.max_bytes,
                 dropped["event"].get("event_type"),
             )
@@ -245,8 +239,7 @@ class DurableDiagnosticQueue(DiagnosticQueue):
                 event = TelemetryEvent(**record["event"])
             except (TypeError, ValueError):
                 logger.warning(
-                    "[DIAGNOSTICS] skipping persisted diagnostic event with an "
-                    "unusable shape: event_type={}",
+                    "[DIAGNOSTICS] skipping persisted diagnostic event with an unusable shape: event_type={}",
                     record["event"].get("event_type"),
                 )
                 continue

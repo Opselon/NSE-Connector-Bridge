@@ -23,15 +23,17 @@ def test_37_get_chart_history(client):
 
 
 def test_37b_get_chart_history_range_mode(client):
-    data = call(client, "get_chart_history", {"symbol": SYMBOL, "timeframe": "M5", "count": 500, "from_utc": "2026-11-10T00:00:00Z"})
+    data = call(
+        client,
+        "get_chart_history",
+        {"symbol": SYMBOL, "timeframe": "M5", "count": 500, "from_utc": "2026-11-10T00:00:00Z"},
+    )
     assert data["received"] > 0
     assert data["bars"][0]["time_utc"].startswith("2026-11-10") or data["received"] > 10
 
 
 def test_37c_unknown_timeframe_rejected(client):
-    resp = client.post(
-        "/api/v1/get_chart_history", json={"symbol": SYMBOL, "timeframe": "M7", "count": 10}
-    )
+    resp = client.post("/api/v1/get_chart_history", json={"symbol": SYMBOL, "timeframe": "M7", "count": 10})
     assert resp.status_code == 422
     body = resp.json()
     assert body["ok"] is False
@@ -95,7 +97,9 @@ def test_44_get_chart_active_info(client):
 
 
 def test_45_get_chart_multi_timeframe_history(client):
-    data = call(client, "get_chart_multi_timeframe_history", {"symbol": SYMBOL, "timeframes": ["M1", "M5"], "count": 20})
+    data = call(
+        client, "get_chart_multi_timeframe_history", {"symbol": SYMBOL, "timeframes": ["M1", "M5"], "count": 20}
+    )
     assert set(data["series"].keys()) == {"M1", "M5"}
     assert len(data["series"]["M1"]) > 0
     assert len(data["series"]["M5"]) > 0

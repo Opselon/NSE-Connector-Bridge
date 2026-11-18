@@ -206,18 +206,21 @@ class EnrolmentManager:
         if previous != state and self.telemetry is not None:
             if state == EnrolmentState.REGISTERED:
                 self.telemetry.info(
-                    "enrolment.registered", component="server.enrolment",
+                    "enrolment.registered",
+                    component="server.enrolment",
                     details={"attempts": self._status.attempts},
                 )
             elif state == EnrolmentState.FAILED_AUTH:
                 self.telemetry.error(
-                    "enrolment.failed_auth", component="server.enrolment",
+                    "enrolment.failed_auth",
+                    component="server.enrolment",
                     error_code=last_error,
                     details={"terminal": True, "retry": False},
                 )
             elif state == EnrolmentState.FAILED_TRANSIENT:
                 self.telemetry.warn(
-                    "enrolment.failed_transient", component="server.enrolment",
+                    "enrolment.failed_transient",
+                    component="server.enrolment",
                     error_code=last_error,
                     details={"attempts": self._status.attempts},
                 )
@@ -256,9 +259,9 @@ class EnrolmentManager:
                     last_error_message=(exc.message or "")[:200],
                 )
                 logger.error(
-                    "[ENROL] {} failed: {} — terminal for this key, "
-                    "sync stopped, no retry (§3.1)",
-                    step, code.value,
+                    "[ENROL] {} failed: {} — terminal for this key, sync stopped, no retry (§3.1)",
+                    step,
+                    code.value,
                 )
                 return False
             self._transient_failures += 1
@@ -269,7 +272,9 @@ class EnrolmentManager:
             )
             logger.warning(
                 "[ENROL] {} failed ({}: {}) — retrying with backoff",
-                step, code.value, (exc.message or "")[:120],
+                step,
+                code.value,
+                (exc.message or "")[:120],
             )
             return False
         self._transient_failures += 1
@@ -278,8 +283,7 @@ class EnrolmentManager:
             last_error="unexpected_error",
             last_error_message=type(exc).__name__[:200],
         )
-        logger.warning("[ENROL] {} failed unexpectedly: {} — retrying with backoff",
-                       step, type(exc).__name__)
+        logger.warning("[ENROL] {} failed unexpectedly: {} — retrying with backoff", step, type(exc).__name__)
         return False
 
     def _store_validate_result(self, result: ValidateKeyResult) -> None:
@@ -321,7 +325,8 @@ class EnrolmentManager:
         self._set_state(EnrolmentState.REGISTERED)
         logger.info(
             "[ENROL] device enrolled (user_id={}, session_expires_at={})",
-            self._rest.user_id, self.session_expires_at,
+            self._rest.user_id,
+            self.session_expires_at,
         )
         # §4.1: POST the action manifest once enrolled (unchanged-hash
         # no-op via the tracker). Best-effort: a manifest failure must
@@ -416,8 +421,7 @@ class EnrolmentManager:
             if state in (EnrolmentState.REGISTERED, EnrolmentState.VALIDATING):
                 # Park until the state moves (re-auth, new key, stop).
                 while (
-                    self._status.state in (EnrolmentState.REGISTERED, EnrolmentState.VALIDATING)
-                    and not stop.is_set()
+                    self._status.state in (EnrolmentState.REGISTERED, EnrolmentState.VALIDATING) and not stop.is_set()
                 ):
                     await asyncio.sleep(_STATE_POLL_S)
                 continue

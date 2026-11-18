@@ -203,15 +203,11 @@ class CommandState(str, Enum):
 #: Legal lifecycle transitions (clarification #2). Terminal states
 #: (COMPLETED / FAILED / UNKNOWN / EXPIRED) have no outgoing edges.
 LEGAL_TRANSITIONS: dict[CommandState, frozenset[CommandState]] = {
-    CommandState.RECEIVED: frozenset(
-        {CommandState.VALIDATED, CommandState.FAILED, CommandState.EXPIRED}
-    ),
+    CommandState.RECEIVED: frozenset({CommandState.VALIDATED, CommandState.FAILED, CommandState.EXPIRED}),
     CommandState.VALIDATED: frozenset({CommandState.AUTHORIZED, CommandState.FAILED}),
     CommandState.AUTHORIZED: frozenset({CommandState.DISPATCHED, CommandState.FAILED}),
     CommandState.DISPATCHED: frozenset({CommandState.EXECUTING, CommandState.FAILED, CommandState.EXPIRED}),
-    CommandState.EXECUTING: frozenset(
-        {CommandState.COMPLETED, CommandState.FAILED, CommandState.UNKNOWN}
-    ),
+    CommandState.EXECUTING: frozenset({CommandState.COMPLETED, CommandState.FAILED, CommandState.UNKNOWN}),
     CommandState.COMPLETED: frozenset(),
     CommandState.FAILED: frozenset(),
     CommandState.UNKNOWN: frozenset(),
@@ -285,9 +281,7 @@ def parse_envelope(frame: Any) -> CommandEnvelope:
         tp=_num(operation.get("tp")),
         issued_at=str(frame["issued_at"]),
         expires_at=str(frame["expires_at"]),
-        idempotency_key=str(frame["idempotency_key"])
-        if frame.get("idempotency_key") is not None
-        else None,
+        idempotency_key=str(frame["idempotency_key"]) if frame.get("idempotency_key") is not None else None,
         raw=frame,
     )
 
@@ -414,8 +408,7 @@ class CommandExecution:
     def transition(self, new_state: CommandState) -> None:
         if new_state not in LEGAL_TRANSITIONS[self.state]:
             raise ValueError(
-                f"illegal lifecycle transition {self.state.value} → {new_state.value} "
-                f"for command {self.command_id}"
+                f"illegal lifecycle transition {self.state.value} → {new_state.value} for command {self.command_id}"
             )
         self.state = new_state
         self.history.append((new_state.value, datetime.now(UTC).isoformat()))
@@ -570,14 +563,17 @@ class CommandExecutor:
             state = execution.state
             if state is CommandState.COMPLETED:
                 telemetry.info(
-                    "command.completed", component="server.commands",
+                    "command.completed",
+                    component="server.commands",
                     command_id=execution.command_id,
                     details={"status": result.get("status")},
                 )
             elif state is CommandState.UNKNOWN:
                 telemetry.warn(
-                    "command.unknown", component="server.commands",
-                    command_id=execution.command_id, error_code="TRADE_UNVERIFIED",
+                    "command.unknown",
+                    component="server.commands",
+                    command_id=execution.command_id,
+                    error_code="TRADE_UNVERIFIED",
                     details={
                         "status": result.get("status"),
                         "recovery": "reconcile MT5 state before any retry; never blind-retry",
@@ -585,14 +581,18 @@ class CommandExecutor:
                 )
             elif state is CommandState.EXPIRED:
                 telemetry.info(
-                    "command.expired", component="server.commands",
-                    command_id=execution.command_id, error_code="Expired",
+                    "command.expired",
+                    component="server.commands",
+                    command_id=execution.command_id,
+                    error_code="Expired",
                     details={"status": result.get("status")},
                 )
             elif state is CommandState.FAILED:
                 telemetry.warn(
-                    "command.failed", component="server.commands",
-                    command_id=execution.command_id, error_code=error_code,
+                    "command.failed",
+                    component="server.commands",
+                    command_id=execution.command_id,
+                    error_code=error_code,
                     details={"status": result.get("status")},
                 )
         return execution, result
@@ -621,9 +621,7 @@ class CommandExecutor:
                 user_id=self.user_id,
                 started_at=started,
             )
-            execution.transition(
-                CommandState.EXPIRED if reason is RejectionReason.EXPIRED else CommandState.FAILED
-            )
+            execution.transition(CommandState.EXPIRED if reason is RejectionReason.EXPIRED else CommandState.FAILED)
             execution.result = result
             self._persist(result)
             return execution, result
@@ -763,8 +761,7 @@ class CommandExecutor:
                     category="Execution",
                     source_action=source_tool,
                     cause=exc.message,
-                    recovery="Reconcile the actual MT5 state before any retry; "
-                    "never blind-retry a non-idempotent op.",
+                    recovery="Reconcile the actual MT5 state before any retry; never blind-retry a non-idempotent op.",
                     retry_safe=False,
                     server_intervention_required=True,
                 ),

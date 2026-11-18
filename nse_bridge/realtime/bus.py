@@ -63,11 +63,7 @@ async def tick_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) ->
         try:
             subs = ctx.subscriptions.snapshot()
             now = time.monotonic()
-            due = [
-                s
-                for s in subs
-                if now - last_sent.get(s.symbol, 0.0) >= s.interval_ms / 1000.0
-            ]
+            due = [s for s in subs if now - last_sent.get(s.symbol, 0.0) >= s.interval_ms / 1000.0]
             if due:
                 ctx.driver.ensure_connected()
 
@@ -77,7 +73,9 @@ async def tick_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) ->
                         try:
                             raw = mt5.symbol_info_tick(s.symbol)
                             if raw is not None:
-                                out[s.symbol] = build_tick_model(raw, s.symbol, ctx.settings.broker_utc_offset_minutes).model_dump()
+                                out[s.symbol] = build_tick_model(
+                                    raw, s.symbol, ctx.settings.broker_utc_offset_minutes
+                                ).model_dump()
                         except Exception as exc:  # noqa: BLE001 — one bad tick must not kill the poller
                             logger.debug("[STREAM] tick for {} skipped: {}", s.symbol, type(exc).__name__)
                             continue
@@ -113,9 +111,7 @@ async def account_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event)
                 bus.publish("account_update", acc.model_dump())
                 sync_engine = getattr(ctx, "sync_engine", None)
                 if sync_engine is not None:
-                    items = sync_engine.account_items(
-                        acc, ctx.driver.connection_state_dict()
-                    )
+                    items = sync_engine.account_items(acc, ctx.driver.connection_state_dict())
                     sync_engine.enqueue("account", items)
         except Exception as exc:  # noqa: BLE001 — a poller must never die on a stray MT5 error
             logger.debug("[STREAM] account poll skipped: {}", exc)
@@ -140,29 +136,23 @@ async def positions_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Even
     while not stop.is_set():
         try:
             if ctx.driver.connected:
+
                 def job(mt5: Any):
                     raw_positions = mt5.positions_get()
                     raw_orders = mt5.orders_get()
-                    return (list(raw_positions) if raw_positions else [],
-                            list(raw_orders) if raw_orders else [])
+                    return (list(raw_positions) if raw_positions else [], list(raw_orders) if raw_orders else [])
 
                 raw_positions, raw_orders = await run_in_threadpool(ctx.driver.run, job, "positions_poll")
                 offset = ctx.settings.broker_utc_offset_minutes
-                positions = [
-                    build_position_model(r, offset).model_dump() for r in raw_positions
-                ]
-                orders = [
-                    build_order_model(r, offset).model_dump() for r in raw_orders
-                ]
+                positions = [build_position_model(r, offset).model_dump() for r in raw_positions]
+                orders = [build_order_model(r, offset).model_dump() for r in raw_orders]
                 bus.publish(
                     "positions_update",
                     {"count": len(positions), "positions": positions},
                 )
                 sync_engine = getattr(ctx, "sync_engine", None)
                 if sync_engine is not None:
-                    sync_engine.enqueue(
-                        "positions", sync_engine.positions_items(positions, orders)
-                    )
+                    sync_engine.enqueue("positions", sync_engine.positions_items(positions, orders))
         except BridgeError:
             pass  # not connected — skip silently
         except Exception as exc:  # noqa: BLE001 — a poller must never die on a stray MT5 error
@@ -182,15 +172,13 @@ async def orders_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) 
     while not stop.is_set():
         try:
             if ctx.driver.connected:
+
                 def job(mt5: Any):
                     raw = mt5.orders_get()
                     return list(raw) if raw else []
 
                 rows = await run_in_threadpool(ctx.driver.run, job, "orders_poll")
-                orders = [
-                    build_order_model(r, ctx.settings.broker_utc_offset_minutes).model_dump()
-                    for r in rows
-                ]
+                orders = [build_order_model(r, ctx.settings.broker_utc_offset_minutes).model_dump() for r in rows]
                 bus.publish("orders_update", {"count": len(orders), "orders": orders})
         except BridgeError:
             pass

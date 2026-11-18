@@ -62,10 +62,19 @@ def _build_versioned_pe(version=(5, 0, 4750, 0)):
     key = "VS_VERSION_INFO\0".encode("utf-16-le")
     fixed = struct.pack(
         "<13I",
-        0xFEEF04BD, 0x00010000,
+        0xFEEF04BD,
+        0x00010000,
         (version[0] << 16) | version[1],
         (version[2] << 16) | version[3],
-        0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     )
     blob = struct.pack("<HHH", 92, 52, 0) + key + b"\x00\x00" + fixed
     assert len(blob) == 92
@@ -73,8 +82,7 @@ def _build_versioned_pe(version=(5, 0, 4750, 0)):
     def rsrc_dir(entries):
         hdr = struct.pack("<IIHHHH", 0, 0, 0, 0, 0, len(entries))
         body = b"".join(
-            struct.pack("<II", name, (0x80000000 | target) if is_dir else target)
-            for name, target, is_dir in entries
+            struct.pack("<II", name, (0x80000000 | target) if is_dir else target) for name, target, is_dir in entries
         )
         return hdr + body
 
@@ -178,13 +186,9 @@ def test_discover_terminals_multiple_sources(settings, tmp_path, monkeypatch):
     custom_a = _fake_terminal(tmp_path / "custom-a" / "terminal64.exe")
     custom_b = _fake_terminal(tmp_path / "custom-b" / "terminal.exe")
     reg_term = _fake_terminal(tmp_path / "reg" / "terminal64.exe")
-    fake_reg = _FakeWinreg(
-        {(1, _app_paths_subkey("terminal64.exe")): str(reg_term)}
-    )
+    fake_reg = _FakeWinreg({(1, _app_paths_subkey("terminal64.exe")): str(reg_term)})
     settings.mt5_custom_terminal_dirs = f"{tmp_path / 'custom-a'},{tmp_path / 'custom-b'}"
-    found = discover_terminals(
-        settings, running_paths=[str(custom_b)], winreg_module=fake_reg
-    )
+    found = discover_terminals(settings, running_paths=[str(custom_b)], winreg_module=fake_reg)
     by_path = {t.path: t for t in found}
     assert set(by_path) == {str(env_term), str(custom_a), str(custom_b), str(reg_term)}
     assert by_path[str(env_term)].source == "env"
@@ -205,9 +209,7 @@ def test_discover_terminals_portable_subdir(settings, tmp_path):
 
 def test_discover_terminals_dedupes_same_path(settings, tmp_path):
     term = _fake_terminal(tmp_path / "dup" / "terminal64.exe")
-    found = discover_terminals(
-        settings, extra_dirs=[str(tmp_path / "dup"), str(tmp_path / "dup")]
-    )
+    found = discover_terminals(settings, extra_dirs=[str(tmp_path / "dup"), str(tmp_path / "dup")])
     assert [t.path for t in found] == [str(term)]
 
 
@@ -240,9 +242,7 @@ def test_discover_terminals_version_from_pe(settings, tmp_path):
 
 
 def test_discover_terminals_ignores_missing_custom_dirs(settings, tmp_path):
-    found = discover_terminals(
-        settings, extra_dirs=[str(tmp_path / "does-not-exist")]
-    )
+    found = discover_terminals(settings, extra_dirs=[str(tmp_path / "does-not-exist")])
     assert found == []
 
 
@@ -251,9 +251,7 @@ def test_discover_terminals_ignores_missing_custom_dirs(settings, tmp_path):
 # ---------------------------------------------------------------------------
 @pytest.fixture
 def client(tmp_path):
-    settings = BridgeSettings(
-        _env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs")
-    )
+    settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
     driver = Mt5Driver(settings)
     ctx = BridgeContext(settings=settings, driver=driver)
     app = create_app(ctx)
@@ -345,9 +343,7 @@ def _appdata_tree(tmp_path, *hash_names):
 def test_discover_terminals_appdata_data_dir_single_terminal(settings, tmp_path):
     _fake_terminal(tmp_path / "term" / "terminal64.exe")
     root, (data,) = _appdata_tree(tmp_path, "D0E8209F77C8CF37AD8BF550E51FF075")
-    found = discover_terminals(
-        settings, extra_dirs=[str(tmp_path / "term")], appdata_root=str(root)
-    )
+    found = discover_terminals(settings, extra_dirs=[str(tmp_path / "term")], appdata_root=str(root))
     assert len(found) == 1
     assert found[0].data_dir == str(data)
 
@@ -373,9 +369,7 @@ def test_discover_terminals_appdata_data_dir_ambiguous_two_dirs(settings, tmp_pa
         "D0E8209F77C8CF37AD8BF550E51FF075",
         "A1B2C3D4E5F60718293A4B5C6D7E8F90A",
     )
-    found = discover_terminals(
-        settings, extra_dirs=[str(tmp_path / "term")], appdata_root=str(root)
-    )
+    found = discover_terminals(settings, extra_dirs=[str(tmp_path / "term")], appdata_root=str(root))
     assert len(found) == 1
     assert found[0].data_dir is None
 
@@ -384,9 +378,7 @@ def test_discover_terminals_appdata_dir_without_mql5_ignored(settings, tmp_path)
     _fake_terminal(tmp_path / "term" / "terminal64.exe")
     root = tmp_path / "AppData" / "MetaQuotes" / "Terminal"
     (root / "D0E8209F77C8CF37AD8BF550E51FF075").mkdir(parents=True)  # no MQL5 inside
-    found = discover_terminals(
-        settings, extra_dirs=[str(tmp_path / "term")], appdata_root=str(root)
-    )
+    found = discover_terminals(settings, extra_dirs=[str(tmp_path / "term")], appdata_root=str(root))
     assert len(found) == 1
     assert found[0].data_dir is None
 
@@ -395,9 +387,7 @@ def test_discover_terminals_portable_data_dir_wins_over_appdata(settings, tmp_pa
     base = tmp_path / "portable" / "Broker MT5"
     _portable_terminal(base / "terminal64.exe")
     root, _ = _appdata_tree(tmp_path, "D0E8209F77C8CF37AD8BF550E51FF075")
-    found = discover_terminals(
-        settings, extra_dirs=[str(tmp_path / "portable")], appdata_root=str(root)
-    )
+    found = discover_terminals(settings, extra_dirs=[str(tmp_path / "portable")], appdata_root=str(root))
     assert len(found) == 1
     assert found[0].data_dir == str(base)
 
@@ -436,10 +426,7 @@ class _FakeMt5:
         self.symbols_get_called = True
         if self._fail_symbols_get:
             raise RuntimeError("symbols_get failed")
-        return [
-            SimpleNamespace(name=name, visible=name in self._visible)
-            for name in self._ticks
-        ]
+        return [SimpleNamespace(name=name, visible=name in self._visible) for name in self._ticks]
 
     def symbol_info_tick(self, name):
         self.tick_calls.append(name)
@@ -479,9 +466,7 @@ def test_detect_broker_offset_prefers_visible_symbols(settings):
     try:
         now = int(time.time())
         # Only DISC1 is visible; the hidden one must not be probed first.
-        fake = _FakeMt5(
-            {"DISC1": now + 90 * 60, "HID1": now + 30 * 60}, visible={"DISC1"}
-        )
+        fake = _FakeMt5({"DISC1": now + 90 * 60, "HID1": now + 30 * 60}, visible={"DISC1"})
         driver._detect_broker_offset(fake)
         assert fake.tick_calls[0] == "DISC1"
         assert settings.broker_utc_offset_minutes == 90

@@ -79,9 +79,7 @@ def test_task_validation_order_malformed_expired_device_account():
     assert validator.validate(expired).rejection is TaskRejection.EXPIRED
     wrong_device = _frame(device_id="someone-else")
     assert validator.validate(wrong_device).rejection is TaskRejection.WRONG_DEVICE
-    validator_bound = TaskValidator(
-        DEVICE, get_account_id=lambda: "123", clock=lambda: NOW
-    )
+    validator_bound = TaskValidator(DEVICE, get_account_id=lambda: "123", clock=lambda: NOW)
     assert validator_bound.validate(_frame(account_id="999")).rejection is TaskRejection.WRONG_ACCOUNT
 
 
@@ -120,8 +118,12 @@ def test_task_result_envelope_mirrors_action_result():
     started = NOW
     completed = NOW + timedelta(milliseconds=10)
     result = build_task_result(
-        task_id="t1", status="completed", started_at=started,
-        completed_at=completed, result={"answer": 42}, device_id=DEVICE,
+        task_id="t1",
+        status="completed",
+        started_at=started,
+        completed_at=completed,
+        result={"answer": 42},
+        device_id=DEVICE,
     )
     assert result["event_type"] == "task.result"
     assert result["correlation_id"] == "t1"

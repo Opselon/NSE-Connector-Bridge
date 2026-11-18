@@ -55,21 +55,32 @@ def _record_sleep(sleeps: list[float]):
 
 
 def _ok_validate(request: httpx.Request) -> httpx.Response:
-    return httpx.Response(200, json={
-        "valid": True,
-        "user_id": "user-1",
-        "subscription": {"active": True, "plan": "pro"},
-        "entitlements": {
-            "history_sync": True, "ai_coach": False, "position_manager": True,
-            "auto_trade": True, "max_devices": 3, "max_accounts": 2,
+    return httpx.Response(
+        200,
+        json={
+            "valid": True,
+            "user_id": "user-1",
+            "subscription": {"active": True, "plan": "pro"},
+            "entitlements": {
+                "history_sync": True,
+                "ai_coach": False,
+                "position_manager": True,
+                "auto_trade": True,
+                "max_devices": 3,
+                "max_accounts": 2,
+            },
         },
-    })
+    )
 
 
 def _ok_register(request: httpx.Request) -> httpx.Response:
-    return httpx.Response(200, json={
-        "registered": True, "session_expires_at": "2099-01-01T00:00:00Z",
-    })
+    return httpx.Response(
+        200,
+        json={
+            "registered": True,
+            "session_expires_at": "2099-01-01T00:00:00Z",
+        },
+    )
 
 
 def _ok_manifest(request: httpx.Request) -> httpx.Response:
@@ -108,7 +119,8 @@ async def test_tracker_unchanged_hash_is_noop():
         return _ok_manifest(request)
 
     rest = RestClient(
-        _settings(), "dev-1",
+        _settings(),
+        "dev-1",
         transport=httpx.MockTransport(handler),
         sleep=_record_sleep([]),
     )
@@ -134,7 +146,8 @@ async def test_tracker_refused_manifest_is_not_marked_sent():
         return httpx.Response(200, json={"accepted": False, "manifest_hash": "deadbeef"})
 
     rest = RestClient(
-        _settings(), "dev-1",
+        _settings(),
+        "dev-1",
         transport=httpx.MockTransport(handler),
         sleep=_record_sleep([]),
     )
@@ -153,7 +166,8 @@ async def test_tracker_refused_manifest_is_not_marked_sent():
 def _manager(handler, **overrides):
     settings = _settings(**overrides)
     rest = RestClient(
-        settings, "dev-1",
+        settings,
+        "dev-1",
         transport=httpx.MockTransport(handler),
         sleep=_record_sleep([]),
     )

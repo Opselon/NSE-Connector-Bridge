@@ -28,14 +28,27 @@ def _registry():
 def test_registry_covers_exactly_the_20_spec_scenarios():
     assert len(SCENARIOS) == 20
     assert {s.value for s in SCENARIOS} == {
-        "internet_loss", "platform_down", "ws_drop", "server_restart",
-        "mt5_close", "mt5_restart", "ipc_loss", "terminal_path_change",
-        "auth_expiry", "registration_invalid", "lost_execution_response",
-        "duplicate_commands", "expired_command", "invalid_local_config",
+        "internet_loss",
+        "platform_down",
+        "ws_drop",
+        "server_restart",
+        "mt5_close",
+        "mt5_restart",
+        "ipc_loss",
+        "terminal_path_change",
+        "auth_expiry",
+        "registration_invalid",
+        "lost_execution_response",
+        "duplicate_commands",
+        "expired_command",
+        "invalid_local_config",
         "bridge_restart_mid_operation",
         # Phase B3 (spec §13.9, 13.10, 13.12, 13.17, 13.19+13.20):
-        "account_disconnect", "broker_connection_change",
-        "symbol_unavailable", "diagnostic_queue_full", "update_failure",
+        "account_disconnect",
+        "broker_connection_change",
+        "symbol_unavailable",
+        "diagnostic_queue_full",
+        "update_failure",
     }
     # Every scenario has a handler: no entry falls through to the
     # "no handler registered" failure.
@@ -46,8 +59,13 @@ def test_registry_covers_exactly_the_20_spec_scenarios():
     assert set(summary) == {s.value for s in SCENARIOS}
     for entry in summary.values():
         assert set(entry) == {
-            "scenario", "status", "occurrences", "last_occurrence",
-            "last_action", "last_error_code", "detail",
+            "scenario",
+            "status",
+            "occurrences",
+            "last_occurrence",
+            "last_action",
+            "last_error_code",
+            "detail",
         }
 
 
@@ -56,9 +74,7 @@ def test_registry_covers_exactly_the_20_spec_scenarios():
 # ---------------------------------------------------------------------------
 def test_internet_loss_detected_when_platform_unreachable():
     registry = _registry()
-    state = registry.handle(
-        Scenario.INTERNET_LOSS, HealingContext(platform_reachable=False)
-    )
+    state = registry.handle(Scenario.INTERNET_LOSS, HealingContext(platform_reachable=False))
     assert state.status == "degraded"
     assert state.last_error_code == "network_unreachable"
     assert "no commands executed while offline" in state.last_action
@@ -67,9 +83,7 @@ def test_internet_loss_detected_when_platform_unreachable():
 
 
 def test_internet_loss_not_claimed_when_platform_reachable():
-    state = _registry().handle(
-        Scenario.INTERNET_LOSS, HealingContext(platform_reachable=True)
-    )
+    state = _registry().handle(Scenario.INTERNET_LOSS, HealingContext(platform_reachable=True))
     assert state.status == "ok"
     assert "not an internet loss" in state.last_action
 
@@ -95,7 +109,8 @@ def test_ws_drop_requests_reconnect_via_existing_backoff():
     state = _registry().handle(
         Scenario.WS_DROP,
         HealingContext(
-            ws_connected=False, ws_was_connected=True,
+            ws_connected=False,
+            ws_was_connected=True,
             on_reconnect=lambda: called.append("reconnect"),
         ),
     )
@@ -115,9 +130,7 @@ def test_ws_drop_ok_when_channel_live():
 # 4. server restart
 # ---------------------------------------------------------------------------
 def test_server_restart_fresh_session_and_results_resent():
-    state = _registry().handle(
-        Scenario.SERVER_RESTART, HealingContext(persisted_results=2)
-    )
+    state = _registry().handle(Scenario.SERVER_RESTART, HealingContext(persisted_results=2))
     assert state.status == "recovering"
     assert "fresh WS session" in state.last_action
     assert "re-sent 2 persisted" in state.last_action
@@ -139,7 +152,8 @@ def test_mt5_restart_triggers_fresh_sync():
     state = _registry().handle(
         Scenario.MT5_RESTART,
         HealingContext(
-            mt5_connected=True, mt5_was_connected=False,
+            mt5_connected=True,
+            mt5_was_connected=False,
             on_resync=lambda: called.append("resync"),
         ),
     )
@@ -150,9 +164,7 @@ def test_mt5_restart_triggers_fresh_sync():
 
 
 def test_mt5_restart_still_down_degrades():
-    state = _registry().handle(
-        Scenario.MT5_RESTART, HealingContext(mt5_connected=False, mt5_was_connected=False)
-    )
+    state = _registry().handle(Scenario.MT5_RESTART, HealingContext(mt5_connected=False, mt5_was_connected=False))
     assert state.status == "degraded"
     assert state.last_error_code == "MT5_NOT_RUNNING"
 
@@ -176,7 +188,8 @@ def test_terminal_path_change_triggers_rediscovery():
         Scenario.TERMINAL_PATH_CHANGE,
         HealingContext(
             terminal_path=r"C:\MT5\terminal64.exe",
-            terminal_path_exists=False, terminal_path_changed=True,
+            terminal_path_exists=False,
+            terminal_path_changed=True,
             on_rediscover_terminals=lambda: called.append("rediscover"),
         ),
     )
@@ -194,7 +207,8 @@ def test_auth_expiry_reenrols_via_existing_path():
     state = _registry().handle(
         Scenario.AUTH_EXPIRY,
         HealingContext(
-            session_expired=True, enrolment_state="failed_transient",
+            session_expired=True,
+            enrolment_state="failed_transient",
             on_reenrol=lambda: called.append("reenrol"),
         ),
     )
@@ -218,9 +232,7 @@ def test_auth_expiry_never_retries_a_dead_key():
 # 10. registration invalid
 # ---------------------------------------------------------------------------
 def test_registration_invalid_is_terminal_structured_error():
-    state = _registry().handle(
-        Scenario.REGISTRATION_INVALID, HealingContext(enrolment_state="failed_auth")
-    )
+    state = _registry().handle(Scenario.REGISTRATION_INVALID, HealingContext(enrolment_state="failed_auth"))
     assert state.status == "failed"
     assert state.last_error_code == "registration_invalid"
     assert "terminal for this key" in state.last_action
@@ -255,9 +267,7 @@ def test_lost_execution_response_inconclusive_stays_unknown():
 
 
 def test_lost_execution_response_without_reconciler_is_explicit_error():
-    state = _registry().handle(
-        Scenario.LOST_EXECUTION_RESPONSE, HealingContext(command_id="cmd-1")
-    )
+    state = _registry().handle(Scenario.LOST_EXECUTION_RESPONSE, HealingContext(command_id="cmd-1"))
     assert state.status == "failed"
     assert state.last_error_code == "TRADE_UNVERIFIED"
     assert "stays UNKNOWN" in state.last_action
@@ -295,10 +305,12 @@ def test_expired_command_rejected_never_executed():
 def test_invalid_local_config_is_explicit_structured_error():
     state = _registry().handle(
         Scenario.INVALID_LOCAL_CONFIG,
-        HealingContext(config_errors=[
-            "server_base_url must use https://",
-            "reconnect_max_ms must be >= reconnect_initial_ms",
-        ]),
+        HealingContext(
+            config_errors=[
+                "server_base_url must use https://",
+                "reconnect_max_ms must be >= reconnect_initial_ms",
+            ]
+        ),
     )
     assert state.status == "failed"
     assert state.last_error_code == "invalid_config"
@@ -311,18 +323,14 @@ def test_invalid_local_config_is_explicit_structured_error():
 # 15. Bridge restart mid-operation
 # ---------------------------------------------------------------------------
 def test_bridge_restart_mid_operation_requeues_persisted_results():
-    state = _registry().handle(
-        Scenario.BRIDGE_RESTART_MID_OPERATION, HealingContext(persisted_results=3)
-    )
+    state = _registry().handle(Scenario.BRIDGE_RESTART_MID_OPERATION, HealingContext(persisted_results=3))
     assert state.status == "recovering"
     assert "re-queued 3 persisted" in state.last_action
     assert "nothing silently dropped" in state.last_action
 
 
 def test_bridge_restart_with_nothing_persisted_is_ok():
-    state = _registry().handle(
-        Scenario.BRIDGE_RESTART_MID_OPERATION, HealingContext(persisted_results=0)
-    )
+    state = _registry().handle(Scenario.BRIDGE_RESTART_MID_OPERATION, HealingContext(persisted_results=0))
     assert state.status == "ok"
 
 
@@ -340,8 +348,15 @@ def test_handling_reports_a_structured_telemetry_event():
     assert event.error_code == "MT5_NOT_RUNNING"
     assert event.component == "reliability.self_healing"
     assert list(event.to_dict()) == [
-        "timestamp", "severity", "event_type", "device_id", "correlation_id",
-        "command_id", "component", "error_code", "sanitized_details",
+        "timestamp",
+        "severity",
+        "event_type",
+        "device_id",
+        "correlation_id",
+        "command_id",
+        "component",
+        "error_code",
+        "sanitized_details",
     ]
 
 
@@ -351,9 +366,7 @@ def test_handler_crash_is_recorded_not_raised():
     def _boom() -> dict | None:
         raise RuntimeError("probe exploded")
 
-    state = registry.handle(
-        Scenario.LOST_EXECUTION_RESPONSE, HealingContext(reconcile=_boom)
-    )
+    state = registry.handle(Scenario.LOST_EXECUTION_RESPONSE, HealingContext(reconcile=_boom))
     assert state.status == "failed"
     assert state.last_error_code == "self_healing_error"
 
@@ -369,8 +382,7 @@ def test_handler_crash_is_recorded_not_raised():
 def test_account_disconnect_marks_unavailable_no_execution_attempted():
     state = _registry().handle(
         Scenario.ACCOUNT_DISCONNECT,
-        HealingContext(account_connected=False, account_was_connected=True,
-                        account_login="12345678901"),
+        HealingContext(account_connected=False, account_was_connected=True, account_login="12345678901"),
     )
     assert state.status == "degraded"
     assert state.last_error_code == "MT5_ACCOUNT_NOT_READY"
@@ -383,8 +395,7 @@ def test_account_disconnect_requests_reconnect_when_wired():
     called: list[str] = []
     state = _registry().handle(
         Scenario.ACCOUNT_DISCONNECT,
-        HealingContext(account_connected=False,
-                       on_account_reconnect=lambda: called.append("account-reconnect")),
+        HealingContext(account_connected=False, on_account_reconnect=lambda: called.append("account-reconnect")),
     )
     assert state.status == "degraded"
     assert "account reconnect requested" in state.last_action
@@ -392,9 +403,7 @@ def test_account_disconnect_requests_reconnect_when_wired():
 
 
 def test_account_disconnect_ok_when_account_connected():
-    state = _registry().handle(
-        Scenario.ACCOUNT_DISCONNECT, HealingContext(account_connected=True)
-    )
+    state = _registry().handle(Scenario.ACCOUNT_DISCONNECT, HealingContext(account_connected=True))
     assert state.status == "ok"
 
 
@@ -403,7 +412,8 @@ def test_broker_connection_change_triggers_fresh_sync_and_symbol_refresh():
     state = _registry().handle(
         Scenario.BROKER_CONNECTION_CHANGE,
         HealingContext(
-            broker_server="NewBroker-Live", broker_server_previous="OldBroker-Demo",
+            broker_server="NewBroker-Live",
+            broker_server_previous="OldBroker-Demo",
             broker_server_changed=True,
             on_resync=lambda: called.append("resync"),
             on_refresh_symbols=lambda: called.append("symbols"),
@@ -422,7 +432,8 @@ def test_broker_connection_change_without_resync_stays_degraded():
     state = _registry().handle(
         Scenario.BROKER_CONNECTION_CHANGE,
         HealingContext(
-            broker_server="NewBroker-Live", broker_server_previous="OldBroker-Demo",
+            broker_server="NewBroker-Live",
+            broker_server_previous="OldBroker-Demo",
             broker_server_changed=True,
         ),
     )
@@ -453,7 +464,8 @@ def test_symbol_unavailable_rejects_never_substitutes():
     state = _registry().handle(
         Scenario.SYMBOL_UNAVAILABLE,
         HealingContext(
-            symbol="XAUUSD.a", symbol_available=False,
+            symbol="XAUUSD.a",
+            symbol_available=False,
             symbol_unavailable_reason="not visible in market watch",
             on_refresh_symbols=lambda: called.append("refresh"),
         ),
@@ -480,7 +492,8 @@ def test_diagnostic_queue_full_requests_drain_and_reports_counts():
     state = _registry().handle(
         Scenario.DIAGNOSTIC_QUEUE_FULL,
         HealingContext(
-            queue_full=True, queue_stats=stats,
+            queue_full=True,
+            queue_stats=stats,
             on_drain_diagnostics=lambda: called.append("drain"),
         ),
     )
@@ -493,18 +506,14 @@ def test_diagnostic_queue_full_requests_drain_and_reports_counts():
 
 
 def test_diagnostic_queue_full_without_drain_says_ttl_honestly():
-    state = _registry().handle(
-        Scenario.DIAGNOSTIC_QUEUE_FULL, HealingContext(queue_full=True)
-    )
+    state = _registry().handle(Scenario.DIAGNOSTIC_QUEUE_FULL, HealingContext(queue_full=True))
     assert state.status == "recovering"
     assert "age out by TTL" in state.last_action
     assert "no diagnostics endpoint exists yet, D1" in state.last_action
 
 
 def test_diagnostic_queue_full_ok_when_within_bound():
-    state = _registry().handle(
-        Scenario.DIAGNOSTIC_QUEUE_FULL, HealingContext(queue_full=False)
-    )
+    state = _registry().handle(Scenario.DIAGNOSTIC_QUEUE_FULL, HealingContext(queue_full=False))
     assert state.status == "ok"
 
 
@@ -513,7 +522,8 @@ def test_update_download_failure_is_retryable_nothing_staged():
     state = _registry().handle(
         Scenario.UPDATE_FAILURE,
         HealingContext(
-            update_stage="download", update_error_code="DOWNLOAD_FAILED",
+            update_stage="download",
+            update_error_code="DOWNLOAD_FAILED",
             update_error="Download failed: connection reset",
             update_version="1.2.0",
             on_retry_update=lambda: called.append("retry"),
@@ -542,7 +552,8 @@ def test_update_verification_failure_is_terminal_never_retried():
     state = _registry().handle(
         Scenario.UPDATE_FAILURE,
         HealingContext(
-            update_stage="verify", update_error_code="SHA256_MISMATCH",
+            update_stage="verify",
+            update_error_code="SHA256_MISMATCH",
             update_error="SHA-256 mismatch — the downloaded bytes do not match",
             update_version="1.2.0",
             on_retry_update=lambda: called.append("retry"),
@@ -581,9 +592,7 @@ def test_update_no_public_key_is_a_verification_refusal():
 def test_new_scenarios_report_structured_telemetry_events():
     emitter = TelemetryEmitter("dev-1")
     registry = SelfHealingRegistry(telemetry=emitter)
-    registry.handle(
-        Scenario.ACCOUNT_DISCONNECT, HealingContext(account_connected=False)
-    )
+    registry.handle(Scenario.ACCOUNT_DISCONNECT, HealingContext(account_connected=False))
     registry.handle(
         Scenario.UPDATE_FAILURE,
         HealingContext(update_stage="verify", update_error_code="SHA256_MISMATCH"),

@@ -138,6 +138,7 @@ class _InterceptHandler(logging.Handler):
     """Route stdlib logging (uvicorn etc.) into loguru."""
 
     def emit(self, record: logging.LogRecord) -> None:
+        level: str | int
         try:
             level = logger.level(record.levelname).name
         except ValueError:
@@ -146,9 +147,7 @@ class _InterceptHandler(logging.Handler):
         while frame and (depth == 0 or frame.f_code.co_filename == logging.__file__):
             frame = frame.f_back
             depth += 1
-        logger.opt(depth=depth, exception=record.exc_info).log(
-            level, redact_text(record.getMessage())
-        )
+        logger.opt(depth=depth, exception=record.exc_info).log(level, redact_text(record.getMessage()))
 
 
 def setup_logging(log_dir: Path, level: str = "INFO", extra_sink=None) -> None:

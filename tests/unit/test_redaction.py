@@ -92,9 +92,7 @@ def test_sanitize_payload_scrubs_secret_keys_recursively():
 
 def test_loguru_redaction_filter_scrubs_sink_output():
     captured: list[str] = []
-    handler_id = logger.add(
-        captured.append, filter=make_redaction_filter(), format="{message}"
-    )
+    handler_id = logger.add(captured.append, filter=make_redaction_filter(), format="{message}")
     try:
         logger.info("auth failed for token={}", FAKE_TOKEN)
         logger.info("Bearer {} rejected", FAKE_TOKEN)
