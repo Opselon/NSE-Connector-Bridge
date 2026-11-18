@@ -81,6 +81,33 @@ server or GUI starts, so it is safe on a runner):
 dist\NSE-MT5-Bridge.exe --help
 ```
 
+### The Windows installer (`windows/NSE-MT5-Bridge.iss`)
+
+Inno Setup 6 script, built by the `build-windows` CI job from the
+built exe — so it is proven to compile on every PR, not just on
+tags:
+
+```powershell
+iscc /DAppVersion=1.0.0 /DAppVersionInfo=1.0.0.0 windows\NSE-MT5-Bridge.iss
+# → dist\NSE-MT5-Bridge-Setup-1.0.0.exe
+```
+
+- **Per-user install** (`PrivilegesRequired=lowest`): no admin, no
+  UAC; installs to `%LOCALAPPDATA%\Programs\NSE MT5 Bridge`.
+  Config/secrets live under `%LOCALAPPDATA%\NSE MT5 Bridge` and are
+  created by the Bridge itself at runtime — the installer ships
+  only the single exe and never touches user data (uninstall leaves
+  config intact).
+- **x64 only** (`ArchitecturesAllowed=x64os`); Windows 10+.
+- Start Menu shortcut + optional (unchecked) desktop shortcut,
+  post-install launch option, standard uninstaller entry. The
+  stable `AppId` GUID is never changed — same AppId upgrades in
+  place. If the Bridge is running, the installer asks to close it
+  first (`CloseApplications=yes`).
+- Version comes from `BRIDGE_VERSION` (CI passes it as
+  `/DAppVersion`); `AppVersionInfo` is the numeric 4-part quad the
+  version resource needs. No `.ico` (same gap as the exe).
+
 ## 4. Diagnostic mode (`--diagnostic`)
 
 `NSE-MT5-Bridge.exe --diagnostic` (or `NSE_BRIDGE_DIAGNOSTIC_MODE=1`,
@@ -122,8 +149,8 @@ Three jobs, chained: `test-linux` → `build-windows` → `release`
 | Job | Runs | Steps |
 |---|---|---|
 | `test-linux` | ubuntu-latest | `ruff check .` · `ruff format --check .` · `mypy nse_bridge` · `bandit` + `pip-audit` · `write_version_info.py --check` · OpenAPI freshness (`export_openapi.py` + `diff`) · `pytest tests/unit tests/integration -q --junitxml=test-results.xml -rf` (junit uploaded on failure) · marker-count visibility |
-| `build-windows` | windows-latest | same lint + types + security + same unit/mock-integration suites on Windows (proves Windows imports work; junit uploaded on failure) · `pyinstaller bridge.spec` · `dist/NSE-MT5-Bridge.exe --help` smoke check · upload artifact |
-| `release` | windows-latest, tags `v*` only | download exe · `write_release_manifest.py` (SHA-256 + manifest) · attach exe + `.sha256` + manifest to the GitHub release (`prerelease` iff the tag contains `-`, generated notes) |
+| `build-windows` | windows-latest | same lint + types + security + same unit/mock-integration suites on Windows (proves Windows imports work; junit uploaded on failure) · `pyinstaller bridge.spec` · `dist/NSE-MT5-Bridge.exe --help` smoke check · `iscc windows\NSE-MT5-Bridge.iss` (Inno Setup installer) · upload exe + setup exe |
+| `release` | windows-latest, tags `v*` only | download exe + setup exe · `write_release_manifest.py --setup ...` (SHA-256s + manifest) · attach exe + setup exe + both `.sha256` sidecars + manifest to the GitHub release (`prerelease` iff the tag contains `-`, generated notes) |
 
 The real-MT5 e2e suite is NEVER run in CI: GitHub-hosted runners
 have no MT5 terminal, and a required-MT5 test fails loudly without

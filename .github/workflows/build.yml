@@ -9,9 +9,9 @@
 #                 and a required-MT5 test fails loudly without one
 #                 (tests/conftest.py). E2E is manual, Windows-with-MT5-only
 #                 (see docs/RELEASE.md).
-#   release       tags only (v*): exe + SHA-256 + release manifest +
-#                 release notes. Stable vs prerelease by tag name:
-#                 v1.2.3 = stable, v1.2.3-rc.1 = prerelease.
+#   release       tags only (v*): exe + setup exe + SHA-256s + release
+#                 manifest + release notes. Stable vs prerelease by tag
+#                 name: v1.2.3 = stable, v1.2.3-rc.1 = prerelease.
 #
 # Spec §20 gates (all mandatory, all fast — no Wine in PR checks):
 #   lint    `ruff check .` (whole repo) + `ruff format --check .`
@@ -193,17 +193,63 @@ jobs:
         # entry point (incl. the --diagnostic flag) parses.
         run: dist/NSE-MT5-Bridge.exe --help
 
+      - name: Build Windows installer (Inno Setup)
+        # Proves the .iss compiles on every PR, not just on tags: the
+        # setup exe is uploaded with the exe artifact and attached to
+        # the release by the release job. Version comes from the single
+        # source of truth (nse_bridge.BRIDGE_VERSION); AppVersionInfo
+        # is the numeric 4-part quad the version resource needs
+        # (AppVersion may carry a prerelease suffix like "-rc.1").
+        # windows-latest runners ship Inno Setup, but fall back to a
+        # choco install if iscc is not on PATH (the well-known install
+        # paths are checked first — choco does not always refresh PATH
+        # in the running shell).
+        shell: pwsh
+        run: |
+          $ver = python -c "from nse_bridge import BRIDGE_VERSION; print(BRIDGE_VERSION, end='')"
+          $base = ($ver -split '-')[0]
+          $quadParts = ($base -split '\.')
+          while ($quadParts.Count -lt 4) { $quadParts += '0' }
+          $quad = ($quadParts[0..3] -join '.')
+          Write-Host "installer version: $ver (version-info $quad)"
+          $iscc = $null
+          $cmd = Get-Command iscc -ErrorAction SilentlyContinue
+          if ($cmd) { $iscc = $cmd.Source }
+          if (-not $iscc) {
+            foreach ($p in @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "${env:ProgramFiles}\Inno Setup 6\ISCC.exe")) {
+              if (Test-Path $p) { $iscc = $p; break }
+            }
+          }
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y
+            foreach ($p in @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "${env:ProgramFiles}\Inno Setup 6\ISCC.exe")) {
+              if (Test-Path $p) { $iscc = $p; break }
+            }
+            if (-not $iscc) {
+              $cmd = Get-Command iscc -ErrorAction SilentlyContinue
+              if ($cmd) { $iscc = $cmd.Source }
+            }
+          }
+          if (-not $iscc) { throw "Inno Setup compiler (iscc) not found and choco install did not provide it" }
+          & $iscc /DAppVersion=$ver /DAppVersionInfo=$quad windows\NSE-MT5-Bridge.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed with exit code $LASTEXITCODE" }
+          $setup = Get-Item dist\NSE-MT5-Bridge-Setup-*.exe
+          Write-Host "built $($setup.Name) ($($setup.Length) bytes)"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: NSE-MT5-Bridge-windows
-          path: dist/NSE-MT5-Bridge.exe
+          path: |
+            dist/NSE-MT5-Bridge.exe
+            dist/NSE-MT5-Bridge-Setup-*.exe
           if-no-files-found: error
 
-  # Release: tags only. The exe is checksummed + manifested here, and
-  # all three files (exe, .sha256, manifest) are attached to the
-  # GitHub release. No release is ever cut from an untested build:
-  # this job needs build-windows, which needs test-linux.
+  # Release: tags only. The exe and the setup exe are checksummed +
+  # manifested here, and all five files (exe, exe .sha256, setup exe,
+  # setup .sha256, manifest) are attached to the GitHub release. No
+  # release is ever cut from an untested build: this job needs
+  # build-windows, which needs test-linux.
   release:
     needs: build-windows
     if: startsWith(github.ref, 'refs/tags/v')
@@ -226,8 +272,10 @@ jobs:
 
       - name: Checksum + release manifest
         run: |
-          python scripts/write_release_manifest.py dist/NSE-MT5-Bridge.exe --tag ${{ github.ref_name }}
+          $setup = (Get-Item dist/NSE-MT5-Bridge-Setup-*.exe).FullName
+          python scripts/write_release_manifest.py dist/NSE-MT5-Bridge.exe --setup $setup --tag ${{ github.ref_name }}
           type dist/NSE-MT5-Bridge.exe.sha256
+          type dist/NSE-MT5-Bridge-Setup-*.exe.sha256
           type dist/release-manifest.json
 
       - name: Attach to release
@@ -236,6 +284,8 @@ jobs:
           files: |
             dist/NSE-MT5-Bridge.exe
             dist/NSE-MT5-Bridge.exe.sha256
+            dist/NSE-MT5-Bridge-Setup-*.exe
+            dist/NSE-MT5-Bridge-Setup-*.exe.sha256
             dist/release-manifest.json
           # v1.2.3-rc.1 (or any tag containing '-') is a prerelease;
           # v1.2.3 is stable. The two are never mixed in one release.

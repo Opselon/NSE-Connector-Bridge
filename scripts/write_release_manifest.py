@@ -2,12 +2,15 @@
 
 Usage:
   python scripts/write_release_manifest.py <exe-path> [--out-dir <dir>]
-      [--tag <tag>] [--commit <sha>]
+      [--tag <tag>] [--commit <sha>] [--setup <setup-exe-path>]
 
 Outputs (next to the exe unless --out-dir is given):
   NSE-MT5-Bridge.exe.sha256   "<sha256>  NSE-MT5-Bridge.exe\\n"
   release-manifest.json       {name, version, tag, commit, platform,
                                built_from, files: [{name, sha256, size_bytes}]}
+  <setup-exe>.sha256          only with --setup: "<sha256>  <setup-exe>\\n",
+                               and the setup exe joins the manifest files
+                               list (same shape as the exe entry).
 
 The manifest is what a user verifies a download against: the SHA-256
 in the manifest must match the .sha256 sidecar and the exe itself.
@@ -58,11 +61,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--tag", default=None, help="release tag, e.g. v1.0.0")
     parser.add_argument("--commit", default=None, help="commit SHA (default: git HEAD)")
+    parser.add_argument(
+        "--setup",
+        type=Path,
+        default=None,
+        help="setup exe to checksum and list in the manifest, e.g. dist/NSE-MT5-Bridge-Setup-1.0.0.exe",
+    )
     args = parser.parse_args(argv)
 
     exe = args.exe
     if not exe.is_file():
         print(f"error: exe not found: {exe}", file=sys.stderr)
+        return 2
+    setup = args.setup
+    if setup is not None and not setup.is_file():
+        print(f"error: setup exe not found: {setup}", file=sys.stderr)
         return 2
     out_dir = args.out_dir or exe.parent
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -71,19 +84,28 @@ def main(argv: list[str] | None = None) -> int:
     sha_path = out_dir / f"{exe.name}.sha256"
     sha_path.write_text(f"{digest}  {exe.name}\n", encoding="utf-8")
 
+    files = [
+        {"name": exe.name, "sha256": digest, "size_bytes": exe.stat().st_size},
+    ]
+    if setup is not None:
+        setup_digest = sha256_of(setup)
+        setup_sha_path = out_dir / f"{setup.name}.sha256"
+        setup_sha_path.write_text(f"{setup_digest}  {setup.name}\n", encoding="utf-8")
+        files.append({"name": setup.name, "sha256": setup_digest, "size_bytes": setup.stat().st_size})
+
     manifest = {
         "name": "NSE MT5 Bridge",
         "version": BRIDGE_VERSION,
         "tag": args.tag,
         "commit": args.commit or git_commit(),
         "platform": "windows-x64",
-        "files": [
-            {"name": exe.name, "sha256": digest, "size_bytes": exe.stat().st_size},
-        ],
+        "files": files,
     }
     manifest_path = out_dir / "release-manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {sha_path} + {manifest_path} ({digest[:16]}…)")
+    if setup is not None:
+        print(f"wrote {setup_sha_path} ({setup_digest[:16]}…)")
     return 0
 
 
