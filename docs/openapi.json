@@ -10609,7 +10609,7 @@
           "tradeable_only": {
             "type": "boolean",
             "title": "Tradeable Only",
-            "description": "Exclude symbols with trade_mode=DISABLED",
+            "description": "Exclude symbols with trade_mode=DISABLED or unreported trade_mode",
             "default": false
           },
           "limit": {

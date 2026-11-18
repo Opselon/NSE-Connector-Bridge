@@ -16,7 +16,7 @@ from .registry import command
 class SymbolsListRequest(BaseModel):
     filter: str | None = Field(None, description="Case-insensitive substring filter on the symbol name")
     visible_only: bool = Field(False, description="Only symbols currently visible in Market Watch")
-    tradeable_only: bool = Field(False, description="Exclude symbols with trade_mode=DISABLED")
+    tradeable_only: bool = Field(False, description="Exclude symbols with trade_mode=DISABLED or unreported trade_mode")
     limit: int = Field(200, ge=1, le=5000, description="Max rows returned (server list can be huge)")
 
 
@@ -128,7 +128,10 @@ def get_trading_symbols(ctx: BridgeContext, params: SymbolsListRequest | None) -
         if pattern and pattern not in name.upper():
             continue
         mode = _f(row, "trade_mode")
-        if p.tradeable_only and mode == 0:
+        # A2: one "tradable" answer across the Bridge — the inventory
+        # rule (symbols/inventory.py) treats an unreported trade mode
+        # as NOT tradable, and so must this filter.
+        if p.tradeable_only and (mode is None or mode == 0):
             continue
         if p.visible_only and not bool(_f(row, "visible", False)):
             continue

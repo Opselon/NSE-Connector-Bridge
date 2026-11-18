@@ -377,7 +377,9 @@ class CommandValidator:
         # 1 — malformed
         try:
             envelope = parse_envelope(frame)
-        except ValueError as exc:
+        except (ValueError, TypeError) as exc:
+            # TypeError: parse_envelope raises it for a non-dict frame
+            # (R10) — a malformed frame is a rejection, never an escape.
             logger.warning("[COMMAND] malformed command frame: {}", exc)
             return ValidationOutcome(rejection=RejectionReason.MALFORMED)
         # 2 — expired
@@ -872,6 +874,33 @@ class CommandExecutor:
         self._persist(result)
         return execution, result
 
+    def _sl_tp_tolerance(self, symbol: str) -> float:
+        """Half a broker tick for SL/TP reconciliation (R6).
+
+        Brokers normalize SL/TP to tick size, so a landed modification
+        can differ from the requested value by up to half a tick;
+        comparing with 1e-9 reported landed modifications as UNKNOWN.
+        Falls back to 1e-9 when the symbol's tick size/point is unknown
+        or the lookup fails — the reconcile must never crash on it.
+        """
+        try:
+            from ..engine.common import require_symbol_info
+
+            if not symbol:
+                return 1e-9
+            spec = require_symbol_info(self.ctx, symbol)
+            step = spec.trade_tick_size or spec.point
+            if step is None or float(step) <= 0:
+                return 1e-9
+            # +1e-9 absorbs binary-float noise at the boundary (the
+            # decimal diff 1.085015 - 1.08501 is exactly half a tick,
+            # but the floats differ by 5.000000000023874e-06); a full
+            # tick is >= 1e-5, so this cannot false-recover an unlanded
+            # modification.
+            return float(step) / 2.0 + 1e-9
+        except Exception:  # noqa: BLE001 — tolerance lookup is best-effort
+            return 1e-9
+
     def _reconcile(self, envelope: CommandEnvelope) -> dict[str, Any] | None:
         """Check the actual MT5 state after an uncertain result.
 
@@ -900,7 +929,8 @@ class CommandExecutor:
                 tp = float(_f(pos, "tp", 0.0) or 0.0)
                 want_sl = envelope.sl if envelope.sl is not None else sl
                 want_tp = envelope.tp if envelope.tp is not None else tp
-                if abs(sl - want_sl) < 1e-9 and abs(tp - want_tp) < 1e-9:
+                tolerance = self._sl_tp_tolerance(str(_f(pos, "symbol", "") or ""))
+                if abs(sl - want_sl) <= tolerance and abs(tp - want_tp) <= tolerance:
                     return {
                         "status": "done",
                         "ticket": envelope.ticket_int,
@@ -917,7 +947,8 @@ class CommandExecutor:
                 tp = float(_f(order, "tp", 0.0) or 0.0)
                 want_sl = envelope.sl if envelope.sl is not None else sl
                 want_tp = envelope.tp if envelope.tp is not None else tp
-                if abs(sl - want_sl) < 1e-9 and abs(tp - want_tp) < 1e-9:
+                tolerance = self._sl_tp_tolerance(str(_f(order, "symbol", "") or ""))
+                if abs(sl - want_sl) <= tolerance and abs(tp - want_tp) <= tolerance:
                     return {
                         "status": "done",
                         "ticket": envelope.ticket_int,

@@ -786,7 +786,14 @@ class Mt5Driver:
 
         if not connected:
             self._connected = False
-            self._last_error = {"code": last_err[0], "message": last_err[1]}
+            # last_error() may return None (A4) — never index it blindly.
+            if last_err:
+                self._last_error = {
+                    "code": last_err[0],
+                    "message": last_err[1] if len(last_err) > 1 else "",
+                }
+            else:
+                self._last_error = {"code": None, "message": "initialize failed (no error detail)"}
             self._set_state("TERMINAL_ERROR", f"initialize failed: {last_err}")
             return {"ok": False, "error": f"initialize failed after {s.mt5_retries} attempts", "last_error": last_err}
 
@@ -910,6 +917,23 @@ class Mt5Driver:
                 freshest = max(freshest, t)
             if freshest <= 0:
                 logger.info("[MT5] broker offset detection skipped — no ticks available")
+                return
+            # Stale-tick guard (A1): a tick older than 5 minutes under the
+            # CURRENTLY configured offset is stale evidence (market
+            # closed overnight) and must not override the configured
+            # offset. A fresh tick always passes this check: its age
+            # under the configured offset is (configured - true), which
+            # is <= 0 when the config is at or below the true offset.
+            # When the config is wrong HIGH, a fresh tick looks stale
+            # and detection is skipped — fail-closed, the operator's
+            # explicit value wins and can be corrected in config.
+            age_s = (time.time() + self.settings.broker_utc_offset_minutes * 60) - freshest
+            if age_s > 300:
+                logger.info(
+                    "[MT5] broker offset detection skipped — freshest tick is %.0fs old "
+                    "under the configured offset (market likely closed); keeping configured offset",
+                    age_s,
+                )
                 return
             offset = round((freshest - time.time()) / 60)
             if not (-1440 <= offset <= 1440):

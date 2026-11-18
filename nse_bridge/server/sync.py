@@ -61,7 +61,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -109,21 +109,27 @@ _BROKER_TIME_KEYS = (
 )
 
 
-def parse_broker_time(value: Any) -> datetime | None:
+def parse_broker_time(value: Any, offset_minutes: int = 0) -> datetime | None:
     """Parse a broker timestamp per the §3.3 rule.
 
     RFC 3339 or timezone-less ISO; timezone-less values are read as
     UTC (the connector reports UTC receipt time separately). Epoch
-    numbers are accepted defensively. Unparseable values return None
-    and never order anything.
+    numbers are broker-local seconds and MUST be shifted back by
+    ``offset_minutes`` (R1: reading them as UTC puts the checkpoint
+    ``offset`` ahead of true UTC for any positive-offset broker,
+    inverting the next history range and stalling history sync
+    permanently — this matches ``normalize_utc``/``broker_epoch_to_utc``
+    in ``timeutil``). Unparseable values return None and never order
+    anything.
     """
     if value is None:
         return None
     if isinstance(value, (int, float)):
         try:
-            return datetime.fromtimestamp(float(value), tz=UTC)
+            broker_local = datetime.fromtimestamp(float(value), tz=UTC)
         except (OverflowError, OSError, ValueError):
             return None
+        return broker_local - timedelta(minutes=offset_minutes)
     if isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     if isinstance(value, str):
@@ -204,11 +210,14 @@ class SyncCheckpoint:
         self._value = parsed
         return True
 
-    def advance_from_items(self, items: Any) -> int:
+    def advance_from_items(self, items: Any, offset_minutes: int = 0) -> int:
         """Advance from every broker-time value found in ``items``.
 
-        Returns how many distinct later times were applied (0 or 1 in
-        practice — the checkpoint only ever moves to the max).
+        ``offset_minutes`` is the broker UTC offset applied to
+        broker-local epoch values (R1); ISO strings are UTC by
+        convention and are never shifted. Returns how many distinct
+        later times were applied (0 or 1 in practice — the checkpoint
+        only ever moves to the max).
         """
         latest: datetime | None = None
         stack = [items]
@@ -217,7 +226,7 @@ class SyncCheckpoint:
             if isinstance(node, dict):
                 for key, value in node.items():
                     if key in _BROKER_TIME_KEYS:
-                        parsed = parse_broker_time(value)
+                        parsed = parse_broker_time(value, offset_minutes)
                         if parsed is not None and (latest is None or parsed > latest):
                             latest = parsed
                     else:
@@ -545,7 +554,10 @@ class SyncEngine:
             pages = _history_pages(kind, items, self.page_size)
             for page_index, page_items in enumerate(pages):
                 self.enqueue(kind, page_items)
-                if self.checkpoint.advance_from_items(page_items):
+                # R1: broker-local epochs shift by the configured offset;
+                # without a ctx there is no configured offset (0 = UTC).
+                offset = self.ctx.settings.broker_utc_offset_minutes if self.ctx is not None else 0
+                if self.checkpoint.advance_from_items(page_items, offset):
                     # Persist on every advance: a restart resumes from
                     # here instead of re-running the full backfill (§16).
                     self._persist_checkpoint()
@@ -626,27 +638,40 @@ class SyncEngine:
         """Map a local account model + driver state to §3.3 account items.
 
         Mapping notes: ``trade_mode`` 0/1/2 → ``demo``/``contest``/
-        ``live`` (§7.1); ``broker`` is not exposed by the local account
-        model — omitted, never invented; ``terminal.build`` is a NUMBER
-        the driver does not expose — omitted, never invented (§4.1);
-        ``terminal.timestamp`` is UTC receipt time (the broker-time
-        rule applies to timestamps INSIDE the payload, which stay
-        verbatim broker values where present).
+        ``live`` (§7.1). An unreported ``trade_mode`` (None, or an
+        unknown integer) OMITS ``type`` entirely (R5): labelling it
+        ``demo`` would let a live account slip past the contract's
+        demo-only gate, and ``"unknown"`` is outside the contract's
+        ``demo|live|contest`` enum. ``broker`` is not exposed by the
+        local account model — omitted, never invented; ``terminal.build``
+        is a NUMBER the driver does not expose — omitted, never invented
+        (§4.1); ``terminal.timestamp`` is UTC receipt time (the
+        broker-time rule applies to timestamps INSIDE the payload, which
+        stay verbatim broker values where present). ``margin_level`` /
+        ``leverage`` / ``swap`` / ``commission`` ride the batch (spec §5)
+        as raw broker values, labelled ``mt5_supplied`` by
+        ``label_account_snapshot``.
         """
-        trade_mode = {0: "demo", 1: "contest", 2: "live"}.get(getattr(acc, "trade_mode", 0) or 0, "demo")
-        account = {
+        raw_mode = getattr(acc, "trade_mode", None)
+        account: dict[str, Any] = {
             "login": str(acc.login),
             "server": acc.server,
             "name": acc.name,
-            "type": trade_mode,
             "currency": acc.currency,
             "balance": acc.balance,
             "equity": acc.equity,
             "margin": acc.margin,
             "margin_free": acc.margin_free,
+            "margin_level": getattr(acc, "margin_level", None),
+            "leverage": getattr(acc, "leverage", None),
             "profit": acc.profit,
+            "swap": getattr(acc, "swap", None),
+            "commission": getattr(acc, "commission", None),
             "credit": acc.credit,
         }
+        trade_mode = {0: "demo", 1: "contest", 2: "live"}.get(raw_mode) if raw_mode is not None else None
+        if trade_mode is not None:
+            account["type"] = trade_mode
         terminal = {
             "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "connection": {"state": state.get("state")},

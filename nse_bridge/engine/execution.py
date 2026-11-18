@@ -178,16 +178,19 @@ def validate_pending(
     min_gap = max(stops_level * point, spread, safety_floor)
     min_stop_dist = max(stops_level * point, safety_floor)
 
-    vol_min = float(spec.volume_min or 0.0)
-    vol_max = float(spec.volume_max or 0.0)
-    vol_step = float(spec.volume_step or 0.01)
-    if volume < vol_min - 1e-9:
+    # Volume bounds (R2): an unreported bound is NO constraint, not a
+    # zero. ``volume_max=None`` used to become ``0.0`` and reject every
+    # pending order; ``volume_step=None`` used to invent a 0.01 step.
+    vol_min = spec.volume_min
+    vol_max = spec.volume_max
+    vol_step = spec.volume_step
+    if vol_min is not None and volume < float(vol_min) - 1e-9:
         reasons.append("volume_below_min")
-    if volume > vol_max + 1e-9:
+    if vol_max is not None and volume > float(vol_max) + 1e-9:
         reasons.append("volume_above_max")
-    if vol_step > 0:
-        steps = round(volume / vol_step)
-        if abs(volume - steps * vol_step) > 1e-9:
+    if vol_step is not None and float(vol_step) > 0:
+        steps = round(volume / float(vol_step))
+        if abs(volume - steps * float(vol_step)) > 1e-9:
             reasons.append("volume_not_multiple_of_step")
 
     is_buy = order_type.startswith("BUY")
