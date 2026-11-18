@@ -365,6 +365,9 @@ class TerminalInfo:
     running: bool = False
     source: str = "discovered"  # configured | env | standard | registry | custom | portable | running
     exists: bool = True
+    # Spec §3: terminal data directory, when determinable. None means
+    # "not determinable from this machine" — never a guessed path.
+    data_dir: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -373,7 +376,51 @@ class TerminalInfo:
             "running": self.running,
             "source": self.source,
             "exists": self.exists,
+            "data_dir": self.data_dir,
         }
+
+
+#: Markers of a live MT5 data directory. A portable install keeps its
+#: data next to the executable; the install directory itself never
+#: carries a ``Logs`` folder, so the MQL5+Logs conjunction is the
+#: portable marker. A never-run portable install has no data dir yet
+#: and honestly reports None.
+_DATA_DIR_MARKERS = ("MQL5", "Logs")
+
+
+def _portable_data_dir(exe_path: str) -> str | None:
+    """Data dir for a portable install: the exe directory itself, but
+    only when it carries live data-directory markers. Never guessed:
+    a bare exe directory reports None."""
+    exe_dir = Path(exe_path).parent
+    if all((exe_dir / marker).is_dir() for marker in _DATA_DIR_MARKERS):
+        return str(exe_dir)
+    return None
+
+
+def _appdata_terminal_data_dirs(appdata_root: str | None) -> list[str]:
+    """Existing MT5 data dirs under ``%APPDATA%\\MetaQuotes\\Terminal``.
+
+    ``appdata_root`` is the ``...\\MetaQuotes\\Terminal`` directory
+    itself (injectable for unit tests). With None the Windows %APPDATA%
+    location is used; on Linux there is no %APPDATA% and this returns
+    [] instead of crashing. A subdirectory only counts when it exists
+    and carries an ``MQL5`` folder — a bare hash-named folder is not
+    a data directory.
+    """
+    if appdata_root is None:
+        if sys.platform != "win32":
+            return []
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            return []
+        appdata_root = str(Path(appdata) / "MetaQuotes" / "Terminal")
+    root = Path(appdata_root)
+    try:
+        subdirs = [s for s in root.iterdir() if s.is_dir()]
+    except OSError:
+        return []
+    return [str(s) for s in subdirs if (s / "MQL5").is_dir()]
 
 
 def discover_terminals(
@@ -383,6 +430,7 @@ def discover_terminals(
     running_paths: list[str] | None = None,
     winreg_module: Any = None,
     version_fn: Callable[[str], str | None] | None = None,
+    appdata_root: str | None = None,
 ) -> list[TerminalInfo]:
     """Enumerate ALL MT5 terminal candidates (Phase 5).
 
@@ -394,6 +442,20 @@ def discover_terminals(
     directory containing terminal64.exe counts, including immediate
     subdirectories for portable installs), running terminal processes
     (Windows process list; Linux stub returns none).
+
+    Each candidate also carries ``data_dir`` (spec §3) when
+    determinable, else None — never a guessed path. Portable installs
+    resolve to the exe directory when it carries live data markers
+    (``MQL5`` + ``Logs``). Standard installs live under
+    ``%APPDATA%\\MetaQuotes\\Terminal\\<hash>``; the hash is derived
+    from the install path by the terminal and cannot be recovered from
+    the bridge, so an AppData dir is attributed ONLY in the unambiguous
+    case — exactly one discovered terminal AND exactly one existing
+    data dir on the machine. Anything else reports None rather than
+    guessing which dir belongs to which terminal. ``appdata_root``
+    injects the ``...\\MetaQuotes\\Terminal`` directory (unit tests);
+    with None the Windows %APPDATA% location is used, and on Linux
+    the AppData lookup degrades to no candidates instead of crashing.
 
     Discovery only READS — it never writes or overwrites the user's
     terminal configuration; selection stays user-driven (PUT /settings
@@ -418,6 +480,7 @@ def discover_terminals(
             running=False,
             source=source,
             exists=exists,
+            data_dir=_portable_data_dir(str(path)) if exists else None,
         )
 
     if settings is not None and (settings.mt5_terminal_path or "").strip():
@@ -452,7 +515,17 @@ def discover_terminals(
                 running=True,
                 source="running",
                 exists=exists,
+                data_dir=_portable_data_dir(str(original)) if exists else None,
             )
+    # Standard-install data dirs (%APPDATA%\MetaQuotes\Terminal\<hash>)
+    # are attributed only in the unambiguous case (exactly one terminal
+    # AND exactly one existing data dir) — see the docstring. A
+    # portable data dir already resolved above is never overwritten.
+    appdata_dirs = _appdata_terminal_data_dirs(appdata_root)
+    if len(found) == 1 and len(appdata_dirs) == 1:
+        sole = next(iter(found.values()))
+        if sole.data_dir is None:
+            sole.data_dir = appdata_dirs[0]
     return list(found.values())
 
 
@@ -783,15 +856,41 @@ class Mt5Driver:
         the Python package treats datetime args as UTC (BUG-188 class). The
         offset is measured as (freshest tick epoch - local UTC epoch) and
         applied symmetrically at every history/display boundary. The config
-        value remains the fallback when no fresh tick is available (market
-        closed on all probe symbols).
+        value remains the fallback when no fresh tick is available.
+
+        Probe symbols are NEVER hardcoded (spec §4): the configured
+        ``bot_symbol`` (operator-chosen, never a default) is probed first,
+        then the first visible symbols the broker itself reports via
+        ``symbols_get()``. When the broker reports no symbols, detection
+        is skipped — no symbol name is ever invented by the bridge.
         """
         try:
+            candidates: list[str] = []
+            if self.settings.bot_symbol:
+                candidates.append(self.settings.bot_symbol)
+            try:
+                rows = mt5.symbols_get() or []
+            except Exception:  # noqa: BLE001 — broker list failure skips detection
+                rows = []
+            visible: list[str] = []
+            hidden: list[str] = []
+            for row in rows:
+                name = str(getattr(row, "name", "") or "")
+                if not name or name in candidates:
+                    continue
+                (visible if bool(getattr(row, "visible", False)) else hidden).append(name)
+            # Bound the probe: bot_symbol + the first few broker symbols.
+            for name in visible + hidden:
+                if len(candidates) >= 5:
+                    break
+                candidates.append(name)
             freshest = 0.0
-            # No default symbol: skip the empty slot when no bot_symbol
-            # is configured (the remaining majors still probe the offset).
-            for sym in (s for s in (self.settings.bot_symbol, "EURUSD", "GBPUSD", "USDJPY") if s):
-                raw = mt5.symbol_info_tick(sym)
+            for sym in candidates:
+                try:
+                    raw = mt5.symbol_info_tick(sym)
+                except Exception as exc:  # noqa: BLE001 — one bad probe never blocks the rest
+                    logger.warning("[MT5] broker offset probe failed for {}: {}", sym, exc)
+                    continue
                 t = float(getattr(raw, "time", 0) or 0) if raw is not None else 0.0
                 freshest = max(freshest, t)
             if freshest <= 0:

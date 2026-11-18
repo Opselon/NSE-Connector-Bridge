@@ -105,7 +105,7 @@ class OrderInfoResponse(BaseModel):
 class HistoryRequest(BaseModel):
     from_utc: str | None = Field(None, description="Default: last 24h")
     to_utc: str | None = None
-    symbol: str | None = Field(None, description="MT5 group filter (e.g. EURUSD or EUR*)")
+    symbol: str | None = Field(None, description="MT5 group filter (a broker symbol name, or a prefix wildcard such as EUR*)")
 
 
 class HistoryOrdersResponse(BaseModel):

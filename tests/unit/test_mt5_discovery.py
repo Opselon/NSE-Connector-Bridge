@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 import struct
 import sys
+import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -276,10 +278,321 @@ def test_mt5_terminals_endpoint_reports_version_running_selected(client, tmp_pat
     by_path = {t["path"]: t for t in data["terminals"]}
     assert set(by_path) == {str(env_term), str(custom)}
     for term in by_path.values():
-        assert set(term) >= {"path", "version", "running", "selected", "exists", "source"}
+        assert set(term) >= {"path", "version", "running", "selected", "exists", "source", "data_dir"}
         assert term["running"] is False
     assert by_path[str(env_term)]["selected"] is True
     assert by_path[str(env_term)]["source"] == "env"
     assert by_path[str(custom)]["selected"] is False
     assert data["selected_path"] == str(env_term)
     assert data["can_open"] == (sys.platform == "win32")
+
+
+# ---------------------------------------------------------------------------
+# terminal data directories (spec §3, gap §5 Phase B2)
+# ---------------------------------------------------------------------------
+def _portable_terminal(path):
+    """Fake terminal whose exe dir carries live data-dir markers."""
+    term = _fake_terminal(path)
+    (path.parent / "MQL5").mkdir(parents=True, exist_ok=True)
+    (path.parent / "Logs").mkdir(parents=True, exist_ok=True)
+    return term
+
+
+def test_discover_terminals_portable_data_dir(settings, tmp_path):
+    base = tmp_path / "portable" / "Broker MT5"
+    term = _portable_terminal(base / "terminal64.exe")
+    found = discover_terminals(settings, extra_dirs=[str(tmp_path / "portable")])
+    assert len(found) == 1
+    assert found[0].path == str(term)
+    assert found[0].source == "portable"
+    assert found[0].data_dir == str(base)
+
+
+def test_discover_terminals_data_dir_none_without_markers(settings, tmp_path):
+    _fake_terminal(tmp_path / "plain" / "terminal64.exe")
+    found = discover_terminals(settings, extra_dirs=[str(tmp_path / "plain")])
+    assert len(found) == 1
+    assert found[0].data_dir is None
+
+
+def test_discover_terminals_data_dir_needs_both_markers_as_dirs(settings, tmp_path):
+    base = tmp_path / "partial"
+    _fake_terminal(base / "terminal64.exe")
+    (base / "MQL5").mkdir()
+    # Logs missing entirely -> not a data dir.
+    found = discover_terminals(settings, extra_dirs=[str(base)])
+    assert found[0].data_dir is None
+    # MQL5 as a FILE (not a directory) -> still not a data dir.
+    (base / "MQL5").rmdir()
+    (base / "MQL5").write_text("not a directory")
+    (base / "Logs").mkdir()
+    found = discover_terminals(settings, extra_dirs=[str(base)])
+    assert found[0].data_dir is None
+
+
+def _appdata_tree(tmp_path, *hash_names):
+    """Fake %APPDATA%\\MetaQuotes\\Terminal tree; each hash-named dir
+    gets an MQL5 folder (i.e. it really is a data directory)."""
+    root = tmp_path / "AppData" / "MetaQuotes" / "Terminal"
+    dirs = []
+    for name in hash_names:
+        d = root / name
+        (d / "MQL5").mkdir(parents=True)
+        dirs.append(d)
+    return root, dirs
+
+
+def test_discover_terminals_appdata_data_dir_single_terminal(settings, tmp_path):
+    _fake_terminal(tmp_path / "term" / "terminal64.exe")
+    root, (data,) = _appdata_tree(tmp_path, "D0E8209F77C8CF37AD8BF550E51FF075")
+    found = discover_terminals(
+        settings, extra_dirs=[str(tmp_path / "term")], appdata_root=str(root)
+    )
+    assert len(found) == 1
+    assert found[0].data_dir == str(data)
+
+
+def test_discover_terminals_appdata_data_dir_ambiguous_two_terminals(settings, tmp_path):
+    _fake_terminal(tmp_path / "a" / "terminal64.exe")
+    _fake_terminal(tmp_path / "b" / "terminal64.exe")
+    root, _ = _appdata_tree(tmp_path, "D0E8209F77C8CF37AD8BF550E51FF075")
+    found = discover_terminals(
+        settings,
+        extra_dirs=[str(tmp_path / "a"), str(tmp_path / "b")],
+        appdata_root=str(root),
+    )
+    assert len(found) == 2
+    # One data dir cannot be attributed to either of two terminals.
+    assert all(t.data_dir is None for t in found)
+
+
+def test_discover_terminals_appdata_data_dir_ambiguous_two_dirs(settings, tmp_path):
+    _fake_terminal(tmp_path / "term" / "terminal64.exe")
+    root, _ = _appdata_tree(
+        tmp_path,
+        "D0E8209F77C8CF37AD8BF550E51FF075",
+        "A1B2C3D4E5F60718293A4B5C6D7E8F90A",
+    )
+    found = discover_terminals(
+        settings, extra_dirs=[str(tmp_path / "term")], appdata_root=str(root)
+    )
+    assert len(found) == 1
+    assert found[0].data_dir is None
+
+
+def test_discover_terminals_appdata_dir_without_mql5_ignored(settings, tmp_path):
+    _fake_terminal(tmp_path / "term" / "terminal64.exe")
+    root = tmp_path / "AppData" / "MetaQuotes" / "Terminal"
+    (root / "D0E8209F77C8CF37AD8BF550E51FF075").mkdir(parents=True)  # no MQL5 inside
+    found = discover_terminals(
+        settings, extra_dirs=[str(tmp_path / "term")], appdata_root=str(root)
+    )
+    assert len(found) == 1
+    assert found[0].data_dir is None
+
+
+def test_discover_terminals_portable_data_dir_wins_over_appdata(settings, tmp_path):
+    base = tmp_path / "portable" / "Broker MT5"
+    _portable_terminal(base / "terminal64.exe")
+    root, _ = _appdata_tree(tmp_path, "D0E8209F77C8CF37AD8BF550E51FF075")
+    found = discover_terminals(
+        settings, extra_dirs=[str(tmp_path / "portable")], appdata_root=str(root)
+    )
+    assert len(found) == 1
+    assert found[0].data_dir == str(base)
+
+
+def test_mt5_terminals_endpoint_reports_data_dir(client, tmp_path):
+    http, ctx, _ = client
+    base = tmp_path / "portable" / "Broker MT5"
+    _portable_terminal(base / "terminal64.exe")
+    ctx.settings.mt5_custom_terminal_dirs = str(tmp_path / "portable")
+    resp = http.get("/api/v1/mt5/terminals", headers=_auth(ctx))
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert len(data["terminals"]) == 1
+    assert data["terminals"][0]["data_dir"] == str(base)
+
+
+# ---------------------------------------------------------------------------
+# broker-offset probe symbols: broker-discovered, never hardcoded (spec §4)
+# ---------------------------------------------------------------------------
+class _FakeMt5:
+    """Fake MetaTrader5 module for offset detection.
+
+    Fixture symbol names (DISC1/DISC2/OPS1) are invented test labels,
+    never real broker symbols — the point is the driver must use
+    whatever names the broker reports via symbols_get().
+    """
+
+    def __init__(self, ticks, visible=None, fail_symbols_get=False):
+        self._ticks = dict(ticks)  # name -> tick epoch seconds
+        self._visible = set(self._ticks) if visible is None else set(visible)
+        self._fail_symbols_get = fail_symbols_get
+        self.symbols_get_called = False
+        self.tick_calls: list[str] = []
+
+    def symbols_get(self):
+        self.symbols_get_called = True
+        if self._fail_symbols_get:
+            raise RuntimeError("symbols_get failed")
+        return [
+            SimpleNamespace(name=name, visible=name in self._visible)
+            for name in self._ticks
+        ]
+
+    def symbol_info_tick(self, name):
+        self.tick_calls.append(name)
+        epoch = self._ticks.get(name)
+        return SimpleNamespace(time=epoch) if epoch else None
+
+
+def test_detect_broker_offset_uses_broker_discovered_symbols(settings):
+    driver = Mt5Driver(settings)
+    try:
+        now = int(time.time())
+        fake = _FakeMt5({"DISC1": now + 120 * 60, "DISC2": now + 60 * 60})
+        driver._detect_broker_offset(fake)
+        assert fake.symbols_get_called is True
+        assert set(fake.tick_calls) <= {"DISC1", "DISC2"}
+        assert fake.tick_calls, "at least one discovered symbol must be probed"
+        assert settings.broker_utc_offset_minutes == 120
+    finally:
+        driver.disconnect()
+
+
+def test_detect_broker_offset_prefers_configured_bot_symbol_first(settings):
+    settings.bot_symbol = "OPS1"
+    driver = Mt5Driver(settings)
+    try:
+        now = int(time.time())
+        fake = _FakeMt5({"OPS1": now + 30 * 60, "DISC1": now + 120 * 60})
+        driver._detect_broker_offset(fake)
+        assert fake.tick_calls[0] == "OPS1"
+        assert settings.broker_utc_offset_minutes == 120
+    finally:
+        driver.disconnect()
+
+
+def test_detect_broker_offset_prefers_visible_symbols(settings):
+    driver = Mt5Driver(settings)
+    try:
+        now = int(time.time())
+        # Only DISC1 is visible; the hidden one must not be probed first.
+        fake = _FakeMt5(
+            {"DISC1": now + 90 * 60, "HID1": now + 30 * 60}, visible={"DISC1"}
+        )
+        driver._detect_broker_offset(fake)
+        assert fake.tick_calls[0] == "DISC1"
+        assert settings.broker_utc_offset_minutes == 90
+    finally:
+        driver.disconnect()
+
+
+def test_detect_broker_offset_skips_when_broker_reports_no_symbols(settings):
+    driver = Mt5Driver(settings)
+    try:
+        fake = _FakeMt5({})
+        driver._detect_broker_offset(fake)
+        assert fake.symbols_get_called is True
+        assert fake.tick_calls == []
+        assert settings.broker_utc_offset_minutes == 0
+    finally:
+        driver.disconnect()
+
+
+def test_detect_broker_offset_survives_symbols_get_failure(settings):
+    driver = Mt5Driver(settings)
+    try:
+        fake = _FakeMt5({}, fail_symbols_get=True)
+        driver._detect_broker_offset(fake)  # must not raise
+        assert settings.broker_utc_offset_minutes == 0
+    finally:
+        driver.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# re-discovery after PUT /settings (spec §3)
+# ---------------------------------------------------------------------------
+def test_put_settings_terminal_change_rediscovery(client, tmp_path):
+    http, ctx, _ = client
+    term_a = _fake_terminal(tmp_path / "a" / "terminal64.exe")
+    term_b = _fake_terminal(tmp_path / "b" / "terminal64.exe")
+    resp = http.put(
+        "/api/v1/settings",
+        json={
+            "mt5_terminal_path": str(term_a),
+            "mt5_custom_terminal_dirs": str(tmp_path / "b"),
+        },
+        headers=_auth(ctx),
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert set(data["changed"]) == {"mt5_terminal_path", "mt5_custom_terminal_dirs"}
+    assert data["terminals_rediscovered"] is True
+    assert data["driver_disconnected"] is False
+    discovery = data["discovery"]
+    by_path = {t["path"]: t for t in discovery["terminals"]}
+    assert set(by_path) == {str(term_a), str(term_b)}
+    assert discovery["selected_path"] == str(term_a)
+    assert by_path[str(term_a)]["source"] == "configured"
+    assert by_path[str(term_b)]["source"] == "custom"
+    # A subsequent GET reflects the same change.
+    data2 = http.get("/api/v1/mt5/terminals", headers=_auth(ctx)).json()["data"]
+    assert data2["selected_path"] == str(term_a)
+    assert {t["path"] for t in data2["terminals"]} == {str(term_a), str(term_b)}
+    # And the custom dirs are persisted + visible via GET /settings.
+    settings_data = http.get("/api/v1/settings", headers=_auth(ctx)).json()["data"]
+    assert settings_data["mt5_custom_terminal_dirs"] == str(tmp_path / "b")
+    assert settings_data["mt5_terminal_path"] == str(term_a)
+
+
+def test_put_settings_terminal_path_change_disconnects_stale_driver(client, tmp_path):
+    http, ctx, _ = client
+    term_a = _fake_terminal(tmp_path / "a" / "terminal64.exe")
+    term_b = _fake_terminal(tmp_path / "b" / "terminal64.exe")
+    ctx.settings.mt5_terminal_path = str(term_a)
+    ctx.driver._connected = True
+    ctx.driver._set_state("CONNECTED", "connected")
+    resp = http.put(
+        "/api/v1/settings",
+        json={"mt5_terminal_path": str(term_b)},
+        headers=_auth(ctx),
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["terminals_rediscovered"] is True
+    assert data["driver_disconnected"] is True
+    assert data["discovery"]["selected_path"] == str(term_b)
+    # The driver no longer claims to be connected to the old terminal.
+    assert ctx.driver.connected is False
+    assert ctx.driver.connection_state_dict()["state"] == "DISCONNECTED"
+
+
+def test_put_settings_custom_dirs_only_does_not_disconnect_driver(client, tmp_path):
+    http, ctx, _ = client
+    term_a = _fake_terminal(tmp_path / "a" / "terminal64.exe")
+    ctx.settings.mt5_terminal_path = str(term_a)
+    ctx.driver._connected = True
+    ctx.driver._set_state("CONNECTED", "connected")
+    resp = http.put(
+        "/api/v1/settings",
+        json={"mt5_custom_terminal_dirs": str(tmp_path / "b")},
+        headers=_auth(ctx),
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["terminals_rediscovered"] is True
+    assert data["driver_disconnected"] is False
+    assert ctx.driver.connected is True  # selection did not move
+
+
+def test_put_settings_unrelated_change_does_not_rediscover(client):
+    http, ctx, _ = client
+    resp = http.put("/api/v1/settings", json={"magic": 12345}, headers=_auth(ctx))
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["changed"] == ["magic"]
+    assert data["terminals_rediscovered"] is False
+    assert data["discovery"] is None
+    assert data["driver_disconnected"] is False
