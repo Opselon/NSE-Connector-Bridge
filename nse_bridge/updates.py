@@ -42,6 +42,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -262,6 +263,8 @@ import time
 
 
 def _pid_gone(pid):
+    if sys.platform == "win32":
+        return _pid_gone_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -271,6 +274,55 @@ def _pid_gone(pid):
     except OSError:
         return True
     return False
+
+
+def _pid_gone_windows(pid):
+    """Windows: os.kill(pid, 0) only proves the PID is openable, not
+    that the process is alive — a dead process whose handle is still
+    open (e.g. the launcher's Popen object) still opens, so the
+    updater waited the full 120s and the CI test timed out at 60s.
+    Check the exit code instead: STILL_ACTIVE (259) means running;
+    anything else means the process has exited. Any inspection
+    failure treats the process as gone: proceeding is safe — replacing
+    a still-running exe fails cleanly with PermissionError below.
+    """
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return True
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value != 259
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return True
+
+
+def _replace_file(src, dst):
+    """Replace dst with src, retrying transient Windows locks.
+
+    A freshly written .exe is often briefly locked by antivirus
+    scanning; a single attempt fails with PermissionError and a
+    verified update is lost. Retry briefly, then fall back to
+    copy+remove (also the cross-device path); a persistent failure
+    propagates to the caller's OSError handler.
+    """
+    for _ in range(5):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            time.sleep(0.2)
+        except OSError:
+            break
+    shutil.copyfile(src, dst)
+    os.remove(src)
 
 
 def main():
@@ -289,15 +341,12 @@ def main():
         result["error"] = "bridge process did not exit within 120s — update NOT applied"
     else:
         try:
-            digest = hashlib.sha256(open(args.staged, "rb").read()).hexdigest()
+            with open(args.staged, "rb") as fh:
+                digest = hashlib.sha256(fh.read()).hexdigest()
             if digest.lower() != args.sha256.lower():
                 result["error"] = "staged file SHA-256 mismatch — update NOT applied"
             else:
-                try:
-                    os.replace(args.staged, args.target)
-                except OSError:
-                    shutil.copyfile(args.staged, args.target)
-                    os.remove(args.staged)
+                _replace_file(args.staged, args.target)
                 result["ok"] = True
                 result["target"] = args.target
                 if args.restart_cmd:
@@ -321,6 +370,25 @@ def main():
 if __name__ == "__main__":
     raise SystemExit(main())
 '''
+
+
+def _resolve_python_executable() -> str | None:
+    """Interpreter for running the staged apply script.
+
+    ``sys.executable`` is the running Python — except in the frozen
+    PyInstaller build, where it is the bridge .exe itself (Codex P2:
+    launching the .exe with a .py script argument re-launches the
+    bridge instead of running the script). When frozen, look for a
+    system Python on PATH; None when none exists (the caller reports
+    it honestly instead of launching garbage).
+    """
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    for name in ("python", "python3", "py"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -690,8 +758,18 @@ class Updater:
             }
         script = self.write_apply_script()
         staged_state = self._staged if self._staged.path else (self._load_staged_state() or _StagedInfo())
+        interpreter = _resolve_python_executable()
+        if interpreter is None:
+            return {
+                "launched": False,
+                "reason": "no_python_interpreter",
+                "detail": (
+                    "frozen build has no Python interpreter to run the apply script: "
+                    "install a system Python (python / python3 / py on PATH) and retry"
+                ),
+            }
         cmd = [
-            sys.executable,
+            interpreter,
             str(script),
             "--staged",
             str(staged),

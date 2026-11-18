@@ -130,6 +130,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
+from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -267,11 +268,22 @@ def parse_envelope(frame: Any) -> CommandEnvelope:
     ticket = operation.get("ticket")
     if ticket in (None, ""):
         raise ValueError("command operation is missing ticket")
-    try:
-        ticket_str = str(int(ticket)) if isinstance(ticket, (int, float)) else str(ticket).strip()
-        int(ticket_str)  # ticket must be numeric
-    except (TypeError, ValueError):
-        raise ValueError("command operation ticket is not numeric") from None
+    if isinstance(ticket, bool):
+        raise TypeError("command operation ticket is not an integer")
+    if isinstance(ticket, float):
+        # A non-integral float must be rejected, never truncated to a
+        # different ticket (Codex P2: 9000001.5 silently became 9000001).
+        if not ticket.is_integer():
+            raise ValueError("command operation ticket is not an integer")
+        ticket_str = str(int(ticket))
+    elif isinstance(ticket, int):
+        ticket_str = str(ticket)
+    else:
+        ticket_str = str(ticket).strip()
+        try:
+            int(ticket_str)  # ticket must be numeric
+        except (TypeError, ValueError):
+            raise ValueError("command operation ticket is not numeric") from None
     expires = normalize_utc(frame.get("expires_at"), 0)
     if expires is None:
         raise ValueError("command expires_at is not RFC 3339")
@@ -572,6 +584,13 @@ class CommandExecutor:
         #: newest last. In-memory only — the durable record is the
         #: ``action.result`` in ``results_queue`` (§6.5).
         self._recent: deque[dict[str, Any]] = deque(maxlen=50)
+        #: Serializes partial SL/TP updates (Codex P1): modify_sl_tp /
+        #: modify_pending are read-modify-write (fetch live SL/TP, fill
+        #: the unspecified side, send) — two concurrent updates for the
+        #: same position interleave and one is lost. A single lock (not
+        #: per-ticket): modify ops are rare and user-initiated, and no
+        #: other lock is held here, so no deadlock.
+        self._modify_lock = Lock()
 
     def recent_executions(self, limit: int = 50) -> list[dict[str, Any]]:
         """Most recent command executions, newest first (C4 GUI input)."""
@@ -725,7 +744,11 @@ class CommandExecutor:
         execution.transition(CommandState.EXECUTING)
         source_tool = SOURCE_TOOL[envelope.operation_type]
         try:
-            payload = self._dispatch(envelope)
+            if envelope.operation_type in ("modify_sl_tp", "modify_pending"):
+                with self._modify_lock:
+                    payload = self._dispatch(envelope)
+            else:
+                payload = self._dispatch(envelope)
         except BridgeError as exc:
             return self._finish_error(execution, envelope, source_tool, exc, started)
         except Exception:  # noqa: BLE001 — driver surprises are mcp_failed, never a crash

@@ -113,13 +113,27 @@ def test_every_test_function_is_labelled():
 def test_label_matches_the_directory_it_lives_in():
     mismatches = []
     for path in _iter_test_files():
-        rel_dir = str(path.parent.relative_to(REPO_ROOT))
+        # as_posix(): on Windows str() gives 'tests\\e2e', which misses
+        # DIR_LABEL — the label is about the directory, not the separator.
+        rel_dir = path.parent.relative_to(REPO_ROOT).as_posix()
         expected = DIR_LABEL[rel_dir]
         tree = ast.parse(path.read_text(encoding="utf-8"))
         module_labels = _module_labels(tree)
         if module_labels and expected not in module_labels:
             mismatches.append(f"{path.relative_to(REPO_ROOT)}: {sorted(module_labels)}")
     assert not mismatches, f"module label does not match directory: {mismatches}"
+
+
+def test_label_lookup_uses_posix_form_on_windows_paths():
+    """Regression guard for the Windows CI failure (run 44267190611):
+    a Windows path's str() is 'tests\\\\e2e', which misses DIR_LABEL
+    with KeyError — the lookup must use the posix form."""
+    from pathlib import PureWindowsPath
+
+    win_path = PureWindowsPath("tests/e2e/test_example.py")
+    assert str(win_path.parent) == "tests\\e2e"  # the form that broke CI
+    assert win_path.parent.as_posix() == "tests/e2e"
+    assert DIR_LABEL[win_path.parent.as_posix()] == "real_mt5"
 
 
 def test_conftest_fails_loudly_on_mt5_unavailable():

@@ -287,6 +287,21 @@ class ChartRateLimiter:
         self._sent.append(now)
         return True
 
+    def would_allow(self, now: float | None = None) -> bool:
+        """Budget check WITHOUT recording (Codex P2).
+
+        ``allow()`` both checks and records — the subscription poll
+        used it as a pre-check and ``_enqueue_chart`` charged the same
+        frame again, so one poll consumed 2 budget entries per frame
+        (4 for data+ticks) and the 60/min budget was really ~30/min.
+        Pre-checks use this; only the single choke point
+        (``_enqueue_chart`` -> ``allow()``) records a frame.
+        """
+        now = time.monotonic() if now is None else now
+        while self._sent and self._sent[0] <= now - 60.0:
+            self._sent.popleft()
+        return len(self._sent) < self.limit
+
     @property
     def used(self) -> int:
         now = time.monotonic()

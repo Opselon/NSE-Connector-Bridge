@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from nse_bridge.server.errors import ServerError, ServerErrorCode
 from nse_bridge.server.rest import SyncAck
 from nse_bridge.server.sync import EPOCH_ISO, SyncEngine
 from nse_bridge.server.sync_checkpoint import CHECKPOINT_FILENAME, SyncCheckpointStore
@@ -36,6 +37,13 @@ class FakeRest:
     async def send_batch(self, batch: dict[str, Any]) -> SyncAck:
         self.sent.append(batch)
         return SyncAck(accepted=True, batch_id=batch["batch_id"])
+
+
+class _FailingRest:
+    """Accepts nothing: every send fails with a server error."""
+
+    async def send_batch(self, batch: dict[str, Any]) -> SyncAck:
+        raise ServerError(ServerErrorCode.SERVER_UNAVAILABLE, "platform down")
 
 
 def _store(tmp_path: Path) -> SyncCheckpointStore:
@@ -150,6 +158,39 @@ async def test_checkpoint_survives_second_engine_instance(tmp_path: Path):
     assert engine2.checkpoint.iso == "2026-11-16T12:00:00Z"
     await engine2.sync_history()
     assert seen_from[0] == datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.unit
+async def test_checkpoint_does_not_advance_until_batch_accepted(tmp_path: Path):
+    # Codex P1 (a second history-loss mechanism, distinct from R1):
+    # the checkpoint used to advance on ENQUEUE, before the batch was
+    # accepted — a restart after the checkpoint persisted but before
+    # the (in-memory) batch flushed lost that history range forever.
+    # With a failing server the checkpoint must stay at the epoch, so
+    # a restart re-fetches the range instead of skipping it.
+    seen_from: list[datetime] = []
+    orders, positions = _history_fetchers(seen_from)
+    engine = SyncEngine(
+        _FailingRest(),
+        None,
+        sleep=_no_sleep,
+        checkpoint_store=_store(tmp_path),
+        history_orders=orders,
+        history_positions=positions,
+    )
+    await engine.sync_history()
+    assert engine.checkpoint.iso == EPOCH_ISO
+    assert _store(tmp_path).load() is None  # nothing persisted
+    # 3 pages still queued for retry (history_orders pages orders and
+    # deals separately: 2 pages; history_positions: 1 page).
+    assert engine.pending_count() == 3
+
+    # And once the server accepts, the same engine advances + persists.
+    engine.rest = FakeRest()
+    await engine.sync_history()
+    assert engine.checkpoint.iso == "2026-11-16T12:00:00Z"
+    assert _store(tmp_path).load()["checkpoint"] == "2026-11-16T12:00:00Z"
+    assert engine.pending_count() == 0
 
 
 @pytest.mark.unit

@@ -345,3 +345,21 @@ def test_parse_envelope_ticket_string_and_int():
     assert env.ticket == "9000001" and env.ticket_int == 9000001
     env2 = parse_envelope(_frame(operation={"type": "close_position", "ticket": "9000001"}))
     assert env2.ticket == "9000001"
+
+
+@pytest.mark.unit
+def test_parse_envelope_rejects_non_integral_ticket():
+    # Codex P2: a float ticket must be rejected, never truncated to a
+    # different ticket (9000001.5 silently became "9000001").
+    with pytest.raises(ValueError, match="not an integer"):
+        parse_envelope(_frame(operation={"type": "close_position", "ticket": 9000001.5}))
+    with pytest.raises(TypeError, match="not an integer"):
+        parse_envelope(_frame(operation={"type": "close_position", "ticket": True}))
+    with pytest.raises(ValueError, match="not numeric"):
+        parse_envelope(_frame(operation={"type": "close_position", "ticket": "9000001.5"}))
+
+
+@pytest.mark.unit
+def test_parse_envelope_accepts_integral_float_ticket():
+    env = parse_envelope(_frame(operation={"type": "close_position", "ticket": 9000001.0}))
+    assert env.ticket == "9000001" and env.ticket_int == 9000001

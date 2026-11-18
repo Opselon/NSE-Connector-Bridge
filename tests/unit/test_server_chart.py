@@ -273,6 +273,23 @@ def test_rate_limiter_60_per_minute():
 
 
 @pytest.mark.unit
+def test_rate_limiter_would_allow_does_not_consume():
+    # Codex P2: the subscription poll pre-checked with allow() and the
+    # enqueue charged the same frame again — one poll consumed 2 budget
+    # entries per frame (4 for data+ticks). would_allow() is the
+    # non-consuming pre-check; only allow() (inside _enqueue_chart)
+    # records a frame.
+    limiter = ChartRateLimiter(limit_per_minute=60)
+    now = 1000.0
+    assert limiter.would_allow(now=now) is True
+    assert limiter.would_allow(now=now) is True  # repeated pre-checks cost nothing
+    assert all(limiter.allow(now=now) for _ in range(60))
+    assert limiter.would_allow(now=now) is False  # budget exhausted
+    assert limiter.would_allow(now=now + 61.0) is True  # window slid past
+    assert limiter.allow(now=now + 61.0) is True
+
+
+@pytest.mark.unit
 def test_chart_error_frame_shape():
     frame = build_chart_error_frame(
         request_id="r1",

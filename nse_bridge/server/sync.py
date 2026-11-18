@@ -373,6 +373,13 @@ class SyncEngine:
     def pending_count(self) -> int:
         return len(self._pending_snapshots) + len(self._pending_history)
 
+    def _is_batch_pending(self, batch_id: str) -> bool:
+        """True when a batch is still queued (not yet accepted by the server)."""
+        for batch in self._pending_snapshots.values():
+            if batch.get("batch_id") == batch_id:
+                return True
+        return any(b.get("batch_id") == batch_id for b in self._pending_history.snapshot())
+
     # ------------------------------------------------------------------
     # flushing
     # ------------------------------------------------------------------
@@ -553,15 +560,32 @@ class SyncEngine:
             records = _primary_records(kind, items)
             pages = _history_pages(kind, items, self.page_size)
             for page_index, page_items in enumerate(pages):
-                self.enqueue(kind, page_items)
-                # R1: broker-local epochs shift by the configured offset;
-                # without a ctx there is no configured offset (0 = UTC).
-                offset = self.ctx.settings.broker_utc_offset_minutes if self.ctx is not None else 0
-                if self.checkpoint.advance_from_items(page_items, offset):
-                    # Persist on every advance: a restart resumes from
-                    # here instead of re-running the full backfill (§16).
-                    self._persist_checkpoint()
+                batch = self.enqueue(kind, page_items)
                 await self.flush()
+                # Advance ONLY once the batch is accepted (Codex P1 — a
+                # second history-loss mechanism, distinct from R1): the
+                # checkpoint used to advance on ENQUEUE, before the batch
+                # was accepted. If the process restarted after the
+                # checkpoint persisted but before the (in-memory
+                # re-queued) batch was flushed, that range was never
+                # re-fetched — silent history loss. A still-pending batch
+                # is retried and the checkpoint stays behind, so a
+                # restart re-fetches it. Soundness: flush() holds
+                # _flush_lock for the whole send loop, and this check
+                # runs after our flush() returned — no send is in flight
+                # for this batch, so "not pending" means accepted, not
+                # "mid-send". (Eviction from the bounded queue cannot
+                # occur here: each page is flushed before the next is
+                # enqueued.)
+                if not self._is_batch_pending(batch["batch_id"]):
+                    # R1: broker-local epochs shift by the configured
+                    # offset; without a ctx there is no configured
+                    # offset (0 = UTC).
+                    offset = self.ctx.settings.broker_utc_offset_minutes if self.ctx is not None else 0
+                    if self.checkpoint.advance_from_items(page_items, offset):
+                        # Persist on every advance: a restart resumes from
+                        # here instead of re-running the full backfill (§16).
+                        self._persist_checkpoint()
                 sent[kind] += 1
                 if page_index < len(pages) - 1:
                     await self._sleep(self.page_pause_s)

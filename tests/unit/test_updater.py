@@ -18,6 +18,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -36,6 +37,7 @@ from nse_bridge.updates import (
     APPLY_SCRIPT_TEMPLATE,
     UpdateError,
     Updater,
+    _resolve_python_executable,
     load_update_public_key,
     verify_artifact,
 )
@@ -430,6 +432,158 @@ def test_apply_script_refuses_wrong_sha(settings, keypair, tmp_path):
     )
     assert result.returncode != 0
     assert target.read_bytes() == b"old-bytes"  # untouched
+
+
+# ---------------------------------------------------------------------------
+# apply-script internals (the template exec'd; the Windows branch is
+# testable on Linux by stubbing ctypes.WinDLL)
+# ---------------------------------------------------------------------------
+def _template_ns() -> dict:
+    ns: dict = {"__name__": "apply_update_test"}
+    # The test's subject IS the exec'd template; the string is our own
+    # module constant, never user input.
+    exec(APPLY_SCRIPT_TEMPLATE, ns)  # noqa: S102
+    return ns
+
+
+@pytest.mark.unit
+def test_apply_script_pid_gone_posix_dead_pid():
+    ns = _template_ns()
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    assert ns["_pid_gone"](proc.pid) is True
+    assert ns["_pid_gone"](os.getpid()) is False
+
+
+@pytest.mark.unit
+def test_apply_script_pid_gone_windows_uses_exit_code(monkeypatch):
+    """os.kill(pid, 0) on Windows only proves the PID is openable — a
+    dead process whose handle is still open (the launcher's Popen
+    object) still opens, so the script waited the full 120s and the
+    CI test timed out at 60s. The Windows branch checks the exit
+    code instead: STILL_ACTIVE (259) means running."""
+    import ctypes
+
+    ns = _template_ns()
+    monkeypatch.setattr(sys, "platform", "win32", raising=False)
+
+    class _FakeKernel32:
+        def __init__(self, *, handle=1234, exit_code=0, query_ok=True):
+            self.handle = handle
+            self.exit_code = exit_code
+            self.query_ok = query_ok
+            self.closed: list[int] = []
+
+        def OpenProcess(self, access, inherit, pid):
+            return self.handle
+
+        def GetExitCodeProcess(self, handle, lpcode):
+            if not self.query_ok:
+                return 0
+            ctypes.cast(lpcode, ctypes.POINTER(ctypes.c_ulong)).contents.value = self.exit_code
+            return 1
+
+        def CloseHandle(self, handle):
+            self.closed.append(handle)
+            return 1
+
+    fake = _FakeKernel32(exit_code=259)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: fake, raising=False)
+    assert ns["_pid_gone"](4242) is False  # STILL_ACTIVE → alive
+    assert fake.closed == [1234]  # handle released
+
+    fake = _FakeKernel32(exit_code=0)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: fake, raising=False)
+    assert ns["_pid_gone"](4242) is True  # exited → gone
+
+    fake = _FakeKernel32(handle=0)  # cannot open → gone
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: fake, raising=False)
+    assert ns["_pid_gone"](4242) is True
+
+    fake = _FakeKernel32(exit_code=259, query_ok=False)  # query fails → gone (safe: replace refuses)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: fake, raising=False)
+    assert ns["_pid_gone"](4242) is True
+
+
+@pytest.mark.unit
+def test_apply_script_replace_retries_transient_lock(monkeypatch, tmp_path):
+    """A freshly written .exe is often briefly locked by antivirus
+    scanning; the replace must retry instead of losing a verified
+    update."""
+    ns = _template_ns()
+    src = tmp_path / "staged.exe"
+    dst = tmp_path / "target.exe"
+    src.write_bytes(b"new-bytes")
+    dst.write_bytes(b"old-bytes")
+    attempts = {"n": 0}
+    real_replace = os.replace
+
+    def flaky_replace(s, d):
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            raise PermissionError("locked by scanner")
+        return real_replace(s, d)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    ns["_replace_file"](str(src), str(dst))
+    assert attempts["n"] == 3
+    assert dst.read_bytes() == b"new-bytes"
+    assert not src.exists()
+
+
+@pytest.mark.unit
+def test_apply_script_replace_falls_back_to_copy(monkeypatch, tmp_path):
+    """A non-lock OSError (e.g. cross-device) falls through to copy+remove."""
+    ns = _template_ns()
+    src = tmp_path / "staged.exe"
+    dst = tmp_path / "target.exe"
+    src.write_bytes(b"new-bytes")
+    dst.write_bytes(b"old-bytes")
+    monkeypatch.setattr(os, "replace", lambda s, d: (_ for _ in ()).throw(OSError("Invalid cross-device link")))
+    ns["_replace_file"](str(src), str(dst))
+    assert dst.read_bytes() == b"new-bytes"
+    assert not src.exists()
+
+
+# ---------------------------------------------------------------------------
+# frozen-build interpreter resolution (Codex P2)
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+def test_resolve_python_executable_not_frozen():
+    assert _resolve_python_executable() == sys.executable
+
+
+@pytest.mark.unit
+def test_resolve_python_executable_frozen_prefers_system_python(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/python3" if name == "python" else None)
+    assert _resolve_python_executable() == "/usr/bin/python3"
+
+
+@pytest.mark.unit
+def test_resolve_python_executable_frozen_none_without_python(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert _resolve_python_executable() is None
+
+
+async def test_launch_restart_installer_frozen_without_python_reports_honestly(settings, keypair, monkeypatch):
+    """In the frozen build sys.executable is the bridge .exe — launching
+    it with a .py script argument re-launches the bridge instead of
+    running the script. With no system Python the launch must refuse
+    honestly, not launch garbage."""
+    priv, _ = keypair
+    updater = _updater(
+        settings,
+        FakeRestClient(release=_release(priv, ARTIFACT)),
+        transport=_transport_for(ARTIFACT),
+    )
+    assert (await updater.download())["state"] == "staged"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    outcome = updater.launch_restart_installer()
+    assert outcome["launched"] is False
+    assert outcome["reason"] == "no_python_interpreter"
 
 
 async def test_launch_restart_installer_reports_not_frozen_on_linux(settings, keypair):

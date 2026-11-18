@@ -809,7 +809,7 @@ class ServerChannel:
         delta = self._chart.build_delta(sub, candles)
         if not delta:
             return
-        if not self._chart.rate_limiter.allow():
+        if not self._chart.rate_limiter.would_allow():
             self._enqueue_chart(
                 build_chart_error_frame(
                     request_id=None,
@@ -835,7 +835,7 @@ class ServerChannel:
                 ticks = await run_in_threadpool(self._chart.fetch_ticks, sub.symbol, 100, None, None)
             except ChartError:
                 return
-            if ticks and self._chart.rate_limiter.allow():
+            if ticks and self._chart.rate_limiter.would_allow():
                 self._enqueue_chart(
                     build_chart_tick_frame(
                         subscription_id=sub.subscription_id,
