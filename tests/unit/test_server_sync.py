@@ -248,8 +248,8 @@ def test_chunk_items_pages():
 def test_manifest_only_truthful_fields():
     manifest = build_manifest("dev-1")
     assert manifest["device_id"] == "dev-1"
-    assert manifest["action_count"] == 90  # full local registry stays intact
-    assert len(manifest["actions"]) == 90
+    assert manifest["action_count"] == 91  # full local registry stays intact
+    assert len(manifest["actions"]) == 91
     assert manifest["manifest_hash"] == manifest_hash()
     assert len(manifest["manifest_hash"]) == 16
     # Omissions (documented in nse_bridge/server/manifest.py): no

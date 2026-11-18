@@ -50,11 +50,17 @@ be enabled, else `AutoTradeNotEnabled` (step 6).
 
 Validation order (§6.3, exact): malformed → expired → wrong-device →
 wrong-account → allowlist (→ `modify_pending` gate) → entitlement →
-replay. Lifecycle (clarification #2): `RECEIVED → VALIDATED →
-AUTHORIZED → DISPATCHED → EXECUTING → COMPLETED | FAILED | UNKNOWN |
-EXPIRED`. Full detail: docs/API_PROTOCOL.md §3.
+replay. Lifecycle (spec §7): `RECEIVED → VALIDATED → AUTHORIZED →
+DISPATCHED → EXECUTING → COMPLETED | PARTIALLY_COMPLETED | FAILED |
+UNKNOWN | EXPIRED`. `PARTIALLY_COMPLETED` is a LOCAL terminal state:
+a partial close (requested partial volume, or broker retcode 10010
+`DONE_PARTIAL`) whose resulting state was reconciled against live MT5
+truth; the wire `action.result` status stays `executed` (§6.5 has no
+partial status — Platform dependency D5) with `partial`,
+`closed_volume`, `remaining_volume`, `reconciled` in the payload.
+Full detail: docs/API_PROTOCOL.md §3.
 
-## 2. Local commands (90)
+## 2. Local commands (91)
 
 Auth: mandatory `X-API-Key` header on every local API request
 (auto-generated on first run, stored in the OS secret store; empty
@@ -181,6 +187,7 @@ the command dispatches a broker write.
 | 88 | `get_bridge_capabilities` | diagnostics | no | — | CapabilitiesResponse | Get Bridge Capabilities |
 | 89 | `get_mcp_available_tools` | diagnostics | no | — | McpToolsResponse | Get MCP Available Tools |
 | 90 | `get_mt5_diagnostic_report` | diagnostics | no | — | object | Get MT5 Diagnostic Report |
+| 91 | `trade_close_position_by` | positions | yes | CloseByRequest | object | Close Position By (Close-By) |
 
 ### 2.1 Categories
 
@@ -202,10 +209,12 @@ the command dispatches a broker write.
   timeframes, OHLCV, indicators, chart objects, active chart info,
   multi-timeframe history. Raw series only — no indicator math is
   computed here beyond returning what the terminal reports.
-- **positions (46–54):** open positions, info, profit, volume,
+- **positions (46–54, 91):** open positions, info, profit, volume,
   SL/TP, risk (read-only); `trade_modify_sl_tp`, `trade_close_single_position`,
   `trade_close_all_positions` (mutating; close-all accepts an optional
-  `magic` filter and never touches manual positions when it is set).
+  `magic` filter and never touches manual positions when it is set);
+  `trade_close_position_by` (91, close-by: two opposite positions
+  against each other, hedging accounts only).
 - **orders (55–63):** pending orders, order info/status, history
   orders, history positions, deals history (read-only);
   `trade_cancel_pending_order`, `trade_modify_pending_order`

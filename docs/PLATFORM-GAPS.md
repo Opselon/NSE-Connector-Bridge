@@ -44,7 +44,7 @@ explicitly left to the Platform side to define.
 
 - The v1 server allowlist is exactly `close_position`, `modify_sl_tp`,
   `modify_pending` (capability-gated, §4 below). `open_order` and
-  `cancel_order` are explicitly NOT sendable in v1. The full 90-command
+  `cancel_order` are explicitly NOT sendable in v1. The full 91-command
   registry stays available **locally**; the server channel enforces the
   3-op allowlist at the channel boundary.
 - Before the allowlist can widen, the Platform needs to prove, on the

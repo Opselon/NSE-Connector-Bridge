@@ -87,6 +87,13 @@ TRADE_MODE_LABELS = {
 }
 FILLING_LABELS = {0: "FOK", 1: "IOC", 2: "RETURN"}
 EXECUTION_LABELS = {0: "REQUEST", 1: "INSTANT", 2: "MARKET", 3: "EXCHANGE"}
+#: Calculation-mode labels (MT5 ``trade_calc_mode``, ENUM_SYMBOL_CALC_MODE).
+#: Raw int is authoritative; the label is display-only. Single source of
+#: truth — ``nse_bridge.symbols.metadata`` imports this dict.
+CALC_MODE_LABELS = {0: "FOREX", 1: "FOREX_NO_LEVERAGE", 2: "FUTURES", 3: "CFD", 4: "CFD_LEVERAGE"}
+#: Account margin-mode labels (MT5 ``margin_mode``,
+#: ENUM_ACCOUNT_MARGIN_MODE). Raw int is authoritative.
+MARGIN_MODE_LABELS = {0: "RETAIL_NETTING", 1: "RETAIL_HEDGING", 2: "EXCHANGE"}
 TIMEFRAME_NAMES = (
     "M1",
     "M2",
@@ -169,6 +176,12 @@ class AccountInfoModel(BaseModel):
     margin_so_mode: int | None = None
     margin_so_call: float | None = None
     margin_so_so: float | None = None
+    #: Account margin mode (MT5 ``margin_mode``): 0 netting, 1 hedging,
+    #: 2 exchange. Distinct from ``margin_so_mode`` (stop-out mode) —
+    #: an earlier ``get_trading_permissions`` build returned the stop-out
+    #: mode under the name ``margin_mode`` (fixed in the C2 execution work).
+    margin_mode: int | None = None
+    margin_mode_label: str | None = None
     trade_allowed: bool | None = None
     trade_expert: bool | None = None
 
@@ -213,6 +226,11 @@ class SymbolInfoModel(BaseModel):
     trade_freeze_level: int | None = None
     trade_execution: int | None = None
     trade_execution_label: str | None = None
+    #: Calculation mode (MT5 ``trade_calc_mode``) — distinct from the
+    #: execution mode above. ``build_symbol_model`` used to read
+    #: ``trade_execution`` from ``trade_calc_mode`` (fixed in C2).
+    trade_calc_mode: int | None = None
+    trade_calc_mode_label: str | None = None
     filling_mode: int | None = None
     swap_long: float | None = None
     swap_short: float | None = None
@@ -397,8 +415,10 @@ def build_symbol_model(raw: Any, offset_minutes: int = 0) -> SymbolInfoModel:
         volume_limit=f(raw, "volume_limit"),
         trade_stops_level=f(raw, "trade_stops_level"),
         trade_freeze_level=f(raw, "trade_freeze_level"),
-        trade_execution=f(raw, "trade_calc_mode"),
-        trade_execution_label=EXECUTION_LABELS.get(f(raw, "trade_calc_mode", -1)),
+        trade_execution=f(raw, "trade_exemode"),
+        trade_execution_label=EXECUTION_LABELS.get(f(raw, "trade_exemode", -1)),
+        trade_calc_mode=f(raw, "trade_calc_mode"),
+        trade_calc_mode_label=CALC_MODE_LABELS.get(f(raw, "trade_calc_mode", -1)),
         filling_mode=f(raw, "filling_mode"),
         swap_long=f(raw, "swap_long"),
         swap_short=f(raw, "swap_short"),
@@ -436,6 +456,8 @@ def build_account_model(raw: Any) -> AccountInfoModel:
         margin_so_mode=f(raw, "margin_so_mode"),
         margin_so_call=f(raw, "margin_so_call"),
         margin_so_so=f(raw, "margin_so_so"),
+        margin_mode=f(raw, "margin_mode"),
+        margin_mode_label=MARGIN_MODE_LABELS.get(f(raw, "margin_mode", -1)),
         trade_allowed=f(raw, "trade_allowed"),
         trade_expert=f(raw, "trade_expert"),
     )

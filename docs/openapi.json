@@ -34,7 +34,7 @@
           "system"
         ],
         "summary": "Update bridge settings",
-        "description": "Partial update. Non-secret fields are persisted to config.json. Secrets (server_token, local_api_key) are routed through the secret store and never written to config.json. Server-channel fields apply immediately (the outbound channel restarts when URL/token change).",
+        "description": "Partial update. Non-secret fields are persisted to config.json. Secrets (server_token, local_api_key) are routed through the secret store and never written to config.json. Server-channel fields apply immediately (the outbound channel restarts when URL/token change). Terminal fields (mt5_terminal_path, mt5_custom_terminal_dirs) re-run discovery immediately (fresh list returned in this response); changing the terminal path while the driver is connected disconnects it from the old terminal instead of keeping a stale selection.",
         "operationId": "update_settings_api_v1_settings_put",
         "requestBody": {
           "content": {
@@ -270,7 +270,7 @@
           "system"
         ],
         "summary": "Detected MetaTrader 5 terminals",
-        "description": "All discovered terminals (Phase 5): configured path, env var, standard install locations, App Paths registry, custom/portable directories, running processes — each with version + running status. Selection stays user-driven (PUT /settings mt5_terminal_path).",
+        "description": "All discovered terminals (Phase 5): configured path, env var, standard install locations, App Paths registry, custom/portable directories, running processes — each with version, data directory (when determinable, else null — never guessed), + running status. Discovery re-runs on every request, and PUT /settings re-runs it immediately when the terminal path or custom terminal dirs change. Selection stays user-driven (PUT /settings mt5_terminal_path).",
         "operationId": "list_mt5_terminals_api_v1_mt5_terminals_get",
         "responses": {
           "200": {
@@ -1497,7 +1497,7 @@
           "symbols"
         ],
         "summary": "[23] Get Symbol Point",
-        "description": "One point value for the symbol (e.g. 0.00001 on EURUSD 5-digit).",
+        "description": "One point value for the symbol (e.g. 0.00001 on a 5-digit pair).",
         "operationId": "get_symbol_point",
         "requestBody": {
           "content": {
@@ -3079,7 +3079,7 @@
           "orders"
         ],
         "summary": "[55] Get Pending Orders",
-        "description": "All active pending orders (LIMIT/STOP), optionally filtered by symbol.",
+        "description": "All active pending orders (LIMIT/STOP/STOP-LIMIT), optionally filtered by symbol.",
         "operationId": "get_trading_pending_orders",
         "requestBody": {
           "content": {
@@ -3422,7 +3422,7 @@
           "orders"
         ],
         "summary": "[62] Modify Pending Order",
-        "description": "Modify price/SL/TP/volume/expiration of an active pending order (TRADE_ACTION_MODIFY).",
+        "description": "Modify price/SL/TP/expiration of an active pending order (TRADE_ACTION_MODIFY). Volume is NOT changeable via modify (MQL5) — delete + replace instead.",
         "operationId": "trade_modify_pending_order",
         "requestBody": {
           "content": {
@@ -3667,7 +3667,7 @@
           "trading"
         ],
         "summary": "[67] Send Pending Order",
-        "description": "Place LIMIT/STOP order with pre-dispatch structural validation (volume bounds, entry side, stops/freeze distances, SL/TP geometry) — structurally-invalid requests are rejected BEFORE dispatch.",
+        "description": "Place LIMIT/STOP/STOP-LIMIT order with pre-dispatch structural validation (volume bounds, entry side, stops/freeze distances, SL/TP geometry, stop-limit trigger/limit geometry) — structurally-invalid requests are rejected BEFORE dispatch.",
         "operationId": "trade_send_pending_order",
         "requestBody": {
           "content": {
@@ -4832,6 +4832,53 @@
           }
         }
       }
+    },
+    "/api/v1/trade_close_position_by": {
+      "post": {
+        "tags": [
+          "positions"
+        ],
+        "summary": "[91] Close Position By (Close-By)",
+        "description": "Close two opposite positions against each other (TRADE_ACTION_CLOSE_BY, spec §6). Hedging accounts only (margin_mode 1); on netting accounts close-by is impossible — close the position and open an opposing deal instead. The smaller-volume position closes entirely; the larger remains open with the volume difference (both close when volumes are equal). The resulting state is verified against live broker truth before the result is reported. Added by the complete-infrastructure spec (C2); the registry grew 90 → 91 commands.",
+        "operationId": "trade_close_position_by",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CloseByRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -5294,6 +5341,28 @@
           "failures"
         ],
         "title": "CloseAllResponse"
+      },
+      "CloseByRequest": {
+        "properties": {
+          "ticket": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Ticket",
+            "description": "Position ticket to close"
+          },
+          "ticket_by": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Ticket By",
+            "description": "Opposite position ticket to close against (same symbol, opposite type)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ticket",
+          "ticket_by"
+        ],
+        "title": "CloseByRequest"
       },
       "ClosePositionRequest": {
         "properties": {
@@ -7489,7 +7558,7 @@
               }
             ],
             "title": "Symbol",
-            "description": "MT5 group filter (e.g. EURUSD or EUR*)"
+            "description": "MT5 group filter (a broker symbol name, or a prefix wildcard such as EUR*)"
           }
         },
         "type": "object",
@@ -8089,18 +8158,6 @@
             ],
             "title": "Tp"
           },
-          "volume": {
-            "anyOf": [
-              {
-                "type": "number",
-                "exclusiveMinimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Volume"
-          },
           "expiration_utc": {
             "anyOf": [
               {
@@ -8450,7 +8507,9 @@
               "BUY_LIMIT",
               "SELL_LIMIT",
               "BUY_STOP",
-              "SELL_STOP"
+              "SELL_STOP",
+              "BUY_STOP_LIMIT",
+              "SELL_STOP_LIMIT"
             ],
             "title": "Order Type"
           },
@@ -8463,6 +8522,18 @@
             "type": "number",
             "exclusiveMinimum": 0.0,
             "title": "Price"
+          },
+          "stoplimit": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stoplimit"
           },
           "sl": {
             "type": "number",
@@ -9411,6 +9482,18 @@
               }
             ],
             "title": "Mt5 Terminal Path"
+          },
+          "mt5_custom_terminal_dirs": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mt5 Custom Terminal Dirs",
+            "description": "Comma-separated extra directories searched for terminals (custom/portable installs)"
           }
         },
         "type": "object",
@@ -9981,6 +10064,28 @@
               }
             ],
             "title": "Trade Execution Label"
+          },
+          "trade_calc_mode": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trade Calc Mode"
+          },
+          "trade_calc_mode_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trade Calc Mode Label"
           },
           "filling_mode": {
             "anyOf": [
@@ -11078,6 +11183,17 @@
               }
             ],
             "title": "Margin Mode"
+          },
+          "margin_mode_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Margin Mode Label"
           },
           "account_login": {
             "type": "integer",

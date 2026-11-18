@@ -174,6 +174,10 @@ class BridgeContext:
     enrolment: Any = None  # EnrolmentManager (CONTRACT v1 §3.1/§3.2), wired at app startup
     telemetry: Any = None  # TelemetryEmitter (ARCHITECTURE-CONTRACT §8), wired at app startup
     self_healing: Any = None  # SelfHealingRegistry (§8), wired at app startup
+    #: Canonical-ID resolver (spec §4 / gap C2), lazily built on the
+    #: first canonical ``BASE/QUOTE`` order symbol — never built for
+    #: exact broker names, so existing callers pay nothing for it.
+    symbol_resolver: Any = None  # SymbolResolver, built by get_symbol_resolver
     # Last validate-key snapshot (CONTRACT v1 §3.1), stored by the GUI
     # refresh action (POST /api/v1/account/validate-key) from the Phase 2
     # REST client. Server-resolved only (user_id, subscription,
@@ -245,6 +249,62 @@ def account_info_model(ctx: BridgeContext):
         return raw
 
     return build_account_model(ctx.driver.run(job, op="account_info"))
+
+
+def get_symbol_resolver(ctx: BridgeContext):
+    """Lazily build (and cache) the canonical-ID resolver for this context.
+
+    The inventory loads on first use only; the resolver caches the
+    broker snapshot (TTL 300 s). Call :meth:`invalidate` on the cached
+    resolver when the broker environment changes (B3
+    ``broker_connection_change``) — a mapping built against the old
+    broker must never carry over silently.
+    """
+    if ctx.symbol_resolver is None:
+        from ..symbols.inventory import SymbolInventory
+        from ..symbols.resolver import SymbolResolver
+
+        ctx.symbol_resolver = SymbolResolver(SymbolInventory(ctx.driver))
+    return ctx.symbol_resolver
+
+
+def resolve_order_symbol(ctx: BridgeContext, symbol: str) -> str:
+    """Resolve an order symbol to the exact broker symbol (spec §4, gap C2).
+
+    Only inputs containing ``/`` take the resolution path — a broker
+    symbol name never contains ``/``, so every existing exact-name
+    caller passes through untouched (zero behaviour change). A canonical
+    ``BASE/QUOTE`` input is resolved through the C1 resolver: an
+    ambiguous or unknown canonical ID is a VALIDATION rejection, never
+    a guess and never a verbatim fallback; an unreachable broker symbol
+    list is likewise a rejection, never a silent pass-through.
+    """
+    symbol = (symbol or "").strip()
+    if "/" not in symbol:
+        return symbol
+    from ..symbols.resolver import ResolutionStatus
+
+    try:
+        result = get_symbol_resolver(ctx).resolve(symbol)
+    except Exception as exc:  # unresolvable == untradable here
+        raise BridgeError(
+            ErrorCode.VALIDATION,
+            f"Cannot resolve canonical symbol {symbol!r}: broker symbol list unavailable ({exc}).",
+            http_status=422,
+            details={"symbol": symbol, "status": "not_found"},
+        ) from exc
+    if result.status is ResolutionStatus.RESOLVED and result.exact_symbol:
+        return result.exact_symbol
+    raise BridgeError(
+        ErrorCode.VALIDATION,
+        f"Cannot resolve canonical symbol {symbol!r}: {result.status.value} — {result.reason}",
+        http_status=422,
+        details={
+            "symbol": symbol,
+            "status": result.status.value,
+            "candidates": [c.name for c in result.candidates],
+        },
+    )
 
 
 def require_symbol_info(ctx: BridgeContext, symbol: str):

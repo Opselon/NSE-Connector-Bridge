@@ -1,4 +1,4 @@
-"""Command registry: the 90 NSE MT5 Bridge commands.
+"""Command registry: the 91 NSE MT5 Bridge commands.
 
 Each command = CommandSpec(name, category, handler, request/response models,
 mutates flag). The FastAPI layer auto-generates one POST endpoint per command
@@ -29,7 +29,8 @@ class CommandSpec:
     # union and lose the BaseModel intent for readers.
     response_model: type[Any] | None = None
     mutates: bool = False  # dispatches broker writes (trades)
-    number: int = 0  # official command number (1..90)
+    number: int = 0  # official command number (1..90 originally; 91 added by the
+    # complete-infrastructure spec §6, close-by — see trade_close_position_by)
 
 
 REGISTRY: list[CommandSpec] = []

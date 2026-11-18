@@ -11,10 +11,10 @@ Per-field MT5 source (see :attr:`SymbolMetadata.MT5_FIELD_MAP`):
   exchange). ``trade_calc_mode`` is the CALCULATION mode
   (forex/futures/CFD/…). They are different properties — do not
   conflate them. (Note: the pre-existing ``SymbolInfoModel`` in
-  ``nse_bridge/mt5/types.py`` maps ``trade_execution`` from
-  ``trade_calc_mode``; that model is out of scope for this package and
-  is NOT used here. ``SymbolMetadata.from_mt5`` reads both properties
-  separately.)
+  ``nse_bridge/mt5/types.py`` used to map ``trade_execution`` from
+  ``trade_calc_mode``; that was fixed in the C2 execution work, which
+  also moved ``CALC_MODE_LABELS`` into ``mt5/types.py`` as the single
+  source of truth.)
 * Hourly quote/trade session SCHEDULES are not exposed by the MT5
   Python API. What the terminal does expose is live session
   AGGREGATES (deals, turnover, open/close prices); those are carried
@@ -33,18 +33,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
-from ..mt5.types import EXECUTION_LABELS, TRADE_MODE_LABELS
+from ..mt5.types import CALC_MODE_LABELS, EXECUTION_LABELS, TRADE_MODE_LABELS
 from ..mt5.types import f as _mt5_field
-
-#: Calculation-mode labels (MT5 ``trade_calc_mode``).
-#: Raw int is authoritative; the label is display-only.
-CALC_MODE_LABELS = {
-    0: "FOREX",
-    1: "FOREX_NO_LEVERAGE",
-    2: "FUTURES",
-    3: "CFD",
-    4: "CFD_LEVERAGE",
-}
 
 #: Swap-mode labels (MT5 ``swap_mode``). Raw int is authoritative.
 SWAP_MODE_LABELS = {
