@@ -159,6 +159,16 @@ class SymbolResolver:
         self._snapshot: list[SymbolMetadata] | None = None
         self._snapshot_at: float | None = None
 
+    @property
+    def inventory(self) -> SymbolInventory:
+        """The underlying broker inventory (C4 GUI input).
+
+        The resolver and the Symbols screen share this one inventory,
+        so the screen shows exactly the symbols resolution runs
+        against — never a second, diverging snapshot.
+        """
+        return self._inventory
+
     # -- cache ----------------------------------------------------------
     def refresh(self) -> None:
         """Re-read the broker symbol list and rebuild the index NOW.

@@ -265,6 +265,23 @@ class ServerChannel:
     def sync_engine(self) -> SyncEngine | None:
         return self._sync
 
+    def recent_command_executions(self, limit: int = 50) -> dict[str, Any]:
+        """Recent server-channel command lifecycle for the C4 GUI.
+
+        ``executions`` is the executor's bounded in-memory history
+        (true local lifecycle states, newest first); ``pending_results``
+        is the count of ``action.result`` frames still queued for
+        delivery to the server (§6.5, durable across restarts). When
+        the executor has never been created (channel never opened) the
+        history is empty — never a fabricated entry.
+        """
+        executor = self._executor
+        return {
+            "executions": executor.recent_executions(limit) if executor is not None else [],
+            "pending_results": len(self._pending_results),
+            "executor_available": executor is not None,
+        }
+
     def _device_id(self) -> str:
         return self.ctx.get_or_create_device_id()
 

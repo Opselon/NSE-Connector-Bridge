@@ -144,15 +144,18 @@ form.settings{max-width:640px}
     <div class="navitem" data-page="account">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"/></svg>
       Account &amp; Subscription</div>
+    <div class="navitem" data-page="symbols">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5M4 15c4-3 6 3 10 0s6 3 6 0"/><path d="M20 5v14"/></svg>
+      Symbols</div>
+    <div class="navitem" data-page="execution">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      Execution</div>
     <div class="navitem" data-page="diagnostics">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-5"/><circle cx="12" cy="12" r="9"/></svg>
       Diagnostics</div>
     <div class="navitem" data-page="updates">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg>
       Updates &amp; Releases</div>
-    <div class="navitem" data-page="settings">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.9-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1-1.5 1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.9 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1 1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.9.3h0a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5h0a1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.9v0a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>
-      Settings</div>
   </nav>
   <div class="side-foot">
     <b id="sfVer">—</b><br>device <span id="sfDevice">—</span><br>
@@ -208,6 +211,49 @@ form.settings{max-width:640px}
         <button class="btn ghost" id="btnConnRefresh">Refresh</button>
         <span class="statusline" id="connMsg"></span>
       </div>
+      <form class="settings card" onsubmit="return false" style="margin-top:14px">
+        <h2>NSE Platform Settings</h2>
+        <div class="tophint" style="margin-bottom:14px">
+          Paste the <b>API key</b> generated on the <b>NSE Platform site</b>. The bridge then dials
+          <b>out</b> to your server (no inbound ports, firewall-friendly). Secrets are stored in the
+          OS secret store and are never shown back — only masked status is displayed.
+        </div>
+        <div class="field">
+          <label>Server base URL <small>— REST base, e.g. https://bridge.nexusverse.space</small></label>
+          <input id="setBaseUrl" placeholder="https://…" spellcheck="false">
+        </div>
+        <div class="field">
+          <label>Server channel URL <small>— wss://…, empty = derived from the base URL</small></label>
+          <input id="setUrl" placeholder="wss://…" spellcheck="false">
+        </div>
+        <div class="field">
+          <label>Environment</label>
+          <select id="setEnv"><option value="production">production</option><option value="staging">staging</option><option value="dev">dev</option></select>
+        </div>
+        <div class="field">
+          <label>API key from the NSE Platform site <small>— stored in the secret store, never displayed</small></label>
+          <input id="setToken" type="password" placeholder="paste your API key" spellcheck="false" autocomplete="off">
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Log level</label>
+            <select id="setLogLevel"><option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select>
+          </div>
+          <div class="field">
+            <label>GUI mode</label>
+            <select id="setGuiMode"><option value="auto">auto</option><option value="webview">webview</option><option value="browser">browser</option><option value="none">none</option></select>
+          </div>
+        </div>
+        <div class="kv"><span class="k">Local API key</span><span class="v" id="setLocalKey">—</span></div>
+        <div class="kv"><span class="k">Device ID</span><span class="v" id="setDevice">—</span></div>
+        <div class="kv"><span class="k">Config file</span><span class="v" id="cfgPath">—</span></div>
+        <div style="display:flex;gap:10px;align-items:center;margin-top:14px">
+          <button class="btn" id="saveSettings">Save &amp; apply</button>
+          <span id="saveMsg"></span>
+        </div>
+        <p class="note" id="restartNote" style="display:none">Environment or server base URL changed —
+          restart the bridge for the new environment to take effect.</p>
+      </form>
     </section>
 
     <!-- ================= METATRADER ================= -->
@@ -278,6 +324,78 @@ form.settings{max-width:640px}
       <div class="actions">
         <button class="btn" id="btnAcRefresh">Refresh from server</button>
         <span class="statusline" id="acMsg"></span>
+      </div>
+    </section>
+
+    <!-- ================= SYMBOLS ================= -->
+    <section class="page" id="page-symbols">
+      <div class="tophint">Broker-reported symbols, exact names as the terminal reports them.
+        Nothing here is canonicalised or guessed — a canonical ID (EUR/USD) is resolved to the
+        broker name only through the resolver below, and ambiguity is shown, never decided for you.</div>
+      <div class="grid">
+        <div class="card">
+          <h2>Inventory
+            <span><button class="btn small" id="btnSymRefresh">Refresh</button></span>
+          </h2>
+          <div class="kv"><span class="k">Total symbols</span><span class="v" id="symTotal">—</span></div>
+          <div class="kv"><span class="k">Visible / hidden / unknown</span><span class="v" id="symVis">—</span></div>
+          <div class="kv"><span class="k">Tradable</span><span class="v" id="symTrad">—</span></div>
+          <div class="kv"><span class="k">Loaded at</span><span class="v" id="symLoaded">—</span></div>
+          <div class="kv"><span class="k">Completeness</span><span class="v" id="symComplete">—</span></div>
+        </div>
+        <div class="card">
+          <h2>Resolve a canonical ID</h2>
+          <div class="field">
+            <label>Canonical ID <small>— e.g. EUR/USD, XAU/USD</small></label>
+            <input id="symResolveInput" placeholder="EUR/USD" spellcheck="false">
+          </div>
+          <div class="actions">
+            <button class="btn small" id="btnSymResolve">Resolve</button>
+            <span class="statusline" id="symResolveMsg"></span>
+          </div>
+          <div id="symResolveOut"><div class="empty">Type a canonical ID and press Resolve. Ambiguity is shown with its candidates — never guessed.</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Symbols</h2>
+        <div class="field" style="margin-bottom:10px">
+          <input id="symFilter" placeholder="filter by name…" spellcheck="false">
+        </div>
+        <table><thead><tr><th>Symbol</th><th>Visible</th><th>Availability</th><th>Digits</th><th>Point</th><th>Contract size</th><th>Volume min / max / step</th><th>Stops level</th><th>Exec mode</th><th>Calc mode</th><th>Currencies</th></tr></thead>
+        <tbody id="symRows"><tr><td colspan="11" class="empty">—</td></tr></tbody></table>
+        <span class="statusline" id="symMsg"></span>
+      </div>
+      <p class="note">Metadata is broker-reported; a field the broker does not report shows as
+        “not reported”. Market-closed cannot be detected from metadata — availability never claims it.</p>
+    </section>
+
+    <!-- ================= EXECUTION ================= -->
+    <section class="page" id="page-execution">
+      <div class="tophint">Recent server-channel commands and journal events. Lifecycle states are the
+        bridge's local states. UNKNOWN means the outcome is uncertain — reconcile MT5 state before
+        any retry. There is deliberately no retry button here.</div>
+      <div class="grid">
+        <div class="card">
+          <h2>Command channel</h2>
+          <div class="kv"><span class="k">Results awaiting delivery</span><span class="v" id="exPend">—</span></div>
+          <div class="kv"><span class="k">UNKNOWN awaiting reconciliation</span><span class="v" id="exUnknown">—</span></div>
+          <div class="kv"><span class="k">Executor history</span><span class="v" id="exAvail">—</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Recent commands
+          <span><button class="btn small" id="btnExRefresh">Refresh</button></span>
+        </h2>
+        <table><thead><tr><th>Command</th><th>Operation</th><th>Local state</th><th>Wire status</th><th>Started</th><th>Duration</th><th>Error</th><th>Partial close</th></tr></thead>
+        <tbody id="exRows"><tr><td colspan="8" class="empty">—</td></tr></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Journal events
+          <span><button class="btn small" id="btnJrRefresh">Refresh</button></span>
+        </h2>
+        <table><thead><tr><th>Time</th><th>Event</th><th>Ticket</th><th>Symbol</th><th>Volume</th><th>Price</th><th>Profit</th><th>Retcode</th></tr></thead>
+        <tbody id="jrRows"><tr><td colspan="8" class="empty">—</td></tr></tbody></table>
+        <span class="statusline" id="jrMsg"></span>
       </div>
     </section>
 
@@ -361,53 +479,6 @@ form.settings{max-width:640px}
         Ed25519 signature verification. A release with no signature, no public key configured,
         or a failed verification is never installed.</p>
     </section>
-
-    <!-- ================= SETTINGS ================= -->
-    <section class="page" id="page-settings">
-      <div class="tophint">
-        Paste the <b>API key</b> generated on the <b>NSE Platform site</b>. The bridge then dials
-        <b>out</b> to your server (no inbound ports, firewall-friendly). Secrets are stored in the
-        OS secret store and are never shown back — only masked status is displayed.
-      </div>
-      <form class="settings card" onsubmit="return false">
-        <h2>NSE Platform Connection</h2>
-        <div class="field">
-          <label>Server base URL <small>— REST base, e.g. https://bridge.nexusverse.space</small></label>
-          <input id="setBaseUrl" placeholder="https://…" spellcheck="false">
-        </div>
-        <div class="field">
-          <label>Server channel URL <small>— wss://…, empty = derived from the base URL</small></label>
-          <input id="setUrl" placeholder="wss://…" spellcheck="false">
-        </div>
-        <div class="field">
-          <label>Environment</label>
-          <select id="setEnv"><option value="production">production</option><option value="staging">staging</option><option value="dev">dev</option></select>
-        </div>
-        <div class="field">
-          <label>API key from the NSE Platform site <small>— stored in the secret store, never displayed</small></label>
-          <input id="setToken" type="password" placeholder="paste your API key" spellcheck="false" autocomplete="off">
-        </div>
-        <div class="row">
-          <div class="field">
-            <label>Log level</label>
-            <select id="setLogLevel"><option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select>
-          </div>
-          <div class="field">
-            <label>GUI mode</label>
-            <select id="setGuiMode"><option value="auto">auto</option><option value="webview">webview</option><option value="browser">browser</option><option value="none">none</option></select>
-          </div>
-        </div>
-        <div class="kv"><span class="k">Local API key</span><span class="v" id="setLocalKey">—</span></div>
-        <div class="kv"><span class="k">Device ID</span><span class="v" id="setDevice">—</span></div>
-        <div class="kv"><span class="k">Config file</span><span class="v" id="cfgPath">—</span></div>
-        <div style="display:flex;gap:10px;align-items:center;margin-top:14px">
-          <button class="btn" id="saveSettings">Save &amp; apply</button>
-          <span id="saveMsg"></span>
-        </div>
-        <p class="note" id="restartNote" style="display:none">Environment or server base URL changed —
-          restart the bridge for the new environment to take effect.</p>
-      </form>
-    </section>
   </div>
 </main>
 
@@ -449,7 +520,7 @@ const post = (path, body) => api(path, {method: 'POST', body: body === undefined
 const setMsg = (el, txt, cls) => { const n = $(el); n.textContent = txt; n.className = 'statusline ' + (cls || ''); };
 
 /* ---------- navigation ---------- */
-const titles = {connection:'Connection', metatrader:'MetaTrader', account:'Account & Subscription', diagnostics:'Diagnostics', updates:'Updates & Releases', settings:'Settings'};
+const titles = {connection:'Connection', metatrader:'MetaTrader', account:'Account & Subscription', symbols:'Symbols', execution:'Execution', diagnostics:'Diagnostics', updates:'Updates & Releases'};
 let current = 'connection';
 function show(page){
   document.querySelectorAll('.navitem').forEach(n => n.classList.toggle('active', n.dataset.page === page));
@@ -464,12 +535,13 @@ async function refreshActive(){
     if (current === 'connection') await loadConnection();
     else if (current === 'metatrader') await loadMetatrader();
     else if (current === 'account') await loadAccount();
+    else if (current === 'symbols') await loadSymbols();
+    else if (current === 'execution') await loadExecution();
     else if (current === 'diagnostics') await loadDiagnostics();
     else if (current === 'updates') await loadUpdates();
-    else if (current === 'settings') await loadSettings();
   } catch(e){ /* per-screen handlers surface their own errors */ }
 }
-setInterval(() => { if (['connection','metatrader','diagnostics'].includes(current)) refreshActive(); }, 10000);
+setInterval(() => { if (['connection','metatrader','execution','diagnostics'].includes(current)) refreshActive(); }, 10000);
 
 /* ---------- shared bits ---------- */
 function diagBanner(d){
@@ -539,6 +611,8 @@ async function loadConnection(){
   const host = $('connDiag');
   host.innerHTML = diagBanner(summary.diagnostic);
   wireRetryDiag(host);
+  // Settings live on this screen (spec §17): keep the form fresh.
+  try { await loadSettings(); } catch(e){ /* settings load surfaces its own errors */ }
 }
 $('btnReconnect').onclick = async () => {
   setMsg('connMsg', 'restarting channel…');
@@ -655,6 +729,119 @@ $('btnAcRefresh').onclick = async () => {
   catch(e){ setMsg('acMsg', 'refresh failed: ' + e.message, 'down'); }
   loadAccount();
 };
+
+/* ---------- Symbols ---------- */
+let symData = [];
+function symVal(v){ return v == null ? 'not reported' : String(v); }
+function stateBadge(s){
+  const cls = {COMPLETED:'ok', PARTIALLY_COMPLETED:'warnb', FAILED:'bad', UNKNOWN:'warnb', EXPIRED:'gray', RECEIVED:'gray', VALIDATED:'gray', AUTHORIZED:'gray', DISPATCHED:'gray', EXECUTING:'warnb'}[s] || 'gray';
+  return '<span class="badge ' + cls + '">' + esc(s) + '</span>';
+}
+function renderSymbols(){
+  const q = ($('symFilter').value || '').trim().toLowerCase();
+  const rows = symData.filter(s => !q || s.metadata.name.toLowerCase().includes(q));
+  $('symRows').innerHTML = rows.length === 0
+    ? '<tr><td colspan="11" class="empty">' + (symData.length === 0 ? 'No symbols reported by this broker.' : 'No symbols match the filter.') + '</td></tr>'
+    : rows.map(s => {
+        const m = s.metadata, a = s.availability || {};
+        const cur = [m.currency_base, m.currency_profit].filter(Boolean).join(' / ') || 'not reported';
+        const vol = [m.volume_min, m.volume_max, m.volume_step].map(v => v == null ? '—' : v).join(' / ');
+        return '<tr><td><b>' + esc(m.name) + '</b></td>'
+          + '<td>' + (m.visible == null ? '—' : (m.visible ? 'yes' : 'no')) + '</td>'
+          + '<td>' + (a.tradable ? '<span class="badge ok">tradable</span>' : '<span class="badge warnb">not tradable</span>')
+          + '<br><span style="color:var(--dim2);font-size:12px">' + esc(a.reason || '') + '</span></td>'
+          + '<td>' + symVal(m.digits) + '</td><td>' + symVal(m.point) + '</td><td>' + symVal(m.contract_size) + '</td>'
+          + '<td>' + esc(vol) + '</td><td>' + symVal(m.stop_level) + '</td>'
+          + '<td>' + esc(m.execution_mode_label || 'not reported') + '</td><td>' + esc(m.calculation_mode_label || 'not reported') + '</td>'
+          + '<td>' + esc(cur) + '</td></tr>';
+      }).join('');
+}
+async function loadSymbols(){
+  let inv;
+  try { inv = await api('/api/v1/symbols/inventory'); }
+  catch(e){
+    symData = [];
+    $('symRows').innerHTML = '<tr><td colspan="11" class="empty">Symbols unavailable: ' + esc(e.message) + '</td></tr>';
+    return;
+  }
+  symData = inv.symbols || [];
+  const sum = inv.summary || {};
+  $('symTotal').textContent = sum.total ?? symData.length;
+  $('symVis').textContent = (sum.visible ?? '—') + ' / ' + (sum.hidden ?? '—') + ' / ' + (sum.visibility_unknown ?? '—');
+  $('symTrad').textContent = sum.tradable ?? '—';
+  $('symLoaded').textContent = fmtTime(sum.loaded_at);
+  $('symComplete').textContent = sum.completeness || '—';
+  renderSymbols();
+}
+$('symFilter').oninput = renderSymbols;
+$('btnSymRefresh').onclick = async () => {
+  setMsg('symMsg', 'refreshing…');
+  try { await post('/api/v1/symbols/refresh'); setMsg('symMsg', 'refreshed', 'up'); await loadSymbols(); }
+  catch(e){ setMsg('symMsg', 'refresh failed: ' + e.message, 'down'); }
+};
+$('btnSymResolve').onclick = async () => {
+  const input = $('symResolveInput').value.trim();
+  if (!input) { setMsg('symResolveMsg', 'type a canonical ID first', 'down'); return; }
+  setMsg('symResolveMsg', 'resolving…');
+  try {
+    const r = await post('/api/v1/symbols/resolve', {symbol: input});
+    setMsg('symResolveMsg', '', '');
+    if (r.status === 'resolved') {
+      $('symResolveOut').innerHTML = '<div class="kv"><span class="k">Resolved</span><span class="v">' + esc(r.exact_symbol) + '</span></div>'
+        + '<div class="kv"><span class="k">Canonical ID</span><span class="v">' + esc(r.canonical_id || '') + '</span></div>'
+        + '<p class="note">' + esc(r.reason || '') + '</p>';
+    } else if (r.status === 'ambiguous') {
+      $('symResolveOut').innerHTML = '<p class="note" style="margin-top:0">Ambiguous — ' + esc(r.reason || '') + '</p>'
+        + (r.candidates || []).map(c => '<div class="kv"><span class="k">' + esc(c.name) + '</span><span class="v">contract ' + symVal(c.contract_size) + ' · digits ' + symVal(c.digits) + '</span></div>').join('')
+        + '<p class="note">Pick the exact broker name yourself — the bridge never guesses.</p>';
+    } else {
+      $('symResolveOut').innerHTML = '<div class="empty">Not found — ' + esc(r.reason || 'no broker symbol matches') + '</div>';
+    }
+  } catch(e){ setMsg('symResolveMsg', 'resolve failed: ' + e.message, 'down'); }
+};
+
+/* ---------- Execution ---------- */
+async function loadExecution(){
+  let rec;
+  try { rec = await api('/api/v1/execution/recent'); }
+  catch(e){
+    $('exRows').innerHTML = '<tr><td colspan="8" class="empty">Execution history unavailable: ' + esc(e.message) + '</td></tr>';
+    return;
+  }
+  const execs = rec.executions || [];
+  $('exPend').textContent = rec.pending_results ?? '—';
+  $('exUnknown').textContent = execs.filter(x => x.state === 'UNKNOWN').length;
+  $('exAvail').textContent = rec.executor_available ? 'available' : 'not started yet (no commands executed)';
+  $('exRows').innerHTML = execs.length === 0
+    ? '<tr><td colspan="8" class="empty">No server-channel commands executed yet in this session.</td></tr>'
+    : execs.map(x => {
+        const partial = x.partial
+          ? ('closed ' + (x.closed_volume ?? '?') + ' · remaining ' + (x.remaining_volume ?? '?') + ' · ' + (x.reconciled ? 'reconciled' : 'not reconciled'))
+          : '—';
+        return '<tr><td>' + esc((x.command_id || '').slice(0, 8)) + '</td><td>' + esc(x.operation || '—') + '</td>'
+          + '<td>' + stateBadge(x.state) + '</td><td>' + esc(x.wire_status || '—') + '</td>'
+          + '<td>' + fmtTime(x.started_at) + '</td><td>' + (x.duration_ms == null ? '—' : Math.round(x.duration_ms) + ' ms') + '</td>'
+          + '<td>' + esc(x.error_code ? (x.error_code + (x.error_message ? ' — ' + x.error_message : '')) : '—') + '</td>'
+          + '<td>' + esc(partial) + '</td></tr>';
+      }).join('');
+  let jr;
+  try { jr = await api('/api/v1/journal/events'); }
+  catch(e){ $('jrMsg').textContent = 'journal unavailable: ' + e.message; return; }
+  const events = jr.events || [];
+  $('jrRows').innerHTML = events.length === 0
+    ? '<tr><td colspan="8" class="empty">' + (jr.sync_available ? 'No journal events collected yet.' : 'Journaling is off — no sync engine running.') + '</td></tr>'
+    : events.map(ev => {
+        const ticket = ev.ticket || ev.position_id || ev.order_id || ev.deal_id || '—';
+        const rc = ev.broker_retcode == null ? '—' : (ev.broker_retcode + (ev.retcode_label ? ' (' + ev.retcode_label + ')' : ''));
+        return '<tr><td>' + fmtTime(ev.execution_time) + '</td><td>' + esc(ev.event_type || '—') + '</td>'
+          + '<td>' + esc(String(ticket)) + '</td><td>' + esc(ev.symbol || '—') + '</td>'
+          + '<td>' + (ev.volume == null ? '—' : ev.volume) + '</td><td>' + (ev.price == null ? '—' : ev.price) + '</td>'
+          + '<td>' + (ev.profit == null ? 'not reported' : ev.profit) + '</td><td>' + esc(rc) + '</td></tr>';
+      }).join('');
+  $('jrMsg').textContent = jr.total ? (jr.total + ' events stored') : '';
+}
+$('btnExRefresh').onclick = loadExecution;
+$('btnJrRefresh').onclick = loadExecution;
 
 /* ---------- Diagnostics ---------- */
 let diagReport = null;

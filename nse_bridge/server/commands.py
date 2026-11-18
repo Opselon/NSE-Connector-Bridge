@@ -125,7 +125,7 @@ financial op in this phase: the server must re-authorize with a NEW
 
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -564,6 +564,46 @@ class CommandExecutor:
         # TelemetryEmitter (ARCHITECTURE-CONTRACT §8), optional: when
         # absent the executor still works, it just emits nothing.
         self.telemetry = telemetry if telemetry is not None else getattr(ctx, "telemetry", None)
+        #: Bounded in-memory history of recently executed commands for
+        #: the C4 Execution screen (spec §17): the TRUE local lifecycle
+        #: state per command (incl. PARTIALLY_COMPLETED / UNKNOWN),
+        #: newest last. In-memory only — the durable record is the
+        #: ``action.result`` in ``results_queue`` (§6.5).
+        self._recent: deque[dict[str, Any]] = deque(maxlen=50)
+
+    def recent_executions(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Most recent command executions, newest first (C4 GUI input)."""
+        items = list(self._recent)[-max(0, limit) :] if limit > 0 else []
+        return [dict(item) for item in reversed(items)]
+
+    def _record_recent(self, frame: Any, execution: CommandExecution, result: dict[str, Any]) -> None:
+        """Append one execution to the bounded recent history."""
+        operation = ""
+        if isinstance(frame, dict):
+            operation = str((frame.get("operation") or {}).get("type") or "")
+        payload_raw = result.get("payload")
+        payload: dict[str, Any] = payload_raw if isinstance(payload_raw, dict) else {}
+        error_raw = result.get("error")
+        error: dict[str, Any] = error_raw if isinstance(error_raw, dict) else {}
+        self._recent.append(
+            {
+                "command_id": execution.command_id,
+                "operation": operation,
+                "state": execution.state.value,
+                "wire_status": result.get("status"),
+                "source_tool": result.get("source_tool"),
+                "started_at": result.get("started_at"),
+                "completed_at": result.get("completed_at"),
+                "duration_ms": result.get("duration_ms"),
+                "error_code": error.get("code"),
+                "error_message": error.get("message"),
+                "partial": bool(payload.get("partial")) if payload else False,
+                "closed_volume": payload.get("closed_volume") if payload else None,
+                "remaining_volume": payload.get("remaining_volume") if payload else None,
+                "reconciled": payload.get("reconciled") if payload else None,
+                "history": [list(step) for step in execution.history],
+            }
+        )
 
     # ------------------------------------------------------------------
     def execute(self, frame: Any) -> tuple[CommandExecution, dict[str, Any]]:
@@ -626,6 +666,7 @@ class CommandExecutor:
                     error_code=error_code,
                     details={"status": result.get("status")},
                 )
+        self._record_recent(frame, execution, result)
         return execution, result
 
     def _execute_inner(self, frame: Any) -> tuple[CommandExecution, dict[str, Any]]:

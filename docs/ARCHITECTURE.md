@@ -108,12 +108,15 @@ compute (§7) — but no engine is implemented now.
 │           contract amendment (docs/PLATFORM-GAPS.md §5).       │
 │  api/      FastAPI local API: one POST /api/v1/{command} per    │
 │           registry command + management router (settings,      │
-│           diagnostics, updates, terminals, subscription) +    │
-│           /ui, /docs, /ws/ui. Mandatory X-API-Key (§4).       │
-│  gui/      Connector Control Center: 6 screens (Connection,    │
+│           diagnostics, updates, terminals, subscription,      │
+│           symbols inventory/resolve/refresh, execution recent,│
+│           journal events) + /ui, /docs, /ws/ui. Mandatory     │
+│           X-API-Key (§4).                                      │
+│  gui/      Connector Control Center: 7 sections (Connection,    │
 │           MetaTrader, Account & Subscription read-only,        │
-│           Diagnostics, Updates & Releases, Settings).          │
-│           pywebview window, browser fallback.                  │
+│           Symbols, Execution, Diagnostics, Updates & Releases;│
+│           settings live under Connection). pywebview window,   │
+│           browser fallback.                                    │
 │  secrets.py  Windows Credential Manager (keyring, service      │
 │           "NSEBridge") / DPAPI file store; dev-only file       │
 │           fallback on non-Windows (never required for tests).  │
