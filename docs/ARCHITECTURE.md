@@ -47,7 +47,9 @@ compute (§7) — but no engine is implemented now.
 │                  60 frames/min, max 20 subscriptions           │
 │    sync.py       §3.3 batches (page 500, 250 ms), checkpoint    │
 │                  (max broker time, never backwards), queue      │
-│                  bound 32, account-switch reset               │
+│                  bound 32, account-switch reset; feeds the     │
+│                  journal collector, carries accounting          │
+│                  provenance inside the batches (§8)            │
 │    queue.py      BoundedPendingQueue (results persist across     │
 │                  reconnects; oldest evicted WITH warning)      │
 │    manifest.py   §4.1 manifest — only truthfully mappable       │
@@ -94,6 +96,11 @@ compute (§7) — but no engine is implemented now.
 │           charts, positions, orders, trading (execution        │
 │           hardening), risk (pure calculators 73–81, local      │
 │           only), diagnostics, system                           │
+│  journal/  Phase C3 (spec §§8–9, docs/JOURNAL.md): event shape │
+│           + collector (MT5 state/history only, dedup, bounded │
+│           ranges/pages, reuses the sync checkpoint) +          │
+│           accounting provenance labelling + balance-operation  │
+│           surfacing. No upload channel (D6), no new sync kind. │
 │  tasks/    task-execution boundary skeleton ONLY: envelope,     │
 │           validation mirroring §6.3, bounded worker,           │
 │           task.result. Kind registry starts EMPTY; NOT wired   │
@@ -301,3 +308,37 @@ completeness caveat: **docs/SYMBOLS.md**.
   the contract is silent (diagnostics upload, task wire format), the
   Bridge builds a clean adapter/boundary and documents the gap —
   it never invents a production URL or payload.
+
+## 8. Journal & accounting source data (Phase C3, spec §§8–9)
+
+`nse_bridge/journal/` — see `docs/JOURNAL.md` for the full contract.
+
+- `journal/events.py`: the stable `JournalEvent` shape (full spec §8
+  field set) and the documented dedup key
+  `(event_type, deal/order/position/ticket id, execution_time)`.
+- `journal/collector.py`: `JournalCollector` — builds events ONLY
+  from actual MT5 state/history (snapshots, history orders/deals,
+  closed-position summaries, real broker responses, real
+  connection transitions). Never invents events, never infers fills
+  from submitted requests. Bounded ranges (explicit `from`/`to`, no
+  unlimited download), pagination (500, mirroring sync §3.3),
+  event-level dedup, bounded stores (10,000 seen keys / 1,000
+  events). Reuses the durable sync checkpoint (B1) — no second
+  checkpoint mechanism.
+- `journal/accounting.py`: provenance labelling (`mt5_supplied` /
+  `locally_derived` / `not_reported`) for account fields, deals, and
+  closed-position summaries, plus explicit deposit/withdrawal/
+  balance-adjustment/fee/credit surfacing from MT5 deal types. Raw
+  broker values only — no local accounting engine, no sums, no
+  statistics.
+- Wiring: the sync engine (`server/sync.py`) feeds the collector
+  from records it already fetches and carries the labelling inside
+  the existing §3.3 batches (`provenance` on `account` items and
+  history pages, `balance_operations` on deals pages). No new sync
+  kind. There is NO journal upload channel in CONTRACT v1
+  (dependency D6) — events live locally for the Phase C4 Execution
+  screen (`SyncEngine.journal_events()`) until a contract channel
+  exists; the server derives journal entries from sync batches
+  today. D8 (accounting channel) is answered by the labelling
+  convention inside the four existing kinds, pending a contract
+  statement.
