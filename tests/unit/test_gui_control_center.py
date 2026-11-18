@@ -1,10 +1,12 @@
-"""Unit tests for the Phase 4 GUI — Connector Control Center (6 screens).
+"""Unit tests for the Phase 4 GUI — Connector Control Center (7 screens).
 
-Covers: exactly 6 screens + no forbidden trading-dashboard content,
-every local API path the GUI's JS calls exists in the route table,
-the Account & Subscription endpoint never leaks the secret,
-the cookie auth carriage for the loopback GUI, the guided MT5
-diagnostic codes, the updates check, and terminal discovery.
+Covers: exactly 7 screens (spec §17: Connection, MetaTrader, Account,
+Symbols, Execution, Diagnostics, Updates — settings live on the
+Connection screen, not as a separate screen) + no forbidden
+trading-dashboard content, every local API path the GUI's JS calls
+exists in the route table, the Account & Subscription endpoint never
+leaks the secret, the cookie auth carriage for the loopback GUI, the
+guided MT5 diagnostic codes, the updates check, and terminal discovery.
 Label: unit.
 """
 
@@ -40,7 +42,7 @@ FORBIDDEN_CONTENT = [
     "bot_symbol",
 ]
 
-EXPECTED_SCREENS = {"connection", "metatrader", "account", "diagnostics", "updates", "settings"}
+EXPECTED_SCREENS = {"connection", "metatrader", "account", "symbols", "execution", "diagnostics", "updates"}
 
 
 @pytest.fixture(autouse=True)
@@ -97,7 +99,7 @@ class FakeRestClient:
 # ---------------------------------------------------------------------------
 # HTML: screens + forbidden content
 # ---------------------------------------------------------------------------
-def test_gui_html_has_exactly_six_screens(client):
+def test_gui_html_has_exactly_seven_screens(client):
     http, _, _ = client
     resp = http.get("/ui")
     assert resp.status_code == 200, resp.text
@@ -106,6 +108,18 @@ def test_gui_html_has_exactly_six_screens(client):
     assert pages == EXPECTED_SCREENS, pages
     sections = set(re.findall(r'id="page-([a-z]+)"', html))
     assert sections == EXPECTED_SCREENS, sections
+
+
+def test_gui_settings_live_on_the_connection_screen(client):
+    # Spec §17: settings/credentials live under Connection — there is
+    # no separate Settings screen, and the form fields keep their IDs.
+    http, _, _ = client
+    html = http.get("/ui").text
+    assert 'id="page-settings"' not in html
+    assert 'data-page="settings"' not in html
+    conn = html.split('id="page-connection"')[1].split('id="page-metatrader"')[0]
+    for element_id in ("setBaseUrl", "setUrl", "setEnv", "setToken", "setLogLevel", "setGuiMode", "saveSettings"):
+        assert f'id="{element_id}"' in conn, f"settings field {element_id} missing from the Connection screen"
 
 
 def test_gui_html_has_no_forbidden_content(client):
@@ -159,6 +173,11 @@ def test_new_endpoints_require_auth_without_cookie_or_key(client):
         ("GET", "/api/v1/updates/latest"),
         ("GET", "/api/v1/diagnostics/summary"),
         ("GET", "/api/v1/mt5/terminals"),
+        ("GET", "/api/v1/symbols/inventory"),
+        ("POST", "/api/v1/symbols/resolve"),
+        ("POST", "/api/v1/symbols/refresh"),
+        ("GET", "/api/v1/execution/recent"),
+        ("GET", "/api/v1/journal/events"),
     ]:
         resp = http.request(method, path)
         assert resp.status_code == 401, f"{method} {path}: {resp.status_code}"

@@ -1011,3 +1011,158 @@ async def diagnostics_summary(request: Request) -> dict[str, Any]:
             "diagnostic": diagnostic,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Symbols + Execution screens (C4 GUI, spec §17)
+#
+# Read-only GUI data. These endpoints expose the C1 symbol inventory /
+# resolver, the executor's recent command lifecycle, and the C3 journal
+# — all values the Bridge already holds; nothing is invented here.
+# ---------------------------------------------------------------------------
+def _gui_resolver(ctx: BridgeContext):  # type: ignore[no-untyped-def]
+    """Shared canonical-ID resolver; MT5 must be connected first.
+
+    A disconnected driver raises NOT_CONNECTED honestly — the GUI
+    shows "MT5 not connected" instead of an empty symbol list that
+    would look like "this broker has no symbols".
+    """
+    from ..engine.common import get_symbol_resolver
+
+    ctx.driver.ensure_connected()
+    return get_symbol_resolver(ctx)
+
+
+@router.get(
+    "/symbols/inventory",
+    summary="Broker symbol inventory (Symbols screen)",
+    description="All broker-reported symbols with exact verbatim names, "
+    "full metadata (None = not reported, never invented), and the "
+    "availability verdict per symbol. Shares the resolver's inventory, "
+    "so the screen shows exactly the symbols resolution runs against.",
+)
+async def get_symbols_inventory(request: Request) -> dict[str, Any]:
+    ctx: BridgeContext = request.app.state.ctx
+    resolver = _gui_resolver(ctx)
+    inventory = resolver.inventory
+    symbols = [
+        {"metadata": asdict(meta), "availability": asdict(inventory.availability(meta.name))}
+        for meta in inventory.all_symbols()
+    ]
+    return {
+        "ok": True,
+        "data": {
+            "symbols": symbols,
+            # The inventory snapshot's own load time is in the summary;
+            # the resolver cache state belongs to resolve/refresh (the
+            # resolver only snapshots on resolve(), not on a list read).
+            "summary": inventory.summary(),
+        },
+    }
+
+
+class SymbolResolveRequest(BaseModel):
+    symbol: str = Field(..., min_length=1, max_length=40, description="Canonical BASE/QUOTE ID, e.g. EUR/USD")
+    expected: dict[str, Any] | None = Field(
+        None, description="Optional SymbolMetadata field values required for disambiguation"
+    )
+
+
+@router.post(
+    "/symbols/resolve",
+    summary="Resolve a canonical symbol ID (Symbols screen)",
+    description="Canonical ``BASE/QUOTE`` → exact broker symbol. Returns "
+    "``resolved`` with the verbatim broker name, ``ambiguous`` with the "
+    "candidate list, or ``not_found`` — ambiguity is reported, never "
+    "guessed. Unknown ``expected`` keys are a 422 (fail loudly).",
+)
+async def resolve_symbol(request: Request, body: SymbolResolveRequest) -> dict[str, Any]:
+    ctx: BridgeContext = request.app.state.ctx
+    resolver = _gui_resolver(ctx)
+    try:
+        result = resolver.resolve(body.symbol.strip(), expected=body.expected)
+    except ValueError as exc:
+        raise BridgeError(ErrorCode.VALIDATION, str(exc), http_status=422) from exc
+    return {
+        "ok": True,
+        "data": {
+            "status": result.status.value,
+            "requested": result.requested,
+            "canonical_id": result.canonical_id,
+            "exact_symbol": result.exact_symbol,
+            "candidates": [asdict(candidate) for candidate in result.candidates],
+            "reason": result.reason,
+        },
+    }
+
+
+@router.post(
+    "/symbols/refresh",
+    summary="Re-read the broker symbol list (Symbols screen)",
+    description="Forces a fresh ``symbols_get()`` read and rebuilds the "
+    "resolver snapshot. The old snapshot stays in place if MT5 cannot "
+    "be reached.",
+)
+async def refresh_symbols(request: Request) -> dict[str, Any]:
+    ctx: BridgeContext = request.app.state.ctx
+    resolver = _gui_resolver(ctx)
+    resolver.refresh()
+    return {
+        "ok": True,
+        "data": {
+            "summary": resolver.inventory.summary(),
+            "cache": resolver.cache_state(),
+        },
+    }
+
+
+@router.get(
+    "/execution/recent",
+    summary="Recent server-channel command lifecycle (Execution screen)",
+    description="Bounded in-memory history of recently executed server "
+    "commands with their TRUE local lifecycle state (incl. "
+    "PARTIALLY_COMPLETED / UNKNOWN), wire status, error, and partial-"
+    "close facts, plus the count of ``action.result`` frames still "
+    "queued for delivery. Empty when the channel never opened — never "
+    "a fabricated entry.",
+)
+async def get_execution_recent(request: Request, limit: int = 50) -> dict[str, Any]:
+    channel = getattr(request.app.state, "channel", None)
+    limit = max(1, min(limit, 100))
+    if channel is None:
+        return {
+            "ok": True,
+            "data": {
+                "executions": [],
+                "pending_results": 0,
+                "executor_available": False,
+                "channel_available": False,
+            },
+        }
+    data = channel.recent_command_executions(limit)
+    return {"ok": True, "data": {**data, "channel_available": True}}
+
+
+@router.get(
+    "/journal/events",
+    summary="Recent journal events (Execution screen)",
+    description="Raw journal events (spec §8), newest first, bounded by "
+    "``limit`` (default 50, max 200). Values are broker-reported facts "
+    "only — a profit of null means 'not reported', never zero. Empty "
+    "when journaling is off (no sync engine) — never invented.",
+)
+async def get_journal_events(request: Request, limit: int = 50) -> dict[str, Any]:
+    ctx: BridgeContext = request.app.state.ctx
+    sync_engine = ctx.sync_engine
+    if sync_engine is None:
+        return {"ok": True, "data": {"events": [], "sync_available": False, "total": 0}}
+    events = sync_engine.journal_events()
+    limit = max(1, min(limit, 200))
+    return {
+        "ok": True,
+        "data": {
+            "events": list(reversed(events[-limit:])),
+            "sync_available": True,
+            "total": len(events),
+        },
+    }
