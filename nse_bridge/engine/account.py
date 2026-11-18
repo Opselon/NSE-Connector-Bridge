@@ -54,7 +54,11 @@ class TradingPermissionsResponse(BaseModel):
     trade_mode: int | None = None
     trade_mode_label: str | None = None
     terminal_trade_allowed: bool | None = None
+    #: Account margin mode (MT5 ``margin_mode``): 0 netting, 1 hedging,
+    #: 2 exchange. NOT the stop-out mode (``margin_so_mode``) — an
+    #: earlier build returned the stop-out mode here (fixed in C2).
     margin_mode: int | None = None
+    margin_mode_label: str | None = None
     account_login: int
 
 
@@ -188,6 +192,7 @@ def get_trading_permissions(ctx: BridgeContext, params: None) -> dict[str, Any]:
         "trade_mode": acc.trade_mode,
         "trade_mode_label": acc.trade_mode_label,
         "terminal_trade_allowed": bool(raw.trade_allowed) if raw else None,
-        "margin_mode": acc.margin_so_mode,
+        "margin_mode": acc.margin_mode,
+        "margin_mode_label": acc.margin_mode_label,
         "account_login": acc.login,
     }

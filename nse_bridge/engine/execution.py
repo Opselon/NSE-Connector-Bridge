@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from ..errors import BridgeError, ErrorCode
 from ..mt5.types import f as _f
-from .common import BridgeContext, require_symbol_info
+from .common import BridgeContext, require_symbol_info, resolve_order_symbol
 from .registry import command
 from .symbols import _fresh_tick
 from .trading import (
@@ -20,7 +20,18 @@ from .trading import (
     reject,
 )
 
-PENDING_TYPES = {"BUY_LIMIT": 2, "SELL_LIMIT": 3, "BUY_STOP": 4, "SELL_STOP": 5}
+#: MT5 ORDER_TYPE values for pending orders. Stop-limit types (6/7)
+#: were missing until the C2 execution work (spec §6): a stop-limit
+#: carries BOTH a trigger ``price`` and a ``stoplimit`` (the limit
+#: price placed once the trigger fires).
+PENDING_TYPES = {
+    "BUY_LIMIT": 2,
+    "SELL_LIMIT": 3,
+    "BUY_STOP": 4,
+    "SELL_STOP": 5,
+    "BUY_STOP_LIMIT": 6,
+    "SELL_STOP_LIMIT": 7,
+}
 
 
 class MarketOrderRequest(BaseModel):
@@ -122,9 +133,13 @@ def trade_send_sell_order(ctx: BridgeContext, params: SimpleOrderRequest) -> dic
 
 class PendingOrderRequest(BaseModel):
     symbol: str = Field(..., min_length=1)
-    order_type: Literal["BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"]
+    order_type: Literal["BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP", "BUY_STOP_LIMIT", "SELL_STOP_LIMIT"]
     volume: float = Field(..., gt=0.0)
     price: float = Field(..., gt=0.0)
+    #: Limit price for the stop-limit types (required for
+    #: BUY_STOP_LIMIT / SELL_STOP_LIMIT): once the trigger ``price``
+    #: fires, a limit order is placed at this price.
+    stoplimit: float | None = Field(None, gt=0.0)
     sl: float = Field(0.0, ge=0.0)
     tp: float = Field(0.0, ge=0.0)
     expiration_utc: str | None = None
@@ -140,12 +155,18 @@ def validate_pending(
     sl: float,
     tp: float,
     volume: float,
+    stoplimit: float | None = None,
 ) -> list[str]:
     """Pre-dispatch structural validation against the CURRENT market (ported BUG-226).
 
     Entry-side geometry is per-type: LIMIT orders enter BEYOND the market
     (buy below ask / sell above bid), STOP orders enter THROUGH the market
     (buy above ask / sell below bid) — each with the stops-level gap.
+    STOP-LIMIT orders share the STOP trigger geometry, and their
+    ``stoplimit`` (the limit price placed once the trigger fires) must
+    sit on the favourable side of the trigger (below it for buys, above
+    it for sells); SL/TP geometry is then checked against the stoplimit
+    — the price the limit order will actually fill at.
     """
     spec = require_symbol_info(ctx, symbol)
     tick = _fresh_tick(ctx, symbol)
@@ -171,27 +192,37 @@ def validate_pending(
 
     is_buy = order_type.startswith("BUY")
     ask, bid = float(tick.ask), float(tick.bid)
+    is_stop_limit = order_type in ("BUY_STOP_LIMIT", "SELL_STOP_LIMIT")
+    if is_stop_limit and (stoplimit is None or stoplimit <= 0):
+        reasons.append("stoplimit_required")
     if order_type == "BUY_LIMIT" and price >= ask - min_gap + 1e-9:
         reasons.append("buy_limit_price_not_below_ask")
     if order_type == "SELL_LIMIT" and price <= bid + min_gap - 1e-9:
         reasons.append("sell_limit_price_not_above_bid")
-    if order_type == "BUY_STOP" and price <= ask + min_gap - 1e-9:
+    if order_type in ("BUY_STOP", "BUY_STOP_LIMIT") and price <= ask + min_gap - 1e-9:
         reasons.append("buy_stop_price_not_above_ask")
-    if order_type == "SELL_STOP" and price >= bid - min_gap + 1e-9:
+    if order_type in ("SELL_STOP", "SELL_STOP_LIMIT") and price >= bid - min_gap + 1e-9:
         reasons.append("sell_stop_price_not_below_bid")
+    if order_type == "BUY_STOP_LIMIT" and stoplimit is not None and stoplimit >= price - 1e-9:
+        reasons.append("stoplimit_not_below_trigger")
+    if order_type == "SELL_STOP_LIMIT" and stoplimit is not None and stoplimit <= price + 1e-9:
+        reasons.append("stoplimit_not_above_trigger")
     market_ref = ask if is_buy else bid
     if abs(price - market_ref) < min_gap - 1e-9:
         reasons.append("entry_inside_stops_level")
 
+    # SL/TP geometry is checked against the ENTRY price — the stoplimit
+    # for stop-limit orders (the price the limit order fills at).
+    entry = stoplimit if (is_stop_limit and stoplimit is not None) else price
     if sl > 0:
-        if is_buy and sl >= price - min_stop_dist + 1e-9:
+        if is_buy and sl >= entry - min_stop_dist + 1e-9:
             reasons.append("sl_not_below_entry")
-        if not is_buy and sl <= price + min_stop_dist - 1e-9:
+        if not is_buy and sl <= entry + min_stop_dist - 1e-9:
             reasons.append("sl_not_above_entry")
     if tp > 0:
-        if is_buy and tp <= price + min_stop_dist - 1e-9:
+        if is_buy and tp <= entry + min_stop_dist - 1e-9:
             reasons.append("tp_not_above_entry")
-        if not is_buy and tp >= price - min_stop_dist + 1e-9:
+        if not is_buy and tp >= entry - min_stop_dist + 1e-9:
             reasons.append("tp_not_below_entry")
     return reasons
 
@@ -201,15 +232,27 @@ def validate_pending(
     number=67,
     category="trading",
     title="Send Pending Order",
-    description="Place LIMIT/STOP order with pre-dispatch structural validation (volume bounds, entry side, "
-    "stops/freeze distances, SL/TP geometry) — structurally-invalid requests are rejected BEFORE dispatch.",
+    description="Place LIMIT/STOP/STOP-LIMIT order with pre-dispatch structural validation (volume bounds, entry side, "
+    "stops/freeze distances, SL/TP geometry, stop-limit trigger/limit geometry) — structurally-invalid requests are rejected BEFORE dispatch.",
     request_model=PendingOrderRequest,
     response_model=TradeExecutionResponse,
     mutates=True,
 )
 def trade_send_pending_order(ctx: BridgeContext, params: PendingOrderRequest) -> dict[str, Any]:
-    symbol = params.symbol.strip()
-    reasons = validate_pending(ctx, symbol, params.order_type, params.price, params.sl, params.tp, params.volume)
+    ctx.driver.ensure_connected()
+    # Canonical ``BASE/QUOTE`` spellings resolve to the exact broker
+    # symbol here (spec §4); exact broker names pass through untouched.
+    symbol = resolve_order_symbol(ctx, params.symbol.strip())
+    reasons = validate_pending(
+        ctx,
+        symbol,
+        params.order_type,
+        params.price,
+        params.sl,
+        params.tp,
+        params.volume,
+        stoplimit=params.stoplimit,
+    )
     if reasons:
         raise BridgeError(
             ErrorCode.VALIDATION,
@@ -241,6 +284,9 @@ def trade_send_pending_order(ctx: BridgeContext, params: PendingOrderRequest) ->
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": filling,
         }
+        if params.stoplimit is not None:
+            # Stop-limit only: the limit price placed once the trigger fires.
+            request["stoplimit"] = float(params.stoplimit)
         if mgc is not None:
             request["magic"] = int(mgc)
         if params.expiration_utc:

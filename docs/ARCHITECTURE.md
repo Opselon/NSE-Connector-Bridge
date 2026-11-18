@@ -91,7 +91,7 @@ compute (§7) — but no engine is implemented now.
 │            CONTRACT v1 defines no canonical format and no      │
 │            symbol-inventory channel (D7); the only contract     │
 │            symbol path is the §17.1 chart protocol.             │
-│  engine/  the 90-command local registry (registry.py) +        │
+│  engine/  the 91-command local registry (registry.py) +        │
 │           handlers: connection, account, symbols, market,      │
 │           charts, positions, orders, trading (execution        │
 │           hardening), risk (pure calculators 73–81, local      │

@@ -61,7 +61,7 @@ aspirational — it states what was actually executed.
 | Test labelling (unit / mock-integration / real-mt5 / manual) | **PROVEN** | every test file carries a module-level `pytestmark`; enforced by `tests/unit/test_test_honesty.py` (AST walk + directory/label match) |
 | Test honesty (required-MT5 fails loudly) | **PROVEN** | `tests/conftest.py` calls `pytest.fail` when the terminal is unavailable; proven behaviourally by `test_required_mt5_test_fails_loudly_without_a_terminal` (subprocess) and by the full e2e run on Linux: **104 errors at fixture setup, 0 passed, 0 skipped** |
 | e2e collection on Linux | **PROVEN** | `pytest tests/e2e --collect-only` → 104 tests collected, exit 0 (lazy `MetaTrader5` import; no import-time coupling) |
-| 90 local commands resolve | **PROVEN** | `tests/unit/test_registry.py` (exactly 90, numbers 1–90, unique names, callable handlers) |
+| 91 local commands resolve | **PROVEN** | `tests/unit/test_registry.py` (exactly 91, numbers 1–91, unique names, callable handlers) |
 | 3-op server allowlist enforced | **PROVEN** | `tests/unit/test_server_commands.py` (validation order, allowlist, `modify_pending` gate closed by default, replay cache) |
 | No agent/ remnants | **PROVEN** | `nse_bridge/agent/` deleted; grep for `llm|coach|router9|promptmaster|gpt-4o|agent/` over `nse_bridge/` returns only: the `ai_coach` contract entitlement field, the legacy-key migration list in `secrets.py` (removal code), and a "no coaching" docstring in `tasks/` |
 | Enrolment state machine | **PROVEN** | `tests/unit/test_enrolment.py` + `tests/integration/test_enrolment.py` (mock server) |
@@ -70,7 +70,7 @@ aspirational — it states what was actually executed.
 | Self-healing: all 15 scenarios | **PROVEN (unit)** | `tests/unit/test_self_healing.py` — one test per scenario minimum; registration is the `Scenario` enum + `_handle_*` dispatch (see docs/ARCHITECTURE.md §6) |
 | Lint / format / types / security (spec §20) | **PROVEN** | `ruff check .` + `ruff format --check .` + `mypy nse_bridge` + `bandit` + `pip-audit` → all exit 0 (A1; the 15 pre-existing ruff findings are fixed, mypy 87→0 with real fixes, bandit skips 4 reviewed Low rules only) |
 | `--diagnostic` flag | **PROVEN (parses)** | `python -m nse_bridge --help` shows it; `tests/unit/test_diagnostic_flag.py` |
-| OpenAPI re-export | **PROVEN** | `scripts/export_openapi.py docs/openapi.json` → 104 paths (was 101 — the committed file was stale; the re-export adds the updater endpoints); export is deterministic (`diff` clean) |
+| OpenAPI re-export | **PROVEN** | `scripts/export_openapi.py docs/openapi.json` → 105 paths (was 104 — the committed file was stale; the re-export adds the close-by endpoint plus B2's terminal-discovery description updates); export is deterministic (`diff` clean) |
 | Version files | **PROVEN** | `scripts/write_version_info.py --check` clean |
 | Release manifest script | **PROVEN (logic)** | exercised against a dummy file; checksum matches `sha256sum` |
 | Windows CI (lint + tests + exe build) | **NOT PROVEN HERE** | No Windows runner on this VM. Proven only when the `build-windows` job runs on GitHub (PR CI). The spec + workflow are written for it; the build has not executed. |

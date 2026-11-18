@@ -151,7 +151,11 @@ class ModifyPendingRequest(BaseModel):
     price: float | None = Field(None, gt=0.0)
     sl: float | None = Field(None, ge=0.0)
     tp: float | None = Field(None, ge=0.0)
-    volume: float | None = Field(None, gt=0.0)
+    # No ``volume`` field: MQL5 TRADE_ACTION_MODIFY cannot change a
+    # pending order's volume (delete + replace instead). An earlier
+    # build sent the live ``volume_current`` in the request — harmless
+    # (brokers ignore it) but wrong; removed in the C2 execution work
+    # (gap §6 Q10).
     expiration_utc: str | None = Field(None, description="Switches order to ORDER_TIME_SPECIFIED")
 
 
@@ -168,7 +172,7 @@ class OrderExecutionDetailsResponse(BaseModel):
     number=55,
     category="orders",
     title="Get Pending Orders",
-    description="All active pending orders (LIMIT/STOP), optionally filtered by symbol.",
+    description="All active pending orders (LIMIT/STOP/STOP-LIMIT), optionally filtered by symbol.",
     request_model=OrdersListRequest,
     response_model=OrdersListResponse,
 )
@@ -400,7 +404,8 @@ def trade_cancel_pending_order(ctx: BridgeContext, params: TicketRequest) -> dic
     number=62,
     category="orders",
     title="Modify Pending Order",
-    description="Modify price/SL/TP/volume/expiration of an active pending order (TRADE_ACTION_MODIFY).",
+    description="Modify price/SL/TP/expiration of an active pending order (TRADE_ACTION_MODIFY). "
+    "Volume is NOT changeable via modify (MQL5) — delete + replace instead.",
     request_model=ModifyPendingRequest,
     response_model=CancelResponse,
     mutates=True,
@@ -417,7 +422,6 @@ def trade_modify_pending_order(ctx: BridgeContext, params: ModifyPendingRequest)
     price = params.price if params.price is not None else float(_f(raw, "price_open", 0.0))
     sl = params.sl if params.sl is not None else float(_f(raw, "sl", 0.0) or 0.0)
     tp = params.tp if params.tp is not None else float(_f(raw, "tp", 0.0) or 0.0)
-    volume = params.volume if params.volume is not None else float(_f(raw, "volume_current", 0.0) or 0.0)
 
     def job(mt5: Any):
         request = {
@@ -426,7 +430,6 @@ def trade_modify_pending_order(ctx: BridgeContext, params: ModifyPendingRequest)
             "price": float(price),
             "sl": float(sl),
             "tp": float(tp),
-            "volume": float(volume),
         }
         if params.expiration_utc:
             exp = broker_dt(params.expiration_utc, ctx.settings)

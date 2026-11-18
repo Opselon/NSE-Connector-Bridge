@@ -182,7 +182,7 @@ envelope when the manifest changes mid-session. No `ping`, no
 | `modify_pending` | `trade_modify_sl_tp` on a pending order (SL/TP only) | **Capability-gated (§17.4): starts REJECTED.** Live proof at market open + a published minimum `connector_version` are still owed (docs/PLATFORM-GAPS.md §4). Until the gate is proven (`modify_pending_proven=True`), the op is rejected as `UnsupportedOperation`. |
 
 `open_order` and `cancel_order` are explicitly NOT sendable in v1.
-The full 90-command registry stays available **locally**; only the
+The full 91-command registry stays available **locally**; only the
 server channel enforces this allowlist, at this boundary.
 
 ### 3.2 Envelope (§6.2)

@@ -13,6 +13,7 @@ from .common import BridgeContext
 from .registry import command
 from .trading import (
     close_position,
+    close_position_by,
     fetch_position,
     fetch_positions,
     modify_position_sltp,
@@ -81,6 +82,15 @@ class ModifySlTpRequest(BaseModel):
 class ClosePositionRequest(BaseModel):
     ticket: int = Field(..., gt=0)
     volume: float | None = Field(None, gt=0.0, description="Partial close volume; None = full close")
+
+
+class CloseByRequest(BaseModel):
+    ticket: int = Field(..., gt=0, description="Position ticket to close")
+    ticket_by: int = Field(
+        ...,
+        gt=0,
+        description="Opposite position ticket to close against (same symbol, opposite type)",
+    )
 
 
 class CloseAllRequest(BaseModel):
@@ -276,6 +286,25 @@ def trade_modify_sl_tp(ctx: BridgeContext, params: ModifySlTpRequest) -> dict[st
 )
 def trade_close_single_position(ctx: BridgeContext, params: ClosePositionRequest) -> dict[str, Any]:
     return close_position(ctx, params.ticket, params.volume)
+
+
+@command(
+    "trade_close_position_by",
+    number=91,
+    category="positions",
+    title="Close Position By (Close-By)",
+    description="Close two opposite positions against each other (TRADE_ACTION_CLOSE_BY, spec §6). "
+    "Hedging accounts only (margin_mode 1); on netting accounts close-by is impossible — close "
+    "the position and open an opposing deal instead. The smaller-volume position closes entirely; "
+    "the larger remains open with the volume difference (both close when volumes are equal). "
+    "The resulting state is verified against live broker truth before the result is reported. "
+    "Added by the complete-infrastructure spec (C2); the registry grew 90 → 91 commands.",
+    request_model=CloseByRequest,
+    response_model=object,
+    mutates=True,
+)
+def trade_close_position_by(ctx: BridgeContext, params: CloseByRequest) -> dict[str, Any]:
+    return close_position_by(ctx, params.ticket, params.ticket_by)
 
 
 @command(

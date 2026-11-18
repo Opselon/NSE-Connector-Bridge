@@ -18,7 +18,7 @@ the Phase 2 spec — nothing is invented):
   Bridge maps onto its Python driver and documents the difference).
   It therefore has NO MCP tool list to classify.
 - Fields filled truthfully from this Bridge:
-  ``device_id``, ``manifest_hash`` (SHA-256 over the local 90-command
+  ``device_id``, ``manifest_hash`` (SHA-256 over the local 91-command
   registry ``number:name`` lines — the Bridge's real local capability
   surface), ``action_count``, ``actions`` (each ``{name, number,
   category}`` — the local command identity).

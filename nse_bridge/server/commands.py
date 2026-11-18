@@ -25,7 +25,7 @@ the mutually-authenticated WSS session itself.
 Server allowlist (§6.1) — EXACTLY three operations in v1:
 ``close_position``, ``modify_sl_tp``, ``modify_pending``. ``open_order``
 and ``cancel_order`` are explicitly NOT sendable (§6.1, §17.5 open
-decision). The full local 90-command registry stays intact — only the
+decision). The full local 91-command registry stays intact — only the
 SERVER channel enforces this allowlist, at this boundary.
 
 ``modify_pending`` capability gate (§17.4, step 5a of §6.3): the op is
@@ -61,12 +61,22 @@ Rejections return ``action.result`` with ``status: "rejected"`` + the
 reason (§6.5). The Bridge MUST NOT execute a command that fails any
 step, and MUST NOT retry a rejected command on its own.
 
-Lifecycle (exact states, clarification #2)::
+Lifecycle (exact states, clarification #2 + spec §7)::
 
     RECEIVED → VALIDATED → AUTHORIZED → DISPATCHED → EXECUTING →
-    COMPLETED | FAILED | UNKNOWN | EXPIRED
+    COMPLETED | PARTIALLY_COMPLETED | FAILED | UNKNOWN | EXPIRED
 
 ``AUTHORIZED`` = entitlement + server authorization confirmed locally.
+``PARTIALLY_COMPLETED`` = the broker executed part of the request and
+the Bridge proved the resulting state against live MT5 truth (partial
+close / DONE_PARTIAL retcode 10010). It is a LOCAL state: contract
+§6.5 ``action.result`` has no partial status (dependency D5), so the
+wire status stays ``executed`` — the only truthful §6.5 status for a
+request that did execute — with the partial facts (``partial: true``,
+``closed_volume``, ``remaining_volume``, ``reconciled``) carried in
+the payload, in the local result store, and in telemetry. A first-class
+wire representation awaits a contract amendment (D5); nothing is
+invented here.
 ``UNKNOWN`` = result uncertain after timeout/disconnect — reconcile
 the actual MT5 state before any retry; never blind-retry a
 non-idempotent op. Validation rejections end the local lifecycle in
@@ -195,20 +205,25 @@ class CommandState(str, Enum):
     DISPATCHED = "DISPATCHED"
     EXECUTING = "EXECUTING"
     COMPLETED = "COMPLETED"
+    PARTIALLY_COMPLETED = "PARTIALLY_COMPLETED"
     FAILED = "FAILED"
     UNKNOWN = "UNKNOWN"
     EXPIRED = "EXPIRED"
 
 
-#: Legal lifecycle transitions (clarification #2). Terminal states
-#: (COMPLETED / FAILED / UNKNOWN / EXPIRED) have no outgoing edges.
+#: Legal lifecycle transitions (clarification #2 + spec §7). Terminal states
+#: (COMPLETED / PARTIALLY_COMPLETED / FAILED / UNKNOWN / EXPIRED) have no
+#: outgoing edges.
 LEGAL_TRANSITIONS: dict[CommandState, frozenset[CommandState]] = {
     CommandState.RECEIVED: frozenset({CommandState.VALIDATED, CommandState.FAILED, CommandState.EXPIRED}),
     CommandState.VALIDATED: frozenset({CommandState.AUTHORIZED, CommandState.FAILED}),
     CommandState.AUTHORIZED: frozenset({CommandState.DISPATCHED, CommandState.FAILED}),
     CommandState.DISPATCHED: frozenset({CommandState.EXECUTING, CommandState.FAILED, CommandState.EXPIRED}),
-    CommandState.EXECUTING: frozenset({CommandState.COMPLETED, CommandState.FAILED, CommandState.UNKNOWN}),
+    CommandState.EXECUTING: frozenset(
+        {CommandState.COMPLETED, CommandState.PARTIALLY_COMPLETED, CommandState.FAILED, CommandState.UNKNOWN}
+    ),
     CommandState.COMPLETED: frozenset(),
+    CommandState.PARTIALLY_COMPLETED: frozenset(),
     CommandState.FAILED: frozenset(),
     CommandState.UNKNOWN: frozenset(),
     CommandState.EXPIRED: frozenset(),
@@ -568,6 +583,22 @@ class CommandExecutor:
                     command_id=execution.command_id,
                     details={"status": result.get("status")},
                 )
+            elif state is CommandState.PARTIALLY_COMPLETED:
+                telemetry.info(
+                    "command.partially_completed",
+                    component="server.commands",
+                    command_id=execution.command_id,
+                    details={
+                        "status": result.get("status"),
+                        "partial": True,
+                        "closed_volume": (result.get("payload") or {}).get("closed_volume")
+                        if isinstance(result.get("payload"), dict)
+                        else None,
+                        "remaining_volume": (result.get("payload") or {}).get("remaining_volume")
+                        if isinstance(result.get("payload"), dict)
+                        else None,
+                    },
+                )
             elif state is CommandState.UNKNOWN:
                 telemetry.warn(
                     "command.unknown",
@@ -670,7 +701,13 @@ class CommandExecutor:
             payload=payload,
             user_id=self.user_id,
         )
-        execution.transition(CommandState.COMPLETED)
+        # Partial execution is a distinct LOCAL terminal state (spec §7);
+        # the wire status stays "executed" (§6.5 has no partial status —
+        # dependency D5) with the partial facts in the payload.
+        if isinstance(payload, dict) and payload.get("partial") is True:
+            execution.transition(CommandState.PARTIALLY_COMPLETED)
+        else:
+            execution.transition(CommandState.COMPLETED)
         execution.result = result
         self._persist(result)
         return execution, result

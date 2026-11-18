@@ -1,6 +1,6 @@
 """Management endpoints: settings, pre-flight connection checks, channel control.
 
-These sit on top of the 90-command surface — they operate the BRIDGE itself
+These sit on top of the 91-command surface — they operate the BRIDGE itself
 (configuration, diagnostics, server-channel lifecycle), not the broker.
 """
 

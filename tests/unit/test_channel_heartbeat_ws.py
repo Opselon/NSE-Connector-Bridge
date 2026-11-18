@@ -169,7 +169,7 @@ async def test_maybe_send_manifest_update_enqueues_frame_once(tmp_path: Path):
     frame = await asyncio.wait_for(channel._outbound.get(), timeout=2.0)
     assert frame["event_type"] == "manifest.update"
     assert frame["payload"]["manifest_hash"] == build_manifest("dev-1")["manifest_hash"]
-    assert frame["payload"]["action_count"] == 90
+    assert frame["payload"]["action_count"] == 91  # 91 local commands (C2: +trade_close_position_by)
     # Unchanged hash: no second frame.
     assert channel._maybe_send_manifest_update() is False
 

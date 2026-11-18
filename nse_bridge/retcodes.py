@@ -50,6 +50,7 @@ PENDING_CLASS_TRANSIENT: frozenset[int] = frozenset({10004, 10012, 10020, 10021,
 PENDING_CLASS_REPAIRABLE: frozenset[int] = frozenset({10013, 10015, 10016})
 
 TRADE_RETCODE_DONE = 10009
+TRADE_RETCODE_DONE_PARTIAL = 10010  # DONE_PARTIAL — request partially completed
 
 
 def translate_retcode(retcode: int | None) -> str:
