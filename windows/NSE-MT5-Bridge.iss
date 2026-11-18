@@ -1,0 +1,85 @@
+; NSE MT5 Bridge — Inno Setup 6 installer script.
+;
+; Per-user install (no admin, no UAC): the Bridge runs unprivileged
+; (asInvoker manifest) and keeps its config/secrets under
+; %LOCALAPPDATA%\NSE MT5 Bridge, so the installer only ships the
+; single-file PyInstaller exe — the exe is self-contained (Python +
+; all dependencies bundled), no other files are installed.
+;
+; Built by CI (.github/workflows/build.yml, build-windows job) from
+; the built exe:
+;   iscc /DAppVersion=1.0.0 /DAppVersionInfo=1.0.0.0 windows\NSE-MT5-Bridge.iss
+; AppVersion defaults to 1.0.0 when the define is not passed.
+; AppVersionInfo is the numeric 4-part version for the version
+; resource (AppVersion may carry a prerelease suffix such as
+; "-rc.1", which is not a valid version-resource quad).
+;
+; NOTE: no SetupIconFile — the repo has no .ico asset (see
+; docs/RELEASE.md). Do NOT fabricate a binary icon; Inno Setup
+; falls back to its default icon until one is supplied.
+
+#ifndef AppVersion
+  #define AppVersion "1.0.0"
+#endif
+#ifndef AppVersionInfo
+  #define AppVersionInfo "1.0.0.0"
+#endif
+
+#define AppName "NSE MT5 Bridge"
+#define AppPublisher "Opselon"
+#define AppURL "https://github.com/Opselon/NSE-Connector-Bridge"
+#define AppExeName "NSE-MT5-Bridge.exe"
+
+[Setup]
+; Stable identity: never change this GUID — Windows uses it to match
+; installed copies across upgrades (same AppId = upgrade in place).
+AppId={{b80bf455-6a18-41e5-bfa2-03a04736ee8f}
+AppName={#AppName}
+AppVersion={#AppVersion}
+AppPublisher={#AppPublisher}
+AppPublisherURL={#AppURL}
+AppSupportURL={#AppURL}
+AppUpdatesURL={#AppURL}/releases
+AppComments=Secure local bridge between MetaTrader 5 terminal and the NSE Platform server
+AppCopyright=Copyright (c) Opselon
+DefaultDirName={localappdata}\Programs\{#AppName}
+DefaultGroupName={#AppName}
+DisableProgramGroupPage=yes
+; Per-user install: no admin rights, no UAC prompt.
+PrivilegesRequired=lowest
+; x64 only (see docs/COMPATIBILITY.md — ARM64 unsupported).
+ArchitecturesAllowed=x64os
+ArchitecturesInstallIn64BitMode=x64os
+MinVersion=10.0
+WizardStyle=modern
+Compression=lzma
+SolidCompression=yes
+; Output next to the built exe (paths below are relative to this
+; script's directory, windows\).
+OutputDir=..\dist
+OutputBaseFilename=NSE-MT5-Bridge-Setup-{#AppVersion}
+VersionInfoVersion={#AppVersionInfo}
+VersionInfoDescription={#AppName} Setup
+VersionInfoProductName={#AppName}
+VersionInfoCopyright=Copyright (c) Opselon
+; If the Bridge is running, ask to close it first — otherwise the
+; running exe cannot be replaced.
+CloseApplications=yes
+UninstallDisplayName={#AppName} {#AppVersion}
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+
+[Files]
+Source: "..\dist\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+
+[Icons]
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
+Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+
+[Run]
+Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent

@@ -476,7 +476,9 @@ def test_executor_recent_records_completed_and_rejected(tmp_path, monkeypatch):
         "nse_bridge.engine.trading.close_position",
         lambda ctx_, ticket: {"status": "done", "ticket": ticket, "retcode": 10009},
     )
-    executor = CommandExecutor(ctx, _validator(), results_queue=BoundedPendingQueue(32, "test/results"))
+    executor = CommandExecutor(
+        ctx, _validator(), results_queue=BoundedPendingQueue(32, "test/results"), clock=lambda: NOW
+    )
     assert executor.recent_executions() == []
     execution, _ = executor.execute(_frame())
     assert execution.state is CommandState.COMPLETED
@@ -518,7 +520,9 @@ def test_executor_recent_records_partially_completed_with_partial_facts(tmp_path
             "reconciled": True,
         },
     )
-    executor = CommandExecutor(ctx, _validator(), results_queue=BoundedPendingQueue(32, "test/results"))
+    executor = CommandExecutor(
+        ctx, _validator(), results_queue=BoundedPendingQueue(32, "test/results"), clock=lambda: NOW
+    )
     execution, _result = executor.execute(_frame())
     assert execution.state is CommandState.PARTIALLY_COMPLETED
     recent = executor.recent_executions()
@@ -537,7 +541,9 @@ def test_executor_recent_is_bounded_and_newest_first(tmp_path, monkeypatch):
         "nse_bridge.engine.trading.close_position",
         lambda ctx_, ticket: {"status": "done", "ticket": ticket, "retcode": 10009},
     )
-    executor = CommandExecutor(ctx, _validator(), results_queue=BoundedPendingQueue(32, "test/results"))
+    executor = CommandExecutor(
+        ctx, _validator(), results_queue=BoundedPendingQueue(32, "test/results"), clock=lambda: NOW
+    )
     ids = []
     for _ in range(55):
         frame = _frame()

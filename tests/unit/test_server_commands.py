@@ -238,7 +238,7 @@ def test_executor_close_position_success(monkeypatch):
         lambda ctx_, ticket: {"status": "done", "ticket": ticket, "retcode": 10009},
     )
     results = BoundedPendingQueue(32, "test/results")
-    executor = CommandExecutor(ctx, _validator(), results_queue=results)
+    executor = CommandExecutor(ctx, _validator(), results_queue=results, clock=lambda: NOW)
     execution, result = executor.execute(_frame())
     assert execution.state is CommandState.COMPLETED
     assert result["status"] == "executed"
@@ -255,7 +255,7 @@ def test_executor_rejected_command_never_executes(monkeypatch):
         "nse_bridge.engine.trading.close_position",
         lambda ctx_, ticket: calls.append(ticket) or {"status": "done"},
     )
-    executor = CommandExecutor(ctx, _validator(), results_queue=None)
+    executor = CommandExecutor(ctx, _validator(), results_queue=None, clock=lambda: NOW)
     execution, result = executor.execute(_frame(operation={"type": "open_order", "ticket": "1"}))
     assert execution.state is CommandState.FAILED
     assert result["status"] == "rejected"
@@ -277,7 +277,7 @@ def test_executor_modify_sltp_fills_missing_values_from_position(monkeypatch):
 
     monkeypatch.setattr("nse_bridge.engine.trading.fetch_position", fake_fetch_position)
     monkeypatch.setattr("nse_bridge.engine.trading.modify_position_sltp", fake_modify)
-    executor = CommandExecutor(ctx, _validator())
+    executor = CommandExecutor(ctx, _validator(), clock=lambda: NOW)
     execution, result = executor.execute(_frame(operation={"type": "modify_sl_tp", "ticket": "9000001", "sl": 1.0750}))
     assert execution.state is CommandState.COMPLETED
     assert result["status"] == "executed"
@@ -296,7 +296,7 @@ def test_executor_unknown_after_unverified_close_reconciles_to_executed(monkeypa
 
     monkeypatch.setattr("nse_bridge.engine.trading.close_position", failing_close)
     monkeypatch.setattr("nse_bridge.engine.trading.fetch_position", fetch_gone)
-    executor = CommandExecutor(ctx, _validator())
+    executor = CommandExecutor(ctx, _validator(), clock=lambda: NOW)
     execution, result = executor.execute(_frame())
     # Reconciliation proved the position is gone → executed (recovered).
     assert execution.state is CommandState.COMPLETED
@@ -316,7 +316,7 @@ def test_executor_unknown_when_position_still_open(monkeypatch):
 
     monkeypatch.setattr("nse_bridge.engine.trading.close_position", failing_close)
     monkeypatch.setattr("nse_bridge.engine.trading.fetch_position", fetch_open)
-    executor = CommandExecutor(ctx, _validator())
+    executor = CommandExecutor(ctx, _validator(), clock=lambda: NOW)
     execution, result = executor.execute(_frame())
     assert execution.state is CommandState.UNKNOWN
     assert result["status"] == "mcp_failed"
@@ -332,7 +332,7 @@ def test_executor_trade_rejected_is_failed_not_unknown(monkeypatch):
         raise BridgeError(ErrorCode.TRADE_REJECTED, "broker rejected", retcode=10016)
 
     monkeypatch.setattr("nse_bridge.engine.trading.close_position", rejecting_close)
-    executor = CommandExecutor(ctx, _validator())
+    executor = CommandExecutor(ctx, _validator(), clock=lambda: NOW)
     execution, result = executor.execute(_frame())
     assert execution.state is CommandState.FAILED
     assert result["status"] == "mcp_failed"
