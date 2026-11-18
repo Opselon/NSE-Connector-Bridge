@@ -247,7 +247,7 @@ unit/mock level), *Partial* (substantially present but a named piece is missing 
 | Old gap | Status now | Evidence |
 |---|---|---|
 | 311 tests pass on Linux | **Improved** | **556 passed, verified here** (`~/.venvs/bridge/bin/python -m pytest tests/unit tests/integration -q`, 118.03 s). New suites: `test_symbol_resolution.py` (29), `test_execution_c2.py` (34), `test_journal.py` (28), `test_accounting.py`, `test_gui_data.py`, `test_manifest_wiring.py`, `test_sync_checkpoint.py`, `test_diagnostic_store.py`, `test_rest_cancellation.py`, `test_channel_heartbeat_ws.py`, `test_broker_compat_fixes.py`, expanded `test_self_healing.py` (43), `test_mt5_discovery.py`, `test_updater.py`, `test_production_wiring.py` (3, N1/N2 wiring) + 7 new real-MT5 defect regression tests (D1 ×3, D2 ×1, D4 ×3) |
-| Windows CI fails, cause undiagnosed | **✅ Fixed — green on merged main** | CI run 44271103244 (head `6a13be5`): `test-linux` SUCCESS; `build-windows` failed on exactly 1 test (`test_apply_script_replaces_dummy_target`). Root cause found (em-dash/cp1252 encoding, see §2.18) and fixed in `aae5075`. Runs **44274450546** (PR #2) and **44274443061** (push) at `aae5075` both SUCCESS — test-linux + build-windows green, incl. "Build single-file exe" + "Smoke-check the frozen exe" (artifact `NSE-MT5-Bridge-windows`, 45,377,692 bytes). PR #2 merged. **Follow-up branch CI is pending** — its runs start after push; no green may be claimed for `67f8ff5` until then |
+| Windows CI fails, cause undiagnosed | **✅ Fixed — green on merged main and on this branch** | CI run 44271103244 (head `6a13be5`): `test-linux` SUCCESS; `build-windows` failed on exactly 1 test (`test_apply_script_replaces_dummy_target`). Root cause found (em-dash/cp1252 encoding, see §2.18) and fixed in `aae5075`. Runs **44274450546** (PR #2) and **44274443061** (push) at `aae5075` both SUCCESS — test-linux + build-windows green, incl. "Build single-file exe" + "Smoke-check the frozen exe" (artifact `NSE-MT5-Bridge-windows`, 45,377,692 bytes). PR #2 merged. **This branch:** run **44286483717** (PR #3) at `79a2948` SUCCESS — test-linux + build-windows green, artifact 45,378,534 bytes. This head differs by docs only; its own run is being watched before PR #3 is marked ready |
 | Real-MT5 defects (found live 2026-11-18, terminal build 6323, MetaQuotes-Demo) | **Fixed on this branch** | D1 retcode labels + NO_CHANGES idempotency (`28c83d2`); D2 account trade_mode labels (`ebc72b2`); D4 `/health` broker connectivity (`e66951c`); D3 WS e2e test rewritten to the contract protocol (`67f8ff5`). See "Real-MT5 defects D1–D4" below. Live re-verification of the fixes is owed via the parent (Wine terminal run). |
 | Lint scoped to tests/scripts; no format/static-analysis/security jobs | **Fixed** | `.github/workflows/build.yml:17-19,53-83,146-150` — `ruff check .` (whole repo) + `ruff format --check .` + `mypy nse_bridge` (default and `--platform win32`) + `bandit -r nse_bridge` + `pip-audit`, on both jobs; junit upload + `scripts/annotate_test_failures.py` (readable failures without log access) |
 | No dedicated server-restart integration test | **Unchanged** | Still no dedicated server-restart integration test (mock reconnect behaviour only) |
@@ -461,21 +461,23 @@ live-tested.
 | Local API protected | Implemented | Mandatory `X-API-Key`, loopback guardrails |
 | GUI reflects real infrastructure state | Implemented (mock-proven) | 7 sections, real data endpoints; N1 closed — the journal feed is now fed in production (`c27bf0b`) |
 | Secure update verification implemented | Partial | SHA-256 + Ed25519 before staging, stricter than contract; key unprovisioned, no rollback |
-| Automated tests run in CI | Partial | 556 pass locally (verified here, 118.03 s); test-linux + build-windows green at `aae5075` (runs 44274450546 + 44274443061, merged main). Follow-up branch CI pending |
-| Windows EXE builds successfully | Partial | Proven green at `aae5075` (runs 44274450546 + 44274443061: "Build single-file exe" + "Smoke-check the frozen exe", artifact `NSE-MT5-Bridge-windows` 45,377,692 bytes). Follow-up branch's own build-windows run pending — no green claimed for `67f8ff5` yet |
+| Automated tests run in CI | Implemented | 556 pass locally (verified here, 118.03 s); test-linux + build-windows green at `aae5075` (runs 44274450546 + 44274443061, merged main) and on this branch at `79a2948` (run 44286483717, PR #3). This head differs from `79a2948` by docs only; its own run is being watched before PR #3 is marked ready |
+| Windows EXE builds successfully | Implemented | Proven green at `aae5075` (runs 44274450546 + 44274443061: "Build single-file exe" + "Smoke-check the frozen exe", artifact `NSE-MT5-Bridge-windows` 45,377,692 bytes) and on this branch at `79a2948` (run 44286483717: all 14 build-windows steps green, artifact 45,378,534 bytes). This head differs by docs only; its own run is being watched |
 | No fake tests or swallowed failures remain | Implemented (mock-proven) | Test-honesty labelling enforced; e2e fails loudly without a terminal |
 | No unnecessary local DB / duplicated server engine | Implemented | No local DB; journal/accounting are labelling/collection only, no engine |
 | Future compute has a clean extension boundary | Partial | Boundary + timeout enforcement verified; CPU/memory recorded-not-enforced; no per-task cancel; wire format owed (D9) |
-| One integrated PR created, all CI failures addressed | Partial | PR #2 MERGED (`4f01068`, head `aae5075`, CI green). Follow-up PR from `fix/bridge-real-mt5-defects` to be opened; its CI pending |
-| PR remains unmerged pending explicit authorization | Holding | No merge has happened on the follow-up PR (not yet opened); PR #2 merged only on the user's explicit order |
+| One integrated PR created, all CI failures addressed | Partial | PR #2 MERGED (`4f01068`, head `aae5075`, CI green). Follow-up PR #3 is open (draft, `fix/bridge-real-mt5-defects` → main); run 44286483717 at `79a2948` green. Marking PR #3 ready awaits this head's own run (docs-only change since `79a2948`) |
+| PR remains unmerged pending explicit authorization | Holding | PR #3 is a draft; no merge has happened on it (PR #2 merged only on the user's explicit order) |
 
-**§25 totals at `67f8ff5`: Implemented 14, Partial 17, Not-proven 1, Blocked 1, Not-met-at-runtime 0, Holding 1.**
+**§25 totals at `67f8ff5` (refreshed for the PR #3 head — see note): Implemented 16, Partial 15, Not-proven 1, Blocked 1, Not-met-at-runtime 0, Holding 1.**
 (Correction: the first-pass totals line read "Implemented 10, Partial 14,
 Not-proven 3, Blocked 2, Not-met-at-runtime 1, Holding 1" (= 31, not 34) —
 a counting error; recounting that table's rows gives Implemented 13,
 Partial 15, Not-proven 2, Blocked 2, Not-met-at-runtime 1, Holding 1.
 The refresh moves journal Not-met→Partial, GUI Partial→Implemented,
-diagnostic delivery Blocked→Partial, Windows EXE Not-proven→Partial.)
+diagnostic delivery Blocked→Partial, Windows EXE Not-proven→Partial.
+The PR #3 head refresh moves CI tests + Windows EXE Partial→Implemented:
+run 44286483717 at `79a2948` is green; this head differs by docs only.)
 (No §25 item is fully closed by Bridge code alone while D11/D1 are open — live proof and the
 diagnostics endpoint are Platform-side gates, not Bridge defects.)
 
@@ -495,9 +497,11 @@ defects are fixed with regression tests**.
 
 **What still blocks a "complete" verdict — in priority order:**
 
-1. **Follow-up branch CI (pending, not claimable):** the follow-up PR's runs start
-   after push. Merged main is green at `aae5075`, but no green may be claimed for
-   `67f8ff5` until its own test-linux + build-windows runs succeed.
+1. **Follow-up branch CI (green at `79a2948`, this head's run pending):**
+   run 44286483717 (PR #3) is SUCCESS — test-linux + build-windows,
+   incl. exe build + frozen-exe smoke check. This head differs from
+   `79a2948` by docs only; its run is being watched before PR #3 is
+   marked ready.
 2. **Live re-verification of the 4 defect fixes:** unit-verified here (both ways via
    `git stash`); the Wine terminal re-run (NO_CHANGES modify, demo trade_mode label,
    `/health` broker state, WS e2e executed-close + live tick) is owed via the parent.
@@ -550,10 +554,14 @@ follow-up branch's CI runs (not yet started); hidden-symbol completeness of
 - **Counts verified:** `@command` decorators = 91; e2e `def test` = 104 (3 in the
   rewritten `test_ws_channel.py`); OpenAPI paths = 110;
   self-healing `_handle_*` methods = 20; journal event types = 14.
-- **CI evidence (merged main, verified via GitHub API by full head SHA):**
+- **CI evidence (merged main + this branch, verified via GitHub API by full head SHA):**
   runs 44274450546 (PR #2) + 44274443061 (push) at `aae5075` both SUCCESS
-  (test-linux + build-windows; release skipped — tags only). Follow-up branch
-  CI runs not yet started at the time of writing.
+  (test-linux + build-windows; release skipped — tags only). Follow-up branch:
+  run 44286483717 (PR #3) at `79a2948` SUCCESS — test-linux success,
+  build-windows success (all 14 steps, incl. "Run unit + mock-integration
+  tests on Windows", "Build single-file exe", "Smoke-check the frozen exe";
+  artifact `NSE-MT5-Bridge-windows`, 45,378,534 bytes), release skipped.
+  This head differs from `79a2948` by docs only; its own run is being watched.
 - **Key code paths cited:** `server/rest.py`, `server/commands.py`, `server/sync.py`,
   `server/sync_checkpoint.py`, `server/manifest.py`, `server/enrolment.py`,
   `server/chart.py`, `realtime/channel.py`, `realtime/bus.py`, `mt5/driver.py`,
