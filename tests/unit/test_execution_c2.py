@@ -24,7 +24,7 @@ from nse_bridge.engine.execution import (
     validate_pending,
 )
 from nse_bridge.engine.orders import ModifyPendingRequest, trade_modify_pending_order
-from nse_bridge.engine.trading import close_position, close_position_by, market_order
+from nse_bridge.engine.trading import close_position, close_position_by, market_order, modify_position_sltp
 from nse_bridge.errors import BridgeError, ErrorCode
 from nse_bridge.mt5.driver import Mt5Driver
 from nse_bridge.mt5.types import build_account_model, build_symbol_model
@@ -736,6 +736,59 @@ def test_retcode_map_covers_spec_section_6_conditions():
         assert code in RETCODE_MAP, condition
         assert translate_retcode(code) != f"UNKNOWN_MT5_RETCODE ({code})"
     assert translate_retcode(99999).startswith("UNKNOWN_MT5_RETCODE")
+
+
+# ----------------------------------------------------------------------
+# NO_CHANGES idempotency (real-MT5 defect 1, 2026-11-18)
+# ----------------------------------------------------------------------
+def test_modify_position_sltp_no_changes_is_idempotent_success(tmp_path):
+    """A combined SL/TP modify with duplicate values returns NO_CHANGES
+    (10025) — the desired state already holds. The old code read it as
+    UNKNOWN_SYMBOL, retried 3 times, and failed even though the broker
+    state was correct. Now: one dispatch, success, no retry."""
+    fake = _FakeMt5(
+        positions=[_position(2001, type_=0, volume=1.0)],
+        symbol_rows=[_symbol_row("EURUSD")],
+        ticks={"EURUSD": _tick()},
+        account=_account(),
+        send_retcode=10025,
+    )
+    ctx, driver = _ctx_with(fake, tmp_path)
+    try:
+        out = modify_position_sltp(ctx, 2001, sl=1.0900, tp=1.1100)
+    finally:
+        driver.disconnect()
+    assert out["status"] == "done"
+    assert out["retcode"] == 10025
+    assert out["retcode_label"].startswith("NO_CHANGES")
+    assert out["no_changes"] is True
+    assert fake.send_calls == 1  # no retry on an already-satisfied state
+
+
+def test_modify_pending_order_no_changes_is_idempotent_success(ctx):
+    """Same defect class for pending orders: a duplicate SL/TP modify
+    returns NO_CHANGES and must succeed, not raise TRADE_REJECTED."""
+    ctx.driver._mt5.orders[6001] = SimpleNamespace(
+        ticket=6001,
+        symbol="EURUSD",
+        type=4,
+        price_open=1.1010,
+        price_current=1.1010,
+        volume_current=0.2,
+        volume_initial=0.2,
+        sl=1.0990,
+        tp=1.1020,
+        time_setup=int(time.time()),
+        type_time=0,
+        magic=0,
+        comment="",
+    )
+    ctx.driver._mt5.send_retcode = 10025
+    out = trade_modify_pending_order(ctx, ModifyPendingRequest(ticket=6001, sl=1.0990, tp=1.1020))
+    assert out["status"] == "done"
+    assert out["retcode"] == 10025
+    assert out["retcode_label"].startswith("NO_CHANGES")
+    assert out["no_changes"] is True
 
 
 # ----------------------------------------------------------------------

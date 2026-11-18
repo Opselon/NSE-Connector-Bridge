@@ -17,7 +17,7 @@ from ..mt5.types import (
 from ..mt5.types import (
     f as _f,
 )
-from ..retcodes import TRADE_RETCODE_DONE, translate_retcode
+from ..retcodes import TRADE_RETCODE_DONE, TRADE_RETCODE_NO_CHANGES, translate_retcode
 from ..timeutil import broker_dt
 from .common import BridgeContext
 from .registry import command
@@ -446,6 +446,16 @@ def trade_modify_pending_order(ctx: BridgeContext, params: ModifyPendingRequest)
             details={"ticket": params.ticket},
         )
     retcode = int(_f(result, "retcode", 0))
+    if retcode == TRADE_RETCODE_NO_CHANGES:
+        # Idempotent success (real-MT5 defect 1, same as modify_position_sltp):
+        # the requested price/SL/TP already hold — return success, never reject.
+        return {
+            "status": "done",
+            "ticket": params.ticket,
+            "retcode": retcode,
+            "retcode_label": translate_retcode(retcode),
+            "no_changes": True,
+        }
     if retcode != TRADE_RETCODE_DONE:
         raise reject(result, "modify_pending_order", symbol)
     return {

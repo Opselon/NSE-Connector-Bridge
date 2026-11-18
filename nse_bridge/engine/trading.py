@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from ..errors import BridgeError, ErrorCode
 from ..mt5.types import f as _f
-from ..retcodes import TRADE_RETCODE_DONE, TRADE_RETCODE_DONE_PARTIAL, translate_retcode
+from ..retcodes import TRADE_RETCODE_DONE, TRADE_RETCODE_DONE_PARTIAL, TRADE_RETCODE_NO_CHANGES, translate_retcode
 from .common import BridgeContext, account_info_model, resolve_filling_mode, resolve_order_symbol
 from .symbols import _fresh_tick
 
@@ -280,6 +280,23 @@ def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) 
         if last is None:
             continue
         retcode = int(_f(last, "retcode", 0))
+        if retcode == TRADE_RETCODE_NO_CHANGES:
+            # Idempotent success (real-MT5 defect 1): the requested SL/TP
+            # already hold — the desired state is in effect, so there is
+            # nothing to retry. The old code retried the identical
+            # request 3 times (NO_CHANGES every time) and then failed
+            # the call even though the broker state was correct.
+            ctx.trade_metrics.record("modify_sltp", "done", 0.0, retcode, {"ticket": ticket, "no_changes": True})
+            return {
+                "status": "done",
+                "ticket": ticket,
+                "symbol": symbol,
+                "sl": sl,
+                "tp": tp,
+                "retcode": retcode,
+                "retcode_label": translate_retcode(retcode),
+                "no_changes": True,
+            }
         if retcode == TRADE_RETCODE_DONE:
             ctx.trade_metrics.record("modify_sltp", "done", 0.0, retcode, {"ticket": ticket})
             return {
