@@ -278,12 +278,12 @@ def _pid_gone(pid):
 
 def _pid_gone_windows(pid):
     """Windows: os.kill(pid, 0) only proves the PID is openable, not
-    that the process is alive — a dead process whose handle is still
+    that the process is alive -- a dead process whose handle is still
     open (e.g. the launcher's Popen object) still opens, so the
     updater waited the full 120s and the CI test timed out at 60s.
     Check the exit code instead: STILL_ACTIVE (259) means running;
     anything else means the process has exited. Any inspection
-    failure treats the process as gone: proceeding is safe — replacing
+    failure treats the process as gone: proceeding is safe -- replacing
     a still-running exe fails cleanly with PermissionError below.
     """
     try:
@@ -338,13 +338,13 @@ def main():
     while not _pid_gone(args.parent_pid) and time.time() < deadline:
         time.sleep(0.5)
     if not _pid_gone(args.parent_pid):
-        result["error"] = "bridge process did not exit within 120s — update NOT applied"
+        result["error"] = "bridge process did not exit within 120s -- update NOT applied"
     else:
         try:
             with open(args.staged, "rb") as fh:
                 digest = hashlib.sha256(fh.read()).hexdigest()
             if digest.lower() != args.sha256.lower():
-                result["error"] = "staged file SHA-256 mismatch — update NOT applied"
+                result["error"] = "staged file SHA-256 mismatch -- update NOT applied"
             else:
                 _replace_file(args.staged, args.target)
                 result["ok"] = True
@@ -376,10 +376,12 @@ if __name__ == "__main__":
 # the source file's line endings. On a CRLF checkout (Windows CI) the
 # literal embeds \r\n; a text-mode write then translates each \n to
 # \r\n (\r\n -> \r\r\n) and a universal-newlines read turns \r\r\n
-# into \n\n — so the staged script no longer contains the template and
-# test_apply_script_replaces_dummy_target fails on Windows only.
-# Normalize once so the template is byte-identical on every platform.
-# (The template contains no intentional \r characters.)
+# into \n\n. Normalize once so the template is byte-identical on every
+# platform. (The template contains no intentional \r characters.)
+# The template is also kept strictly ASCII: it is written as UTF-8 but
+# may be read back under the Windows locale default (cp1252), where a
+# single non-ASCII character (an em dash did this on run 44272982805)
+# decodes to different characters and the template no longer matches.
 APPLY_SCRIPT_TEMPLATE = APPLY_SCRIPT_TEMPLATE.replace("\r\n", "\n")
 
 

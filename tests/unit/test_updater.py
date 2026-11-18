@@ -434,6 +434,26 @@ def test_apply_script_refuses_wrong_sha(settings, keypair, tmp_path):
     assert target.read_bytes() == b"old-bytes"  # untouched
 
 
+def test_apply_script_template_is_ascii_and_survives_cp1252_read(settings, keypair):
+    """Regression: run 44272982805 — the staged script contained em dashes
+    (U+2014). It is written as UTF-8, but on Windows ``read_text()`` with
+    no encoding defaults to the locale encoding (cp1252), which decodes
+    the UTF-8 em dash as different characters — so the template no longer
+    matched the staged file and the test failed Windows-only. The template
+    must stay pure ASCII so it round-trips under any single-byte read.
+    """
+    priv, _ = keypair
+    updater = _updater(
+        settings,
+        FakeRestClient(release=_release(priv, ARTIFACT)),
+        transport=_transport_for(ARTIFACT),
+    )
+    assert APPLY_SCRIPT_TEMPLATE.isascii()
+    script = updater.write_apply_script()
+    assert APPLY_SCRIPT_TEMPLATE in script.read_text(encoding="cp1252")
+    assert APPLY_SCRIPT_TEMPLATE in script.read_text(encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # apply-script internals (the template exec'd; the Windows branch is
 # testable on Linux by stubbing ctypes.WinDLL)
