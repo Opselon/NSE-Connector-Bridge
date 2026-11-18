@@ -61,6 +61,35 @@ def test_translate_retcode_known_and_unknown():
     assert translate_retcode(None).startswith("NO_RESPONSE")
 
 
+def test_translate_retcode_real_mt5_defect_1_labels():
+    # Real-MT5 defect 1 (2026-11-18): six labels were wrong, verified
+    # against the MetaTrader5 package constants + the MQL5 reference
+    # (mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes).
+    assert translate_retcode(10025).startswith("NO_CHANGES")
+    assert translate_retcode(10026).startswith("SERVER_DISABLES_AT")
+    assert translate_retcode(10027).startswith("CLIENT_DISABLES_AT")
+    assert translate_retcode(10028).startswith("LOCKED")
+    assert translate_retcode(10030).startswith("INVALID_FILL")
+    assert translate_retcode(10031).startswith("CONNECTION")
+    # 10032..10045 were entirely missing (the real LONG_ONLY is 10042).
+    assert translate_retcode(10032).startswith("ONLY_REAL")
+    assert translate_retcode(10033).startswith("LIMIT_ORDERS")
+    assert translate_retcode(10034).startswith("LIMIT_VOLUME")
+    assert translate_retcode(10035).startswith("INVALID_ORDER")
+    assert translate_retcode(10036).startswith("POSITION_CLOSED")
+    assert translate_retcode(10038).startswith("INVALID_CLOSE_VOLUME")
+    assert translate_retcode(10039).startswith("CLOSE_ORDER_EXIST")
+    assert translate_retcode(10040).startswith("LIMIT_POSITIONS")
+    assert translate_retcode(10041).startswith("REJECT_CANCEL")
+    assert translate_retcode(10042).startswith("LONG_ONLY")
+    assert translate_retcode(10043).startswith("SHORT_ONLY")
+    assert translate_retcode(10044).startswith("CLOSE_ONLY")
+    assert translate_retcode(10045).startswith("FIFO_CLOSE")
+    assert translate_retcode(10046).startswith("HEDGE_PROHIBITED")
+    # 10037 is unassigned in the official enum — honestly unknown, never invented.
+    assert translate_retcode(10037).startswith("UNKNOWN_MT5_RETCODE")
+
+
 def test_classify_retcode_cause_classes():
     assert classify_retcode(10004) == "TRANSIENT"  # requote
     assert classify_retcode(10012) == "TRANSIENT"  # timeout
@@ -71,3 +100,5 @@ def test_classify_retcode_cause_classes():
     assert classify_retcode(10029) == "HARD_REJECT"  # frozen
     assert classify_retcode(99999) == "HARD_REJECT"  # unknown
     assert classify_retcode(None) == "HARD_REJECT"
+    # NO_CHANGES is not a failure: the requested state already holds.
+    assert classify_retcode(10025) == "IDEMPOTENT"

@@ -85,6 +85,18 @@ TRADE_MODE_LABELS = {
     3: "CLOSE_ONLY",
     4: "FULL",
 }
+#: Account trade-mode labels (MT5 ``trade_mode``, ENUM_ACCOUNT_TRADE_MODE).
+#: Raw int is authoritative; the label is display-only. NOT the symbol
+#: trade-mode enum above — 0 means DEMO for an account but DISABLED for
+#: a symbol (real-MT5 defect 2, 2026-11-18: the demo account
+#: MetaQuotes-Demo 10011755849, trade_mode=0, was labelled DISABLED).
+#: The symbol side (``build_symbol_model``, ``symbols.metadata``,
+#: ``engine.symbols``) correctly keeps TRADE_MODE_LABELS — do not unify.
+ACCOUNT_TRADE_MODE_LABELS = {
+    0: "DEMO",
+    1: "CONTEST",
+    2: "REAL",
+}
 FILLING_LABELS = {0: "FOK", 1: "IOC", 2: "RETURN"}
 EXECUTION_LABELS = {0: "REQUEST", 1: "INSTANT", 2: "MARKET", 3: "EXCHANGE"}
 #: Calculation-mode labels (MT5 ``trade_calc_mode``, ENUM_SYMBOL_CALC_MODE).
@@ -442,7 +454,7 @@ def build_account_model(raw: Any) -> AccountInfoModel:
         server=f(raw, "server"),
         currency=f(raw, "currency"),
         trade_mode=f(raw, "trade_mode"),
-        trade_mode_label=TRADE_MODE_LABELS.get(f(raw, "trade_mode", -1)),
+        trade_mode_label=ACCOUNT_TRADE_MODE_LABELS.get(f(raw, "trade_mode", -1)),
         leverage=f(raw, "leverage"),
         balance=f(raw, "balance"),
         equity=f(raw, "equity"),

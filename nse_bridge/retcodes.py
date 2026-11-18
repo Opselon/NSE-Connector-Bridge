@@ -1,13 +1,23 @@
-"""Official MQL5 trade-server return-code map (10004..10031).
+"""Official MQL5 trade-server return-code map (10004..10046).
 
 Ported from the production adapter (BUG-226 forensics): labels follow
 mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes exactly —
 10016 is INVALID_STOPS (not TRADE_DISABLED) and the 10017+ sequence is not
-shifted. Also carries the pending-recovery cause classes:
+shifted. Real-MT5 defect 1 (2026-11-18, verified against the MetaTrader5
+package constants + the MQL5 reference): 10025 is NO_CHANGES (not
+UNKNOWN_SYMBOL), 10026 SERVER_DISABLES_AT, 10027 CLIENT_DISABLES_AT,
+10028 LOCKED, 10030 INVALID_FILL, 10031 CONNECTION — and 10032..10046
+were missing entirely (the real LONG_ONLY is 10042, not 10027). 10037
+is unassigned in the official enum, so it stays unmapped (reported as
+UNKNOWN_MT5_RETCODE) rather than invented.
+
+Also carries the pending-recovery cause classes:
 
 TRANSIENT   — broker-side state may resolve on its own; retry with backoff.
 REPAIRABLE  — the request itself is structurally invalid; one validated repair.
 HARD_REJECT — never re-send, never repair (includes unknown codes, 10029 FROZEN).
+IDEMPOTENT  — not a failure at all: NO_CHANGES means the requested state
+              already holds. Treat as success, never retry.
 """
 
 from __future__ import annotations
@@ -33,13 +43,28 @@ RETCODE_MAP: dict[int, str] = {
     10022: "INVALID_EXPIRATION - Invalid order expiration date",
     10023: "ORDER_CHANGED - Order state changed",
     10024: "TOO_MANY_REQUESTS - Too frequent requests",
-    10025: "UNKNOWN_SYMBOL - Unknown symbol",
-    10026: "ORDER_LOCKED - Order or position frozen",
-    10027: "LONG_ONLY - Only long positions allowed on symbol",
-    10028: "SHORT_ONLY - Only short positions allowed on symbol",
+    10025: "NO_CHANGES - No changes in request",
+    10026: "SERVER_DISABLES_AT - Autotrading disabled by server",
+    10027: "CLIENT_DISABLES_AT - Autotrading disabled by client terminal",
+    10028: "LOCKED - Request locked for processing",
     10029: "FROZEN - Order or position frozen by broker (close/modification banned)",
-    10030: "UNSUPPORTED_FILLING - Filling mode unsupported by broker",
-    10031: "NO_CONNECTION - No connection with trade server",
+    10030: "INVALID_FILL - Invalid order filling type",
+    10031: "CONNECTION - No connection with the trade server",
+    10032: "ONLY_REAL - Operation is allowed only for live accounts",
+    10033: "LIMIT_ORDERS - The number of pending orders has reached the limit",
+    10034: "LIMIT_VOLUME - The volume of orders and positions for the symbol has reached the limit",
+    10035: "INVALID_ORDER - Incorrect or prohibited order type",
+    10036: "POSITION_CLOSED - Position with the specified POSITION_IDENTIFIER has already been closed",
+    # 10037 is unassigned in the official MQL5 enum — deliberately unmapped.
+    10038: "INVALID_CLOSE_VOLUME - A close volume exceeds the current position volume",
+    10039: "CLOSE_ORDER_EXIST - A close order already exists for a specified position",
+    10040: "LIMIT_POSITIONS - The number of open positions on the account has reached the server limit",
+    10041: "REJECT_CANCEL - The pending order activation request is rejected, the order is canceled",
+    10042: "LONG_ONLY - Only long positions are allowed for the symbol",
+    10043: "SHORT_ONLY - Only short positions are allowed for the symbol",
+    10044: "CLOSE_ONLY - Only position closing is allowed for the symbol",
+    10045: "FIFO_CLOSE - Position closing is allowed only by FIFO rule for the trading account",
+    10046: "HEDGE_PROHIBITED - Opposite positions on a single symbol are disabled for the trading account",
 }
 
 # retcode 0 is NOT a trade-server code; the package marks requests that never
@@ -51,6 +76,7 @@ PENDING_CLASS_REPAIRABLE: frozenset[int] = frozenset({10013, 10015, 10016})
 
 TRADE_RETCODE_DONE = 10009
 TRADE_RETCODE_DONE_PARTIAL = 10010  # DONE_PARTIAL — request partially completed
+TRADE_RETCODE_NO_CHANGES = 10025  # NO_CHANGES — requested state already holds; idempotent success
 
 
 def translate_retcode(retcode: int | None) -> str:
@@ -60,7 +86,9 @@ def translate_retcode(retcode: int | None) -> str:
 
 
 def classify_retcode(retcode: int | None) -> str:
-    """Cause class for a failed trade retcode (TRANSIENT/REPAIRABLE/HARD_REJECT)."""
+    """Cause class for a trade retcode (TRANSIENT/REPAIRABLE/HARD_REJECT/IDEMPOTENT)."""
+    if retcode == TRADE_RETCODE_NO_CHANGES:
+        return "IDEMPOTENT"
     if retcode in PENDING_CLASS_TRANSIENT:
         return "TRANSIENT"
     if retcode in PENDING_CLASS_REPAIRABLE:

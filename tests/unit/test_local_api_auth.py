@@ -72,6 +72,48 @@ def test_health_probe_needs_no_key(client):
     assert resp.json()["ok"] is True
 
 
+def test_health_reports_broker_down_when_ipc_is_up(client, monkeypatch):
+    # Real-MT5 defect 4 (2026-11-18): mt5_connected only measures the
+    # IPC link to the terminal. /health must also report the
+    # terminal→broker link, so a dead broker link never reads healthy.
+    # The observed failure: the terminal lost MetaQuotes-Demo for 4+
+    # minutes while ticks went stale, yet /health stayed mt5_connected.
+    http, ctx = client
+    ctx.driver._connected = True  # simulate the IPC link up
+    monkeypatch.setattr(
+        ctx.driver,
+        "refresh_terminal",
+        lambda: {"connected": False, "name": "MetaTrader 5", "trade_allowed": False, "login": 10011755849},
+    )
+    body = http.get("/health").json()
+    assert body["mt5_connected"] is True
+    assert body["broker_connected"] is False
+    assert body["broker"]["login"] == 10011755849
+
+
+def test_health_reports_broker_up_when_terminal_connected(client, monkeypatch):
+    http, ctx = client
+    ctx.driver._connected = True
+    monkeypatch.setattr(
+        ctx.driver,
+        "refresh_terminal",
+        lambda: {"connected": True, "name": "MetaTrader 5", "trade_allowed": True, "login": 10011755849},
+    )
+    body = http.get("/health").json()
+    assert body["broker_connected"] is True
+
+
+def test_health_reports_broker_unknown_when_ipc_down(client):
+    # IPC down: the real probe returns None — broker state is unknown,
+    # never invented as healthy or unhealthy.
+    http, ctx = client
+    assert ctx.driver.connected is False
+    body = http.get("/health").json()
+    assert body["mt5_connected"] is False
+    assert body["broker_connected"] is None
+    assert body["broker"] is None
+
+
 def test_put_settings_routes_secrets_to_store_not_config_json(client, tmp_path):
     http, ctx = client
     key = ctx.settings.local_api_key

@@ -367,7 +367,7 @@ class TelemetryEmitter:
     ) -> None:
         self.device_id = device_id
         self.diagnostic_mode = diagnostic_mode
-        self.queue = queue or DiagnosticQueue()
+        self.queue = queue if queue is not None else DiagnosticQueue()
         # None = no sink attached yet (inert by default — see
         # NullDiagnosticsSink). Delivery only happens via an
         # explicitly attached sink; nothing is ever sent to a guessed
