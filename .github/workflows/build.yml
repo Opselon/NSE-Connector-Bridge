@@ -4,10 +4,42 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
+  # Linux gate: unit tests + lint run FIRST; the Windows build waits on them.
+  # The Linux job installs only the pure-Python / Linux-runnable deps —
+  # MetaTrader5 is Windows-only (see requirements.txt sys_platform marker).
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint new unit tests
+        # NOTE: `ruff check .` is not the gate yet — the pre-existing
+        # codebase has 138 ruff findings (tracked for a later phase;
+        # much of it lives in agent/, which Phase 3 deletes). The new
+        # unit-test code must be lint-clean from day one.
+        run: ruff check tests/unit
+
+      - name: Run unit tests
+        run: python -m pytest tests/unit -q
+
   build:
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,7 +53,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install MetaTrader5 numpy fastapi "uvicorn[standard]" pydantic-settings websockets loguru pywebview pyinstaller
+          pip install -r requirements.txt
 
       - name: Build single-file exe
         run: pyinstaller bridge.spec --noconfirm --clean
