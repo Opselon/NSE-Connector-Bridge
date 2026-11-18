@@ -136,6 +136,7 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         # account/positions batches into the engine.
         from ..server.rest import RestClient
         from ..server.sync import SyncEngine
+        from ..updates import Updater
 
         rest_client = RestClient(ctx.settings, ctx.get_or_create_device_id())
         sync_engine = SyncEngine(rest_client, ctx)
@@ -143,6 +144,9 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         ctx.sync_engine = sync_engine
         app.state.rest_client = rest_client
         app.state.sync_engine = sync_engine
+        # Phase 5 verified updater (CONTRACT v1 §3.5): check/download/
+        # stage only; install happens on restart via the staged script.
+        app.state.updater = Updater(ctx.settings, rest_client_getter=lambda: ctx.rest_client)
         pollers, stop_event = start_streaming(ctx, bus)
         channel = ServerChannel(ctx, bus, rest_client=rest_client, sync_engine=sync_engine)
         channel.start()
@@ -156,6 +160,15 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         await channel.stop()
         await sync_engine.stop_flush_loop()
         await rest_client.close()
+        # A verified staged update installs on restart: launch the
+        # staged installer detached (best-effort; it only runs when a
+        # verified update is staged AND the bridge runs frozen).
+        updater = getattr(app.state, "updater", None)
+        if updater is not None:
+            try:
+                updater.launch_restart_installer()
+            except Exception:  # noqa: BLE001, S110 — shutdown hook must never break teardown
+                pass
         stop_streaming(pollers, stop_event)
         ctx.trade_metrics.event_sink = None
         ctx.bus = None

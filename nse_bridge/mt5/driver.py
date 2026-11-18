@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import queue
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -34,35 +35,425 @@ from loguru import logger
 from ..config import BridgeSettings
 
 
-def auto_discover_terminal_path() -> str | None:
+def _env_terminal_path() -> str | None:
     env_path = os.environ.get("NSE_MT5_TERMINAL_PATH") or os.environ.get("MT5_PATH")
     if env_path and Path(env_path).is_file():
         return env_path
-    candidates = (
+    return None
+
+
+def _standard_terminal_paths() -> list[str]:
+    return [
         r"C:\Program Files\MetaTrader 5\terminal64.exe",
         r"C:\Program Files\MetaTrader 5\terminal.exe",
         r"C:\Program Files (x86)\MetaTrader 5\terminal64.exe",
         r"C:\Program Files (x86)\MetaTrader 5\terminal.exe",
-    )
-    for cand in candidates:
+    ]
+
+
+def auto_discover_terminal_path() -> str | None:
+    """First terminal found (env -> standard -> App Paths).
+
+    Kept for the connect path, which needs a single terminal. The
+    full multi-terminal enumeration is :func:`discover_terminals`.
+    """
+    env_path = _env_terminal_path()
+    if env_path:
+        return env_path
+    for cand in _standard_terminal_paths():
         if Path(cand).is_file():
             return cand
-    try:  # registry probe (App Paths)
-        import winreg
-
-        for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
-            try:
-                with winreg.OpenKey(
-                    root, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\terminal64.exe"
-                ) as key:
-                    val, _ = winreg.QueryValueEx(key, "")
-                    if val and Path(str(val)).is_file():
-                        return str(val)
-            except OSError:
-                continue
-    except Exception:  # noqa: BLE001, S110
-        pass
+    for cand in _app_paths_candidates():
+        return cand
     return None
+
+
+#: Executable names that identify an MT5 terminal.
+TERMINAL_EXE_NAMES = ("terminal64.exe", "terminal.exe")
+
+
+def _norm_path(path: str) -> str:
+    """Case-insensitive, separator-normalised path key for dedup."""
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+def _app_paths_candidates(winreg_module: Any = None) -> list[str]:
+    """Terminal paths from the Windows App Paths registry.
+
+    ``winreg_module`` injects a fake registry (unit tests). With None
+    the real ``winreg`` is imported lazily — on Linux the import fails
+    and this returns [] (no registry probe, no crash, nothing at
+    module import time).
+    """
+    if winreg_module is None:
+        try:
+            import winreg as _winreg
+        except ImportError:
+            return []
+        winreg_module = _winreg
+    found: list[str] = []
+    for exe in TERMINAL_EXE_NAMES:
+        subkey = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}"
+        for root in (winreg_module.HKEY_LOCAL_MACHINE, winreg_module.HKEY_CURRENT_USER):
+            try:
+                with winreg_module.OpenKey(root, subkey) as key:
+                    val, _ = winreg_module.QueryValueEx(key, "")
+                    if val and Path(str(val)).is_file():
+                        found.append(str(val))
+            except (OSError, AttributeError):
+                continue
+    return found
+
+
+def _custom_dir_candidates(dirs: list[str]) -> list[tuple[str, str]]:
+    """Terminal exes inside user-supplied directories.
+
+    A directory containing ``terminal64.exe``/``terminal.exe`` counts
+    as a candidate (``custom`` when it is the directory itself,
+    ``portable`` when it is an immediate subdirectory — the broker
+    portable-install layout). Missing/unreadable directories are
+    skipped silently; discovery never fails on a bad custom dir.
+    """
+    out: list[tuple[str, str]] = []
+    for d in dirs:
+        base = Path(d)
+        for exe in TERMINAL_EXE_NAMES:
+            candidate = base / exe
+            if candidate.is_file():
+                out.append((str(candidate), "custom"))
+        try:
+            subdirs = [s for s in base.iterdir() if s.is_dir()]
+        except OSError:
+            continue
+        for sub in subdirs:
+            for exe in TERMINAL_EXE_NAMES:
+                candidate = sub / exe
+                if candidate.is_file():
+                    out.append((str(candidate), "portable"))
+    return out
+
+
+def _running_terminal_paths(process_list: list[str] | None = None) -> list[str]:
+    """Exe paths of currently running MT5 terminals.
+
+    ``process_list`` injects a fake list (unit tests). With None the
+    live enumeration runs on Windows only (ctypes Toolhelp32Snapshot
+    + QueryFullProcessImageNameW, imported lazily — never at module
+    import time). On Linux this is a clearly-marked STUB that returns
+    no processes: the bridge never runs MT5 on Linux and Windows
+    process enumeration has no Linux equivalent. Enumeration failures
+    never break discovery — they degrade to an empty list.
+    """
+    if process_list is not None:
+        return [str(p) for p in process_list]
+    if sys.platform != "win32":
+        return []  # LINUX STUB: no Windows process enumeration here.
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        TH32CS_SNAPPROCESS = 0x00000002
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_void_p),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        def image_path(pid: int) -> str | None:
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return None
+            try:
+                buf = ctypes.create_unicode_buffer(1024)
+                size = wintypes.DWORD(1024)
+                if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                    return buf.value
+                return None
+            finally:
+                kernel32.CloseHandle(handle)
+
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snapshot == wintypes.HANDLE(-1).value:
+            return []
+        paths: list[str] = []
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            while ok:
+                if entry.szExeFile.lower() in TERMINAL_EXE_NAMES:
+                    path = image_path(entry.th32ProcessID)
+                    if path:
+                        paths.append(path)
+                ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snapshot)
+        return paths
+    except Exception:  # noqa: BLE001 — process enumeration must never break discovery
+        return []
+
+
+def _file_version_windows(path: str) -> str | None:
+    """FileVersion via version.dll (Windows only)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        version = ctypes.WinDLL("version", use_last_error=True)
+        size = version.GetFileVersionInfoSizeW(path, None)
+        if not size:
+            return None
+        buf = ctypes.create_string_buffer(size)
+        if not version.GetFileVersionInfoW(path, 0, size, buf):
+            return None
+        ptr = wintypes.LPVOID()
+        length = wintypes.UINT()
+        if not version.VerQueryValueW(buf, "\\", ctypes.byref(ptr), ctypes.byref(length)):
+            return None
+        fixed = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint32))
+        if fixed[0] != 0xFEEF04BD:  # VS_FIXEDFILEINFO signature
+            return None
+        ms, ls = fixed[2], fixed[3]
+        return f"{ms >> 16}.{ms & 0xFFFF}.{ls >> 16}.{ls & 0xFFFF}"
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _pe_file_version(path: str) -> str | None:
+    """Best-effort FileVersion from a PE file's version resource.
+
+    Pure-Python parser (works on Linux against a real terminal64.exe):
+    DOS header -> PE header -> section table -> resource directory
+    (RT_VERSION=16) -> VS_VERSION_INFO -> VS_FIXEDFILEINFO. Any parse
+    failure returns None — a missing version is reported, never guessed.
+    """
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return None
+    try:
+        if len(data) < 0x40 or data[:2] != b"MZ":
+            return None
+        e_lfanew = int.from_bytes(data[0x3C:0x40], "little")
+        if data[e_lfanew:e_lfanew + 4] != b"PE\0\0":
+            return None
+        coff = e_lfanew + 4
+        num_sections = int.from_bytes(data[coff + 2:coff + 4], "little")
+        opt_size = int.from_bytes(data[coff + 16:coff + 18], "little")
+        opt = coff + 20
+        magic = int.from_bytes(data[opt:opt + 2], "little")
+        if magic == 0x10B:  # PE32
+            dd_base = opt + 96
+        elif magic == 0x20B:  # PE32+
+            dd_base = opt + 112
+        else:
+            return None
+        rsrc_rva = int.from_bytes(data[dd_base + 16:dd_base + 20], "little")
+        rsrc_size = int.from_bytes(data[dd_base + 20:dd_base + 24], "little")
+        if not rsrc_rva or not rsrc_size:
+            return None
+        sections: list[tuple[int, int, int]] = []
+        sec_base = opt + opt_size
+        for i in range(num_sections):
+            off = sec_base + i * 40
+            va = int.from_bytes(data[off + 12:off + 16], "little")
+            raw_size = int.from_bytes(data[off + 16:off + 20], "little")
+            raw_ptr = int.from_bytes(data[off + 20:off + 24], "little")
+            sections.append((va, raw_size, raw_ptr))
+
+        def rva_to_off(rva: int) -> int | None:
+            for va, raw_size, raw_ptr in sections:
+                if va <= rva < va + max(raw_size, 1):
+                    return raw_ptr + (rva - va)
+            return None
+
+        def read_dir(off: int) -> list[tuple[int, int, bool]]:
+            if off + 16 > len(data):
+                return []
+            named = int.from_bytes(data[off + 12:off + 14], "little")
+            ids = int.from_bytes(data[off + 14:off + 16], "little")
+            entries = []
+            for i in range(named + ids):
+                eoff = off + 16 + i * 8
+                if eoff + 8 > len(data):
+                    break
+                name = int.from_bytes(data[eoff:eoff + 4], "little")
+                target = int.from_bytes(data[eoff + 4:eoff + 8], "little")
+                entries.append((name, target & 0x7FFFFFFF, bool(target & 0x80000000)))
+            return entries
+
+        def resolve_subdir(dir_off: int, want_id: int) -> int | None:
+            for name, target, is_dir in read_dir(dir_off):
+                if is_dir and not (name & 0x80000000) and (name & 0xFFFF) == want_id:
+                    return rva_to_off(target)
+            return None
+
+        def resolve_data(dir_off: int) -> int | None:
+            # Language leaf: any language accepted; the entry points at
+            # an IMAGE_RESOURCE_DATA_ENTRY (data RVA + size).
+            for _name, target, is_dir in read_dir(dir_off):
+                if is_dir:
+                    continue
+                entry_off = rva_to_off(target)
+                if entry_off is None or entry_off + 8 > len(data):
+                    continue
+                data_rva = int.from_bytes(data[entry_off:entry_off + 4], "little")
+                return rva_to_off(data_rva)
+            return None
+
+        root_off = rva_to_off(rsrc_rva)
+        if root_off is None:
+            return None
+        type_off = resolve_subdir(root_off, 16)  # RT_VERSION
+        if type_off is None:
+            return None
+        name_off = resolve_subdir(type_off, 1)  # VS_VERSION_INFO id
+        if name_off is None:
+            return None
+        blob_off = resolve_data(name_off)
+        if blob_off is None or blob_off + 58 > len(data):
+            return None
+        key = data[blob_off + 6:blob_off + 38].decode("utf-16-le", errors="ignore")
+        if "VS_VERSION_INFO" not in key:
+            return None
+        # VS_FIXEDFILEINFO follows the key, DWORD-aligned relative to
+        # the start of the VS_VERSION_INFO structure.
+        val_off = blob_off + 6 + 32
+        val_off += (4 - ((val_off - blob_off) % 4)) % 4
+        fixed = data[val_off:val_off + 52]
+        if len(fixed) < 52:
+            return None
+        if int.from_bytes(fixed[0:4], "little") != 0xFEEF04BD:
+            return None
+        ms = int.from_bytes(fixed[8:12], "little")
+        ls = int.from_bytes(fixed[12:16], "little")
+        return f"{ms >> 16}.{ms & 0xFFFF}.{ls >> 16}.{ls & 0xFFFF}"
+    except (IndexError, ValueError, OverflowError):
+        return None
+
+
+def _terminal_version(path: str) -> str | None:
+    """FileVersion of a terminal exe, or None when undetectable.
+
+    Windows: version.dll first, PE-resource parser as fallback.
+    Linux: the pure-Python PE parser (works on a real terminal64.exe).
+    """
+    if sys.platform == "win32":
+        ver = _file_version_windows(path)
+        if ver:
+            return ver
+    return _pe_file_version(path)
+
+
+@dataclass
+class TerminalInfo:
+    """One discovered MT5 terminal candidate."""
+
+    path: str
+    version: str | None = None
+    running: bool = False
+    source: str = "discovered"  # configured | env | standard | registry | custom | portable | running
+    exists: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "version": self.version,
+            "running": self.running,
+            "source": self.source,
+            "exists": self.exists,
+        }
+
+
+def discover_terminals(
+    settings: BridgeSettings | None = None,
+    *,
+    extra_dirs: list[str] | None = None,
+    running_paths: list[str] | None = None,
+    winreg_module: Any = None,
+    version_fn: Callable[[str], str | None] | None = None,
+) -> list[TerminalInfo]:
+    """Enumerate ALL MT5 terminal candidates (Phase 5).
+
+    Sources, in order: configured path (``settings.mt5_terminal_path``),
+    ``NSE_MT5_TERMINAL_PATH``/``MT5_PATH`` env, standard install
+    locations, App Paths registry (Windows; guarded — no winreg import
+    at module load, returns nothing on Linux), custom directories
+    (``settings.mt5_custom_terminal_dirs`` + ``extra_dirs``; a
+    directory containing terminal64.exe counts, including immediate
+    subdirectories for portable installs), running terminal processes
+    (Windows process list; Linux stub returns none).
+
+    Discovery only READS — it never writes or overwrites the user's
+    terminal configuration; selection stays user-driven (PUT /settings
+    ``mt5_terminal_path``). ``running_paths`` / ``winreg_module`` /
+    ``version_fn`` inject fakes for unit tests. Safe on Linux: no
+    Windows registry/process API is touched at import time or when the
+    platform is not Windows.
+    """
+    version_fn = version_fn or _terminal_version
+    found: dict[str, TerminalInfo] = {}
+
+    def add(path: str, source: str) -> None:
+        if not path:
+            return
+        key = _norm_path(path)
+        if key in found:
+            return
+        exists = Path(path).is_file()
+        found[key] = TerminalInfo(
+            path=str(path),
+            version=version_fn(str(path)) if exists else None,
+            running=False,
+            source=source,
+            exists=exists,
+        )
+
+    if settings is not None and (settings.mt5_terminal_path or "").strip():
+        add(settings.mt5_terminal_path.strip(), "configured")
+    env_path = _env_terminal_path()
+    if env_path:
+        add(env_path, "env")
+    for cand in _standard_terminal_paths():
+        if Path(cand).is_file():
+            add(cand, "standard")
+    for cand in _app_paths_candidates(winreg_module):
+        add(cand, "registry")
+    dirs: list[str] = []
+    if settings is not None:
+        dirs += [d.strip() for d in (settings.mt5_custom_terminal_dirs or "").split(",") if d.strip()]
+    if extra_dirs:
+        dirs += list(extra_dirs)
+    for cand, source in _custom_dir_candidates(dirs):
+        add(cand, source)
+    running = _running_terminal_paths(running_paths)
+    running_norm = {_norm_path(p): p for p in running}
+    for key, info in found.items():
+        if key in running_norm:
+            info.running = True
+    for norm, original in running_norm.items():
+        if norm not in found:
+            # A running terminal no other source found — still a candidate.
+            exists = Path(original).is_file()
+            found[norm] = TerminalInfo(
+                path=str(original),
+                version=version_fn(str(original)) if exists else None,
+                running=True,
+                source="running",
+                exists=exists,
+            )
+    return list(found.values())
 
 
 CONNECTION_STATES = (

@@ -234,8 +234,8 @@ form.settings{max-width:640px}
       </div>
       <div class="card">
         <h2>Detected Terminals</h2>
-        <table><thead><tr><th>Path</th><th>Source</th><th>Exists</th><th>Selected</th><th></th></tr></thead>
-        <tbody id="mtTerms"><tr><td colspan="5" class="empty">—</td></tr></tbody></table>
+        <table><thead><tr><th>Path</th><th>Source</th><th>Exists</th><th>Version</th><th>Running</th><th>Selected</th><th></th></tr></thead>
+        <tbody id="mtTerms"><tr><td colspan="7" class="empty">—</td></tr></tbody></table>
       </div>
       <div class="actions">
         <button class="btn" id="btnMtConnect">Connect</button>
@@ -340,6 +340,7 @@ form.settings{max-width:640px}
           <div class="kv"><span class="k">Latest stable version</span><span class="v" id="upLatest">—</span></div>
           <div class="kv"><span class="k">Update status</span><span class="v" id="upStatus">—</span></div>
           <div class="kv"><span class="k">Details</span><span class="v" id="upDetail">—</span></div>
+          <div class="kv"><span class="k">Staged update</span><span class="v" id="upStaged">—</span></div>
         </div>
         <div class="card">
           <h2>Latest Release</h2>
@@ -353,10 +354,12 @@ form.settings{max-width:640px}
       </div>
       <div class="actions">
         <button class="btn" id="btnUpCheck">Check for updates</button>
+        <button class="btn ghost" id="btnUpDownload">Download update</button>
         <span class="statusline" id="upMsg"></span>
       </div>
-      <p class="note">Download and install arrive with the updater (a later phase). Updates install
-        on restart, after SHA-256 and signature verification — no restart is needed for this check.</p>
+      <p class="note">Verified updates download here and install on restart, after SHA-256 and
+        Ed25519 signature verification. A release with no signature, no public key configured,
+        or a failed verification is never installed.</p>
     </section>
 
     <!-- ================= SETTINGS ================= -->
@@ -580,10 +583,12 @@ async function loadMetatrader(){
   const rows = (terms.terminals || []).map(t => `<tr>
     <td>${esc(t.path)}</td><td>${esc(t.source)}</td>
     <td>${t.exists ? '<span class="badge ok">found</span>' : '<span class="badge bad">missing</span>'}</td>
+    <td>${esc(t.version || '—')}</td>
+    <td>${t.running ? '<span class="badge ok">running</span>' : '—'}</td>
     <td>${t.selected ? '<span class="badge ok">selected</span>' : ''}</td>
     <td>${t.selected ? '' : `<button class="btn small ghost" data-select-term="${esc(t.path)}">Select</button>`}</td>
   </tr>`).join('');
-  $('mtTerms').innerHTML = rows || '<tr><td colspan="5" class="empty">No terminal found on this machine.</td></tr>';
+  $('mtTerms').innerHTML = rows || '<tr><td colspan="7" class="empty">No terminal found on this machine.</td></tr>';
   $('mtTerms').querySelectorAll('[data-select-term]').forEach(b => b.onclick = async () => {
     try {
       await api('/api/v1/settings', {method: 'PUT', body: {mt5_terminal_path: b.dataset.selectTerm}});
@@ -742,11 +747,25 @@ async function loadUpdates(){
   $('upMin').textContent = latest.min_connector_version || '—';
   $('upSig').textContent = latest.signature_present ? 'Yes' : '—';
   $('upNotes').textContent = 'No release notes in the releases/latest response.';
+  try {
+    const st = await api('/api/v1/updates/status');
+    $('upStaged').textContent = st.staged_version
+      ? (st.staged_version + (st.restart_required ? ' — installs on restart' : ''))
+      : '—';
+  } catch(e){ /* updater status is best-effort here */ }
 }
 $('btnUpCheck').onclick = async () => {
   setMsg('upMsg', 'checking…');
   try { await loadUpdates(); setMsg('upMsg', 'check complete', 'up'); }
   catch(e){ setMsg('upMsg', 'check failed: ' + e.message, 'down'); }
+};
+$('btnUpDownload').onclick = async () => {
+  setMsg('upMsg', 'downloading and verifying…');
+  try {
+    const r = await post('/api/v1/updates/download');
+    setMsg('upMsg', r.detail || r.state, r.state === 'staged' ? 'up' : 'down');
+    await loadUpdates();
+  } catch(e){ setMsg('upMsg', 'download failed: ' + e.message, 'down'); }
 };
 
 /* ---------- Settings ---------- */

@@ -145,6 +145,12 @@ class BridgeSettings(BaseSettings):
 
     # --- MetaTrader 5 -------------------------------------------------
     mt5_terminal_path: str = ""  # auto-discovered when empty
+    # Comma-separated extra directories searched for terminals
+    # (custom + portable installs: a directory containing terminal64.exe
+    # counts as a candidate; immediate subdirectories are scanned too).
+    # Env: NSE_BRIDGE_MT5_CUSTOM_TERMINAL_DIRS. Discovery only reads —
+    # it never overwrites the configured mt5_terminal_path.
+    mt5_custom_terminal_dirs: str = ""
     mt5_login: int | None = None  # optional explicit login (fail-safe check only)
     # NOTE: there is deliberately NO mt5_password field. The user signs in
     # through MT5 itself; the bridge never asks for or stores the password.
@@ -152,6 +158,16 @@ class BridgeSettings(BaseSettings):
     mt5_timeout_ms: int = 5000
     mt5_retries: int = 3
     broker_utc_offset_minutes: int = 0  # broker server UTC offset (some brokers deviate)
+
+    # --- updates (CONTRACT v1 §3.5; verified updater, Phase 5) --------
+    # Base64 raw Ed25519 public key (32 bytes) that verifies release
+    # signatures. Env: NSE_BRIDGE_UPDATE_PUBLIC_KEY. This is PUBLIC
+    # key material (safe to store in config.json) — but there is NO
+    # default: the real NSE release-signing key has to be provisioned
+    # by the operator (env var, config.json, or a bundled
+    # nse_bridge/update_public_key.b64 file). With no key configured
+    # the updater REFUSES to install anything (signature unverifiable).
+    update_public_key: str = ""
 
     # --- trading identity ----------------------------------------------
     # No hardcoded trading identity. The Bridge stamps NO magic on an
@@ -270,6 +286,8 @@ def persist_settings(settings: BridgeSettings) -> None:
         "magic",
         "bot_symbol",
         "mt5_terminal_path",
+        "mt5_custom_terminal_dirs",
+        "update_public_key",
         "mt5_login",
         "mt5_server",
         "log_level",

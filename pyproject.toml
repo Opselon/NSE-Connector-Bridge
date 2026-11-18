@@ -10,6 +10,8 @@ dependencies = [
     "pydantic-settings==2.16.3",
     "websockets==17.4",
     "httpx==0.28.1",
+    # Ed25519 release-signature verification for the Phase 5 updater.
+    "cryptography==50.0.2",
     "loguru==0.8.0",
     "numpy==2.5.5",
     "pywebview==6.2.1",

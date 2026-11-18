@@ -24,6 +24,7 @@ from ..errors import BridgeError, ErrorCode
 from ..logging_setup import redact_text
 from ..secrets import get_secret_store
 from ..server.errors import ServerError
+from ..updates import Updater
 
 router = APIRouter(prefix="/api/v1", tags=["system"])
 
@@ -445,29 +446,38 @@ def _terminal_build(pkg_version: str | None) -> int | None:
 def _discover_terminals(ctx: BridgeContext) -> dict[str, Any]:
     """Configured + auto-discovered terminal paths (deduped).
 
-    Discovery reuses the driver's ``auto_discover_terminal_path``
-    (standard install locations, App Paths registry,
-    NSE_MT5_TERMINAL_PATH). Multi-terminal selection UI arrives with
-    Phase 5; this endpoint already reports every candidate it knows.
+    Discovery reuses the driver's multi-terminal enumeration
+    (Phase 5): configured path, env var, standard install locations,
+    App Paths registry, custom/portable directories, running processes
+    — each with version + running status. Selection stays user-driven:
+    ``selected`` marks the effective path (configured wins, else the
+    first discovered); discovery never overwrites configuration.
     """
-    from ..mt5.driver import auto_discover_terminal_path
+    from ..mt5.driver import discover_terminals
 
     configured = (ctx.settings.mt5_terminal_path or "").strip()
-    discovered = auto_discover_terminal_path()
-    effective = configured or discovered or ""
+    discovered = discover_terminals(ctx.settings)
+    effective = configured or (discovered[0].path if discovered else "") or ""
     terminals: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for path, source in ((configured, "configured"), (discovered, "discovered")):
-        if path and path not in seen:
-            seen.add(path)
-            terminals.append(
-                {
-                    "path": path,
-                    "exists": Path(path).is_file(),
-                    "source": source,
-                    "selected": path == effective,
-                }
-            )
+    for info in discovered:
+        item = info.to_dict()
+        item["selected"] = info.path == effective
+        terminals.append(item)
+        seen.add(info.path)
+    if configured and configured not in seen:
+        # Configured path discovery did not report (defensive: the
+        # driver always includes it) — still reported, never dropped.
+        terminals.append(
+            {
+                "path": configured,
+                "version": None,
+                "running": False,
+                "source": "configured",
+                "exists": Path(configured).is_file(),
+                "selected": True,
+            }
+        )
     return {
         "terminals": terminals,
         "selected_path": effective or None,
@@ -689,11 +699,48 @@ async def get_updates_latest(request: Request) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Updates & Releases — verified updater (Phase 5)
+# ---------------------------------------------------------------------------
+def _get_updater(request: Request) -> Updater:
+    """Updater instance for this app (created lazily; the lifespan also creates one)."""
+    updater = getattr(request.app.state, "updater", None)
+    if updater is None:
+        ctx: BridgeContext = request.app.state.ctx
+        updater = Updater(ctx.settings, rest_client_getter=lambda: ctx.rest_client)
+        request.app.state.updater = updater
+    return updater
+
+
+@router.get("/updates/status", summary="Verified updater status",
+    description="Current updater state: check result, staged (verified) update, "
+    "restart requirement, and whether an update public key is configured. Pollable by the GUI.")
+async def get_updates_status(request: Request) -> dict[str, Any]:
+    return {"ok": True, "data": _get_updater(request).status()}
+
+
+@router.post("/updates/check", summary="Check for updates (CONTRACT v1 §3.5 releases/latest)",
+    description="Polls releases/latest through the REST client. Reports availability or "
+    "incompatibility (min_connector_version). Never downloads anything.")
+async def post_updates_check(request: Request) -> dict[str, Any]:
+    return {"ok": True, "data": await _get_updater(request).check()}
+
+
+@router.post("/updates/download", summary="Download + verify + stage the latest release",
+    description="Downloads the release artifact, verifies SHA-256 AND the Ed25519 signature, "
+    "then stages it for install on restart. Refuses with a structured error (nothing staged) "
+    "when no public key is configured, the signature/SHA-256 is missing, verification fails, "
+    "or min_connector_version is not satisfied. Never executes the downloaded bytes.")
+async def post_updates_download(request: Request) -> dict[str, Any]:
+    return {"ok": True, "data": await _get_updater(request).download()}
+
+
+# ---------------------------------------------------------------------------
 # MetaTrader terminals (discovery + open)
 # ---------------------------------------------------------------------------
 @router.get("/mt5/terminals", summary="Detected MetaTrader 5 terminals",
-    description="Configured path + auto-discovered path (standard install locations, App Paths "
-    "registry, NSE_MT5_TERMINAL_PATH). Multi-terminal discovery UI arrives with Phase 5.")
+    description="All discovered terminals (Phase 5): configured path, env var, standard install "
+    "locations, App Paths registry, custom/portable directories, running processes — each with "
+    "version + running status. Selection stays user-driven (PUT /settings mt5_terminal_path).")
 async def list_mt5_terminals(request: Request) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
     state = ctx.driver.connection_state_dict()
