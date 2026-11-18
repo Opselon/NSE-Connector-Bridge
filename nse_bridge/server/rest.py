@@ -170,6 +170,7 @@ class RestClient:
         max_retries: int = 3,
         retry_base_s: float = 0.5,
         sleep: Callable[[float], Awaitable[None]] | None = None,
+        enrolment: Any | None = None,
     ) -> None:
         validate_server_base_url(settings.server_base_url, environment=settings.environment)
         self.settings = settings
@@ -181,6 +182,12 @@ class RestClient:
         self._sleep = sleep or asyncio.sleep
         self._transport = transport
         self._client: httpx.AsyncClient | None = None
+        # Enrolment state machine (nse_bridge.server.enrolment), wired
+        # at app startup. When set, a 401 re-enrolment notifies it so
+        # the state (REGISTERED / FAILED_AUTH / FAILED_TRANSIENT) stays
+        # truthful; the re-enrolment itself still happens here (§3.2).
+        # Duck-typed (note_reauth_*) to avoid a server↔rest import cycle.
+        self.enrolment = enrolment
         # Server-resolved state (populated by validate_key / register_device).
         self.user_id: str | None = None
         self.entitlements = Entitlements()
@@ -281,7 +288,16 @@ class RestClient:
                     "[REST] 401 on {} — re-enrolling this device (recovery path §3.2)",
                     path,
                 )
-                await self.register_device()  # raises if the key itself is bad
+                if self.enrolment is not None:
+                    self.enrolment.note_reauth_start()
+                    try:
+                        await self.register_device()  # raises if the key itself is bad
+                    except ServerError as exc:
+                        self.enrolment.note_reauth_failed(exc)
+                        raise
+                    self.enrolment.note_reauth_succeeded()
+                else:
+                    await self.register_device()  # raises if the key itself is bad
                 return await self._request(method, path, json_body, allow_reauth=False, _reattempted=True)
             if response.status_code in (429,) or response.status_code >= 500:
                 err = parse_error_response(

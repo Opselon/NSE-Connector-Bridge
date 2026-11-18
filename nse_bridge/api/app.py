@@ -134,6 +134,7 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         # CONTRACT v1 §3: REST client + sync engine (the ONLY sync
         # channel). The server channel reuses them; the pollers enqueue
         # account/positions batches into the engine.
+        from ..server.enrolment import EnrolmentManager
         from ..server.rest import RestClient
         from ..server.sync import SyncEngine
         from ..updates import Updater
@@ -144,11 +145,23 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         ctx.sync_engine = sync_engine
         app.state.rest_client = rest_client
         app.state.sync_engine = sync_engine
+        # Enrolment at startup (§3.1/§3.2, §5.1): validate-key →
+        # register-device runs in a BACKGROUND task — app start never
+        # blocks on the Platform, and the local GUI + MT5 keep working
+        # while the Platform is down. The WS channel gates on it.
+        enrolment = EnrolmentManager(ctx, rest_client)
+        rest_client.enrolment = enrolment
+        ctx.enrolment = enrolment
+        app.state.enrolment = enrolment
+        enrolment_stop = asyncio.Event()
+        app.state.enrolment_stop = enrolment_stop
+        enrolment_task = asyncio.create_task(enrolment.run(enrolment_stop), name="nse-enrolment")
+        app.state.enrolment_task = enrolment_task
         # Phase 5 verified updater (CONTRACT v1 §3.5): check/download/
         # stage only; install happens on restart via the staged script.
         app.state.updater = Updater(ctx.settings, rest_client_getter=lambda: ctx.rest_client)
         pollers, stop_event = start_streaming(ctx, bus)
-        channel = ServerChannel(ctx, bus, rest_client=rest_client, sync_engine=sync_engine)
+        channel = ServerChannel(ctx, bus, rest_client=rest_client, sync_engine=sync_engine, enrolment=enrolment)
         channel.start()
         app.state.channel = channel
         ctx.bus = bus
@@ -158,6 +171,15 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         logger.info("[APP] realtime streaming started (server_channel={})", bool(ctx.settings.server_url))
         yield
         await channel.stop()
+        enrolment_stop.set()
+        try:
+            await asyncio.wait_for(enrolment_task, timeout=5.0)
+        except (TimeoutError, asyncio.CancelledError):
+            enrolment_task.cancel()
+            try:
+                await enrolment_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001, S110 — shutdown must never raise
+                pass
         await sync_engine.stop_flush_loop()
         await rest_client.close()
         # A verified staged update installs on restart: launch the
@@ -174,6 +196,7 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         ctx.bus = None
         ctx.rest_client = None
         ctx.sync_engine = None
+        ctx.enrolment = None
         logger.info("[APP] realtime streaming stopped")
 
     app = FastAPI(

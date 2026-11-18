@@ -171,6 +171,7 @@ class BridgeContext:
     bus: Any = None  # EventBus, wired at app startup (loop-bound; set once)
     rest_client: Any = None  # RestClient (CONTRACT v1 §3), wired at app startup
     sync_engine: Any = None  # SyncEngine (CONTRACT v1 §3.3), wired at app startup
+    enrolment: Any = None  # EnrolmentManager (CONTRACT v1 §3.1/§3.2), wired at app startup
     # Last validate-key snapshot (CONTRACT v1 §3.1), stored by the GUI
     # refresh action (POST /api/v1/account/validate-key) from the Phase 2
     # REST client. Server-resolved only (user_id, subscription,
@@ -186,6 +187,27 @@ class BridgeContext:
     @property
     def uptime_s(self) -> float:
         return time.time() - self.started_at
+
+    def enrolment_status(self) -> dict[str, Any]:
+        """Current enrolment state + last error + session expiry, for
+        the GUI Connection screen and the diagnostics summary (§3.1/§3.2).
+
+        Delegates to the EnrolmentManager when wired (app startup);
+        before that, reports honestly as not_configured.
+        """
+        manager = self.enrolment
+        if manager is not None:
+            return manager.to_dict()
+        rest = self.rest_client
+        return {
+            "state": "not_configured",
+            "configured": bool(self.settings.server_token),
+            "last_error": None,
+            "last_error_message": None,
+            "attempts": 0,
+            "session_expires_at": getattr(rest, "session_expires_at", None),
+            "user_id": getattr(rest, "user_id", None),
+        }
 
     def get_or_create_device_id(self) -> str:
         if self.device_id:

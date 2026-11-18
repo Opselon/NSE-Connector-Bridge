@@ -6,6 +6,10 @@ Implements the contract-conformant channel to NSE Platform:
   ``validate-key``, ``register-device``, ``sync/batch`` (the ONLY sync
   channel), REST ``heartbeat``, ``session/refresh`` + ``session/revoke``,
   ``releases/latest``, ``manifest`` (§4.1, [client-v1.1]).
+- :mod:`nse_bridge.server.enrolment` — enrolment state machine
+  (contract §3.1/§3.2, §5.1): validate-key → register-device at
+  startup (background task), re-enrolment after a 401, FAILED_AUTH is
+  terminal for the key; the WS channel gates on REGISTERED.
 - :mod:`nse_bridge.server.sync` — sync engine: flat batch wire shape,
   checkpoint (max broker time, never backwards), bounded pending queue
   (32), 500-item pages with a 250 ms pause (§3.3).
@@ -30,6 +34,7 @@ from __future__ import annotations
 __all__ = [
     "chart",
     "commands",
+    "enrolment",
     "errors",
     "manifest",
     "queue",

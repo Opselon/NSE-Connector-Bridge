@@ -292,8 +292,17 @@ class SyncEngine:
         Stops at the first failure, keeping the rest queued. Returns
         ``(sent, failed)``. A 401/403 stops sync immediately (§3.1) —
         the REST client already refuses to retry those with the same
-        key; the caller surfaces the distinct user-facing state.
+        key; the caller surfaces the distinct user-facing state. When
+        enrolment is FAILED_AUTH (terminal for this key) nothing is
+        sent at all — batches stay queued, unacked, for a future key.
         """
+        enrolment = getattr(self.ctx, "enrolment", None) if self.ctx is not None else None
+        if enrolment is not None and enrolment.to_dict().get("state") == "failed_auth":
+            logger.debug(
+                "[SYNC] enrolment failed_auth — sync stopped, keeping {} batches queued (§3.1)",
+                self.pending_count(),
+            )
+            return 0, 0
         sent = failed = 0
         async with self._flush_lock:
             batches: list[dict[str, Any]] = []

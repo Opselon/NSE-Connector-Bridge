@@ -69,6 +69,7 @@ class MockServerState:
     results: list[dict[str, Any]] = field(default_factory=list)
     chart_frames_received: list[dict[str, Any]] = field(default_factory=list)
     heartbeats_received: int = 0
+    rest_heartbeats_received: int = 0  # POST /api/v1/connector/heartbeat (§3.4)
     ws_connections: int = 0
     commands_sent: list[dict[str, Any]] = field(default_factory=list)
     subscriptions: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -208,6 +209,8 @@ def make_rest_handler(state: MockServerState):
                 state.record_batch(body)
                 self._send(200, {"accepted": True, "batch_id": body.get("batch_id")})
             elif path == "/api/v1/connector/heartbeat":
+                with state._lock:
+                    state.rest_heartbeats_received += 1
                 self._send(200, {
                     "ok": True, "server_time": _now_iso(),
                     "pending_commands": state.pending_commands,

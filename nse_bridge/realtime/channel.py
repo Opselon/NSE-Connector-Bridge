@@ -206,6 +206,7 @@ class ServerChannel:
         sync_engine: SyncEngine | None = None,
         chart_service: ChartService | None = None,
         executor: CommandExecutor | None = None,
+        enrolment: Any | None = None,
         dead_after_s: float = HEARTBEAT_DEAD_S,
     ) -> None:
         self.ctx = ctx
@@ -224,6 +225,12 @@ class ServerChannel:
         self._sync = sync_engine
         self._chart = chart_service
         self._executor = executor
+        # Enrolment state machine (§5.1: device enrolled first via
+        # REST — the channel must not open the WS until REGISTERED).
+        # Falls back to ctx.enrolment when not injected (app startup
+        # wires it on the context); None = ungated (legacy callers).
+        self._enrolment = enrolment if enrolment is not None else getattr(ctx, "enrolment", None)
+        self._rest_heartbeat_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     @property
@@ -249,8 +256,12 @@ class ServerChannel:
         """Build the REST/sync/chart/command components (unless injected)."""
         device_id = self._device_id()
         if self._rest is None:
-            self._rest = RestClient(self.ctx.settings, device_id)
+            self._rest = RestClient(self.ctx.settings, device_id, enrolment=self._enrolment)
             self.ctx.rest_client = self._rest
+        elif self._enrolment is not None and getattr(self._rest, "enrolment", None) is None:
+            # Injected REST client (app lifespan) — attach the state
+            # machine so 401 re-enrolments are reflected in it (§3.2).
+            self._rest.enrolment = self._enrolment
         if self._sync is None:
             self._sync = SyncEngine(self._rest, self.ctx)
             self.ctx.sync_engine = self._sync
@@ -292,13 +303,64 @@ class ServerChannel:
         self._ensure_components()
         self._stop.clear()
         self._task = asyncio.create_task(self._run(), name="nse-server-channel")
+        self._start_rest_heartbeat()
         state = self.ctx.server_channel_state
         state["enabled"] = True
         state["url"] = url
 
+    def _start_rest_heartbeat(self) -> None:
+        """Start the REST heartbeat loop (§3.4), if not already running."""
+        if self._rest_heartbeat_task is not None and not self._rest_heartbeat_task.done():
+            return
+        self._rest_heartbeat_task = asyncio.create_task(
+            self._rest_heartbeat_loop(), name="nse-rest-heartbeat"
+        )
+
+    async def _rest_heartbeat_loop(self) -> None:
+        """REST heartbeat (§3.4) as the keep-alive when the WS is down.
+
+        NOT a WS heartbeat substitute: it only proves REST reachability
+        and reports ``pending_commands``. It never runs unconfigured or
+        after a terminal auth failure (FAILED_AUTH — the key is dead,
+        heartbeat would just 401). While enrolment is retrying it keeps
+        running, so the server still sees liveness. If
+        ``pending_commands > 0`` and no WS is live, the ``_run`` loop
+        is already (re)connecting once enrolled — nothing extra to do
+        here. A 401 here re-enrols through the REST client (§3.2).
+        """
+        interval = max(1.0, self.ctx.settings.heartbeat_interval_s)
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+            except TimeoutError:
+                pass
+            if self._stop.is_set():
+                return
+            if (
+                self._enrolment is not None
+                and self._enrolment.to_dict()["state"] in ("not_configured", "failed_auth")
+            ):
+                continue
+            rest = self._rest
+            if rest is None or not self.ctx.settings.server_token:
+                continue
+            try:
+                result = await rest.heartbeat()
+            except Exception as exc:  # noqa: BLE001 — a failed heartbeat never kills the loop
+                logger.debug("[CHANNEL] REST heartbeat failed: {}", type(exc).__name__)
+                continue
+            logger.debug("[CHANNEL] REST heartbeat ok (pending_commands={})", result.pending_commands)
+
     async def stop(self) -> None:
         """Clean shutdown (§5.4: close() frame; the supervisor exits)."""
         self._stop.set()
+        heartbeat_task, self._rest_heartbeat_task = self._rest_heartbeat_task, None
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 — shutdown must never raise
+                logger.debug("[CHANNEL] REST heartbeat task await during stop failed: {}", type(exc).__name__)
         ws, self._ws = self._ws, None
         if ws is not None:
             try:
@@ -326,6 +388,23 @@ class ServerChannel:
         url = self.ctx.settings.resolved_server_ws_url
         attempt = 0
         while not self._stop.is_set():
+            # §5.1 gate: identity is established by the prior
+            # register-device call — never open the WS before the
+            # device is REGISTERED. While enrolment is still retrying
+            # this waits; on FAILED_AUTH the channel stays down with
+            # the reason exposed (no retry with the same key, §3.1).
+            if self._enrolment is not None:
+                enrolled = await self._enrolment.wait_until_registered(self._stop)
+                if not enrolled:
+                    state = self.ctx.server_channel_state
+                    state["connected"] = False
+                    status = self._enrolment.to_dict()
+                    state["last_error"] = (
+                        f"enrolment {status['state']}"
+                        + (f": {status['last_error']}" if status.get("last_error") else "")
+                    )
+                    logger.error("[CHANNEL] not connecting — {}", state["last_error"])
+                    return
             try:
                 logger.info("[CHANNEL] connecting to {}", url)
                 import websockets  # lazy import keeps startup fast

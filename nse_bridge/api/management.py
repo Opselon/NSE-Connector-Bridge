@@ -157,6 +157,14 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict[str,
 
     restarted = False
     if channel_needs_restart:
+        # A new API key invalidates the old key's terminal enrolment
+        # state (FAILED_AUTH is terminal for the OLD key only) — reset
+        # the state machine first so it re-enrols with the new key,
+        # then restart the channel (it gates on REGISTERED).
+        if "server_token" in changed:
+            enrolment = getattr(request.app.state, "enrolment", None)
+            if enrolment is not None:
+                enrolment.reset_for_new_key()
         channel = getattr(request.app.state, "channel", None)
         if channel is not None:
             await channel.stop()
@@ -849,6 +857,7 @@ async def diagnostics_summary(request: Request) -> dict[str, Any]:
             "terminals": terminals,
             "network": network,
             "websocket": channel,
+            "enrolment": ctx.enrolment_status(),
             "sync": sync,
             "last_errors": ctx.logs.tail(20, "ERROR"),
             "driver_last_error": state.get("last_error"),
