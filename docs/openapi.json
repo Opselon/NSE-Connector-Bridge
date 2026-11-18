@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "NSE MT5 Bridge API",
-    "description": "**NSE Platform secure local bridge** — one endpoint per command. The bridge attaches to the client's local MetaTrader 5 terminal through the official native C++ IPC driver and exposes exactly the 90 NSE bridge commands documented below. All endpoints are uniform `POST` JSON calls returning `{ok, data}` envelopes; broker rejections carry the official MT5 retcode.\n\n*Security:* bind is localhost-only by default; a mandatory `X-API-Key` gate protects every /api/v1/ endpoint (auto-generated on first run, stored in the OS secret store); the platform talks to this bridge over an outbound-authenticated WebSocket channel (no inbound ports).\n\n*Real-time:* `/ws/ui` streams ticks + account updates to the local dashboard.",
+    "description": "**NSE Platform secure local bridge** — one endpoint per command. The bridge attaches to the client's local MetaTrader 5 terminal through the official native C++ IPC driver and exposes exactly the 90 NSE bridge commands documented below. All endpoints are uniform `POST` JSON calls returning `{ok, data}` envelopes; broker rejections carry the official MT5 retcode.\n\n*Security:* bind is localhost-only by default; a mandatory `X-API-Key` gate protects every /api/v1/ endpoint (auto-generated on first run, stored in the OS secret store); the platform talks to this bridge over an outbound-authenticated WebSocket channel (no inbound ports).\n\n*Real-time:* the local Control Center polls the local API; `/ws/ui` also streams ticks + account updates for local tooling.",
     "version": "1.0.0"
   },
   "paths": {
@@ -113,6 +113,170 @@
                   "additionalProperties": true,
                   "type": "object",
                   "title": "Response Restart Server Channel Api V1 Server Channel Restart Post"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/subscription": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Read-only account & subscription (server-resolved)",
+        "description": "Last stored validate-key result (§3.1): identity, subscription, entitlements, device allowance, masked key status. No payment processing; nothing is invented server-side.",
+        "operationId": "get_account_subscription_api_v1_account_subscription_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Get Account Subscription Api V1 Account Subscription Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/validate-key": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Validate the API key against NSE Platform",
+        "description": "Calls CONTRACT v1 §3.1 validate-key through the REST client and stores the server-resolved result on the bridge context for the read-only Account screen. Never returns key material.",
+        "operationId": "validate_api_key_api_v1_account_validate_key_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Validate Api Key Api V1 Account Validate Key Post"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/updates/latest": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Latest stable release (CONTRACT v1 §3.5 releases/latest)",
+        "description": "Read-only update check via the REST client. Download + install belong to the Phase 5 updater — this endpoint only reports status and never downloads anything.",
+        "operationId": "get_updates_latest_api_v1_updates_latest_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Get Updates Latest Api V1 Updates Latest Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mt5/terminals": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Detected MetaTrader 5 terminals",
+        "description": "Configured path + auto-discovered path (standard install locations, App Paths registry, NSE_MT5_TERMINAL_PATH). Multi-terminal discovery UI arrives with Phase 5.",
+        "operationId": "list_mt5_terminals_api_v1_mt5_terminals_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response List Mt5 Terminals Api V1 Mt5 Terminals Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mt5/terminals/open": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Open the selected MT5 terminal",
+        "description": "Launches the terminal executable. The path must be one of the discovered / configured terminals — arbitrary paths are rejected. Windows only; on Linux this reports honestly instead of pretending to launch.",
+        "operationId": "open_mt5_terminal_api_v1_mt5_terminals_open_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TerminalOpenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Open Mt5 Terminal Api V1 Mt5 Terminals Open Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/diagnostics/summary": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Guided diagnostics summary",
+        "description": "Bridge / MT5 / network / WebSocket health, sync status, last errors, and the structured MT5 diagnostic code with human-readable guidance. No stack traces.",
+        "operationId": "diagnostics_summary_api_v1_diagnostics_summary_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Diagnostics Summary Api V1 Diagnostics Summary Get"
                 }
               }
             }
@@ -9026,6 +9190,35 @@
             "title": "Local Api Key",
             "description": "Local X-API-Key gate (mandatory; stored in the secret store)"
           },
+          "environment": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "production",
+                  "staging",
+                  "dev"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment",
+            "description": "Server environment (production | staging | dev)"
+          },
+          "server_base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Base Url",
+            "description": "NSE server REST base URL (https://...; changing it needs a bridge restart)"
+          },
           "magic": {
             "anyOf": [
               {
@@ -10198,6 +10391,20 @@
           "state"
         ],
         "title": "TerminalInfoResponse"
+      },
+      "TerminalOpenRequest": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Path"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "title": "TerminalOpenRequest"
       },
       "TerminalVersionResponse": {
         "properties": {

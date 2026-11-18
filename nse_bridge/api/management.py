@@ -7,17 +7,23 @@ These sit on top of the 90-command surface — they operate the BRIDGE itself
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Request
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from ..config import persist_settings, validate_server_url
+from .. import BRIDGE_VERSION
+from ..config import persist_settings, validate_server_base_url, validate_server_url
 from ..engine.common import BridgeContext, datetime_now_iso
 from ..errors import BridgeError, ErrorCode
 from ..logging_setup import redact_text
 from ..secrets import get_secret_store
+from ..server.errors import ServerError
 
 router = APIRouter(prefix="/api/v1", tags=["system"])
 
@@ -36,6 +42,12 @@ class SettingsUpdate(BaseModel):
     server_url: str | None = Field(None, description="NSE server channel URL (wss://...; empty = disabled)")
     server_token: str | None = Field(None, description="API key issued on the NSE Platform site (stored in the secret store)")
     local_api_key: str | None = Field(None, description="Local X-API-Key gate (mandatory; stored in the secret store)")
+    environment: Literal["production", "staging", "dev"] | None = Field(
+        None, description="Server environment (production | staging | dev)"
+    )
+    server_base_url: str | None = Field(
+        None, description="NSE server REST base URL (https://...; changing it needs a bridge restart)"
+    )
     magic: int | None = Field(None, ge=0, le=2**31 - 1)
     # Empty string = clear the configured value (no default symbol /
     # timeframe is ever invented by the bridge).
@@ -117,6 +129,17 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict[str,
             validate_server_url(values["server_url"])
         except ValueError as exc:
             raise BridgeError(ErrorCode.VALIDATION, str(exc), http_status=422)
+    if "server_base_url" in values:
+        try:
+            validate_server_base_url(
+                values["server_base_url"], environment=values.get("environment", s.environment)
+            )
+        except ValueError as exc:
+            raise BridgeError(ErrorCode.VALIDATION, str(exc), http_status=422)
+    # environment / server_base_url are baked into the REST client at
+    # construction — they take effect after a bridge restart (never a
+    # silent mid-flight switch). The response flags that honestly.
+    restart_required = "environment" in values or "server_base_url" in values
     for key, value in values.items():
         if key not in EDITABLE_KEYS or getattr(s, key) == value:
             continue
@@ -143,6 +166,7 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict[str,
         "data": {
             "changed": changed,
             "server_channel_restarted": restarted,
+            "restart_required": restart_required,
             "server_channel": ctx.server_channel_state,
         },
     }
@@ -322,3 +346,465 @@ async def restart_server_channel(request: Request) -> dict[str, Any]:
     channel.start()
     await asyncio.sleep(0.3)
     return {"ok": True, "data": {"server_channel": ctx.server_channel_state}}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Connector Control Center: guided MT5 diagnostics
+# ---------------------------------------------------------------------------
+#: Structured MT5 diagnostic codes (ARCHITECTURE-CONTRACT §5/§6). Every
+#: code carries a human-readable explanation + actionable recovery
+#: steps; ordinary users never see a raw stack trace.
+MT5_DIAGNOSTICS: dict[str, dict[str, Any]] = {
+    "MT5_NOT_FOUND": {
+        "title": "No MetaTrader 5 terminal found",
+        "explanation": (
+            "The bridge could not find a MetaTrader 5 terminal on this machine — "
+            "no configured path and none of the standard install locations exists."
+        ),
+        "recovery": [
+            "Install MetaTrader 5 from your broker, then press Retry diagnostics.",
+            ("If MT5 lives in a custom folder, select it on the MetaTrader screen "
+            "(it is saved as the terminal path)."),
+            ("Portable installs: set the NSE_MT5_TERMINAL_PATH environment variable "
+            "to the terminal64.exe path and restart the bridge."),
+        ],
+    },
+    "MT5_NOT_RUNNING": {
+        "title": "Terminal found but not running",
+        "explanation": (
+            "A terminal was found on this machine, but it is not running or the "
+            "bridge could not attach to it yet."
+        ),
+        "recovery": [
+            "Start the MetaTrader 5 terminal and wait for it to finish loading.",
+            "Then press Connect on the MetaTrader screen.",
+            ("If it still fails, close the terminal completely (check the system "
+            "tray icon) and start it again, then retry."),
+        ],
+    },
+    "MT5_IPC_FAILED": {
+        "title": "Terminal attach (IPC) failed",
+        "explanation": (
+            "The bridge found the terminal but the local IPC attach failed — "
+            "initialize() was rejected by the terminal."
+        ),
+        "recovery": [
+            "Close the terminal completely (check the system tray icon) and start it again.",
+            "Make sure no other bridge instance is already attached to the same terminal.",
+            "If the terminal was just updated, restart Windows once, then press Retry diagnostics.",
+        ],
+    },
+    "MT5_ACCOUNT_NOT_READY": {
+        "title": "No trading account logged in",
+        "explanation": (
+            "The terminal is running, but no trading account is logged in, so the "
+            "bridge cannot read account data."
+        ),
+        "recovery": [
+            ("Open the MT5 terminal and log in to your trading account "
+            "(File → Login to Trade Account)."),
+            "The bridge never asks for your MT5 password — sign in through MT5 itself.",
+            "Then press Connect on the MetaTrader screen.",
+        ],
+    },
+    "MT5_UNSUPPORTED_VERSION": {
+        "title": "Terminal build is too old",
+        "explanation": (
+            "The terminal connected, but its build is older than the minimum this "
+            "bridge supports, so some calls may behave unexpectedly."
+        ),
+        "recovery": [
+            ("Update MetaTrader 5 (Help → Check for Updates) or install the latest "
+            "build from your broker."),
+            "Then reconnect and press Retry diagnostics.",
+        ],
+    },
+}
+
+#: Conservative local floor for the terminal build number. CONTRACT v1
+#: defines NO minimum terminal build — this floor is intentionally old
+#: (build 3000, 2021-era) so any terminal from the last several years
+#: passes; it exists so a genuinely ancient terminal produces a
+#: structured code instead of cryptic IPC failures.
+MIN_SUPPORTED_TERMINAL_BUILD = 3000
+
+
+def _terminal_build(pkg_version: str | None) -> int | None:
+    """Build number from the driver's pkg_version ("<api>.<build>.<date>")."""
+    if not pkg_version:
+        return None
+    parts = str(pkg_version).split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[1])
+    except ValueError:
+        return None
+
+
+def _discover_terminals(ctx: BridgeContext) -> dict[str, Any]:
+    """Configured + auto-discovered terminal paths (deduped).
+
+    Discovery reuses the driver's ``auto_discover_terminal_path``
+    (standard install locations, App Paths registry,
+    NSE_MT5_TERMINAL_PATH). Multi-terminal selection UI arrives with
+    Phase 5; this endpoint already reports every candidate it knows.
+    """
+    from ..mt5.driver import auto_discover_terminal_path
+
+    configured = (ctx.settings.mt5_terminal_path or "").strip()
+    discovered = auto_discover_terminal_path()
+    effective = configured or discovered or ""
+    terminals: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path, source in ((configured, "configured"), (discovered, "discovered")):
+        if path and path not in seen:
+            seen.add(path)
+            terminals.append(
+                {
+                    "path": path,
+                    "exists": Path(path).is_file(),
+                    "source": source,
+                    "selected": path == effective,
+                }
+            )
+    return {
+        "terminals": terminals,
+        "selected_path": effective or None,
+        "configured_path": configured or None,
+        "can_open": sys.platform == "win32",
+    }
+
+
+def _derive_mt5_diagnostic(
+    ctx: BridgeContext, terminals: list[dict[str, Any]]
+) -> tuple[str | None, str]:
+    """Map driver state + discovery onto one structured code.
+
+    Returns ``(code, severity)``; ``(None, "ok")`` when healthy. The
+    driver itself is never rewritten — this only reads
+    ``connection_state_dict`` / ``diagnostic_code``.
+    """
+    state = ctx.driver.connection_state_dict()
+    if ctx.driver.connected:
+        build = _terminal_build(state.get("pkg_version"))
+        if build is not None and build < MIN_SUPPORTED_TERMINAL_BUILD:
+            return "MT5_UNSUPPORTED_VERSION", "warning"
+        return None, "ok"
+    code = state.get("diagnostic_code")
+    if isinstance(code, str) and code in MT5_DIAGNOSTICS:
+        return code, "error"
+    if not any(t.get("exists") for t in terminals):
+        return "MT5_NOT_FOUND", "error"
+    if state.get("state") == "TERMINAL_ERROR":
+        return "MT5_IPC_FAILED", "error"
+    return "MT5_NOT_RUNNING", "error"
+
+
+# ---------------------------------------------------------------------------
+# Account & Subscription (read-only, server-driven)
+# ---------------------------------------------------------------------------
+def _default_entitlements() -> dict[str, Any]:
+    return {
+        "history_sync": False,
+        "ai_coach": False,
+        "position_manager": False,
+        "auto_trade": False,
+        "max_devices": 0,
+        "max_accounts": 0,
+    }
+
+
+def _account_subscription_payload(ctx: BridgeContext) -> dict[str, Any]:
+    """Read-only snapshot for the Account & Subscription screen.
+
+    Source of truth is the last stored validate-key result (CONTRACT
+    v1 §3.1). Falls back to the live REST client state when no snapshot
+    was stored yet. The API key is NEVER included — only masked status.
+    All billing/subscription decisions come from the server; the bridge
+    invents no plan, tariff, or price.
+    """
+    s = ctx.settings
+    stored = dict(ctx.validate_key_result or {})
+    if not stored:
+        rest = ctx.rest_client
+        if rest is not None and getattr(rest, "user_id", None):
+            ent = getattr(rest, "entitlements", None)
+            stored = {
+                "valid": True,
+                "user_id": rest.user_id,
+                "subscription": dict(getattr(rest, "subscription", None) or {}),
+                "entitlements": asdict(ent) if ent is not None else _default_entitlements(),
+                "validated_at": None,
+            }
+    entitlements = stored.get("entitlements")
+    if not isinstance(entitlements, dict):
+        entitlements = _default_entitlements()
+    subscription = stored.get("subscription")
+    if not isinstance(subscription, dict):
+        subscription = {}
+    rest = ctx.rest_client
+    return {
+        "validated": bool(stored.get("valid")),
+        "validated_at": stored.get("validated_at"),
+        "validation_error": stored.get("error"),
+        "user_id": stored.get("user_id"),
+        "subscription": dict(subscription),
+        "entitlements": {**_default_entitlements(), **entitlements},
+        "device_id": ctx.get_or_create_device_id(),
+        "session_expires_at": getattr(rest, "session_expires_at", None),
+        "api_key_set": bool(s.server_token),
+        "api_key_masked": _mask(s.server_token),
+    }
+
+
+@router.get("/account/subscription", summary="Read-only account & subscription (server-resolved)",
+    description="Last stored validate-key result (§3.1): identity, subscription, entitlements, "
+    "device allowance, masked key status. No payment processing; nothing is invented server-side.")
+async def get_account_subscription(request: Request) -> dict[str, Any]:
+    ctx: BridgeContext = request.app.state.ctx
+    return {"ok": True, "data": _account_subscription_payload(ctx)}
+
+
+@router.post("/account/validate-key", summary="Validate the API key against NSE Platform",
+    description="Calls CONTRACT v1 §3.1 validate-key through the REST client and stores the "
+    "server-resolved result on the bridge context for the read-only Account screen. "
+    "Never returns key material.")
+async def validate_api_key(request: Request) -> dict[str, Any]:
+    ctx: BridgeContext = request.app.state.ctx
+    rest = ctx.rest_client
+    if rest is None:
+        raise BridgeError(
+            ErrorCode.INTERNAL,
+            "Server client not initialised yet — the bridge is still starting.",
+            http_status=503,
+        )
+    if not ctx.settings.server_token:
+        raise BridgeError(
+            ErrorCode.VALIDATION,
+            "No API key configured — paste the key from the NSE Platform site in Settings first.",
+            http_status=422,
+        )
+    try:
+        result = await rest.validate_key()
+    except ServerError as exc:
+        ctx.validate_key_result = {
+            "valid": False,
+            "error": redact_text(str(exc))[:300],
+            "validated_at": datetime_now_iso(),
+        }
+        status = exc.http_status if isinstance(exc.http_status, int) and exc.http_status >= 400 else 401
+        raise BridgeError(
+            ErrorCode.UNAUTHORIZED,
+            f"Key validation failed: {redact_text(str(exc))[:300]}",
+            http_status=status,
+        ) from exc
+    ctx.validate_key_result = {
+        "valid": True,
+        "user_id": result.user_id,
+        "subscription": dict(result.subscription or {}),
+        "entitlements": asdict(result.entitlements),
+        "validated_at": datetime_now_iso(),
+    }
+    return {"ok": True, "data": _account_subscription_payload(ctx)}
+
+
+# ---------------------------------------------------------------------------
+# Updates & Releases (read-only check; download/install is Phase 5)
+# ---------------------------------------------------------------------------
+def _version_tuple(version: str | None) -> tuple[int, ...] | None:
+    if not version:
+        return None
+    parts: list[int] = []
+    for piece in str(version).strip().split("."):
+        try:
+            parts.append(int(piece))
+        except ValueError:
+            return None
+    return tuple(parts) if parts else None
+
+
+def _is_newer(latest: str | None, installed: str) -> bool:
+    a, b = _version_tuple(latest), _version_tuple(installed)
+    if a is None or b is None:
+        return False
+    n = max(len(a), len(b))
+    return (a + (0,) * (n - len(a))) > (b + (0,) * (n - len(b)))
+
+
+@router.get("/updates/latest", summary="Latest stable release (CONTRACT v1 §3.5 releases/latest)",
+    description="Read-only update check via the REST client. Download + install belong to the "
+    "Phase 5 updater — this endpoint only reports status and never downloads anything.")
+async def get_updates_latest(request: Request) -> dict[str, Any]:
+    ctx: BridgeContext = request.app.state.ctx
+    installed = BRIDGE_VERSION
+    base: dict[str, Any] = {
+        "installed_version": installed,
+        "latest": None,
+        "update_available": False,
+        "status": "unknown",
+        "detail": "",
+    }
+    rest = ctx.rest_client
+    if rest is None:
+        base.update(
+            status="unavailable",
+            detail="Server client not initialised yet — the bridge is still starting.",
+        )
+        return {"ok": True, "data": base}
+    if not ctx.settings.server_token:
+        base.update(
+            status="not_configured",
+            detail="No API key configured — set it in Settings first, then check again.",
+        )
+        return {"ok": True, "data": base}
+    try:
+        rel = await rest.releases_latest()
+    except ServerError as exc:
+        base.update(status="check_failed", detail=redact_text(str(exc))[:300])
+        return {"ok": True, "data": base}
+    base["latest"] = {
+        "version": rel.version,
+        "download_url": rel.download_url,
+        "sha256": rel.sha256,
+        "size_bytes": rel.size_bytes,
+        "min_connector_version": rel.min_connector_version,
+        "signature_present": bool(rel.signature),
+        "released_at": rel.released_at,
+    }
+    if rel.version is None:
+        base.update(status="unknown", detail="The server answered but reported no version.")
+    elif _is_newer(rel.version, installed):
+        base.update(
+            status="update_available",
+            update_available=True,
+            detail=f"Version {rel.version} is available (installed {installed}).",
+        )
+    else:
+        base.update(
+            status="current",
+            detail=f"Installed {installed} is the latest known version.",
+        )
+    return {"ok": True, "data": base}
+
+
+# ---------------------------------------------------------------------------
+# MetaTrader terminals (discovery + open)
+# ---------------------------------------------------------------------------
+@router.get("/mt5/terminals", summary="Detected MetaTrader 5 terminals",
+    description="Configured path + auto-discovered path (standard install locations, App Paths "
+    "registry, NSE_MT5_TERMINAL_PATH). Multi-terminal discovery UI arrives with Phase 5.")
+async def list_mt5_terminals(request: Request) -> dict[str, Any]:
+    ctx: BridgeContext = request.app.state.ctx
+    state = ctx.driver.connection_state_dict()
+    return {
+        "ok": True,
+        "data": {
+            **_discover_terminals(ctx),
+            "driver_state": state["state"],
+            "connected": ctx.driver.connected,
+            "diagnostic_code": state.get("diagnostic_code"),
+        },
+    }
+
+
+class TerminalOpenRequest(BaseModel):
+    path: str = Field(..., min_length=1)
+
+
+@router.post("/mt5/terminals/open", summary="Open the selected MT5 terminal",
+    description="Launches the terminal executable. The path must be one of the discovered / "
+    "configured terminals — arbitrary paths are rejected. Windows only; on Linux this "
+    "reports honestly instead of pretending to launch.")
+async def open_mt5_terminal(request: Request, body: TerminalOpenRequest) -> dict[str, Any]:
+    ctx: BridgeContext = request.app.state.ctx
+    allowed = {t["path"] for t in _discover_terminals(ctx)["terminals"]}
+    if body.path not in allowed:
+        raise BridgeError(
+            ErrorCode.VALIDATION,
+            "Unknown terminal path — select a discovered terminal first.",
+            http_status=422,
+        )
+    if sys.platform != "win32":
+        raise BridgeError(
+            ErrorCode.INTERNAL,
+            "Opening a terminal is only supported on Windows — this bridge runs on Linux.",
+            http_status=501,
+        )
+    if not Path(body.path).is_file():
+        raise BridgeError(
+            ErrorCode.NOT_FOUND,
+            "Terminal executable not found at the selected path.",
+            http_status=404,
+        )
+    try:
+        await asyncio.to_thread(
+            subprocess.Popen, [body.path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    except OSError as exc:
+        raise BridgeError(
+            ErrorCode.INTERNAL, f"Could not launch the terminal: {exc}", http_status=500
+        ) from exc
+    return {"ok": True, "data": {"launched": body.path}}
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics summary (guided diagnostics for the Control Center)
+# ---------------------------------------------------------------------------
+@router.get("/diagnostics/summary", summary="Guided diagnostics summary",
+    description="Bridge / MT5 / network / WebSocket health, sync status, last errors, and the "
+    "structured MT5 diagnostic code with human-readable guidance. No stack traces.")
+async def diagnostics_summary(request: Request) -> dict[str, Any]:
+    from ..engine.connection import get_mt5_connection_status
+    from ..engine.diagnostics import get_bridge_health
+    from ..engine.system import get_bridge_status
+
+    ctx: BridgeContext = request.app.state.ctx
+    terminals = _discover_terminals(ctx)
+    code, severity = _derive_mt5_diagnostic(ctx, terminals["terminals"])
+    diagnostic = None
+    if code is not None:
+        entry = MT5_DIAGNOSTICS[code]
+        diagnostic = {
+            "code": code,
+            "severity": severity,
+            "title": entry["title"],
+            "explanation": entry["explanation"],
+            "recovery": list(entry["recovery"]),
+        }
+    # Network: a live channel proves reachability; otherwise probe once.
+    s = ctx.settings
+    channel = dict(ctx.server_channel_state)
+    if channel.get("connected"):
+        network = {"status": "ok", "detail": "WebSocket channel is connected."}
+    elif not s.server_token:
+        network = {"status": "not_configured", "detail": "No API key configured — set it in Settings first."}
+    else:
+        reachable, err = await _probe_server(s.resolved_server_ws_url, s.server_token)
+        network = {
+            "status": "ok" if reachable else "fail",
+            "detail": "Server URL reachable." if reachable else f"Cannot reach server: {err}",
+        }
+    sync_engine = ctx.sync_engine
+    sync = {
+        "available": sync_engine is not None,
+        "pending_batches": sync_engine.pending_count() if sync_engine is not None else None,
+        "checkpoint": sync_engine.checkpoint.iso if sync_engine is not None else None,
+    }
+    state = ctx.driver.connection_state_dict()
+    return {
+        "ok": True,
+        "data": {
+            "generated_at": datetime_now_iso(),
+            "bridge": get_bridge_health(ctx, None),
+            "bridge_status": get_bridge_status(ctx, None),
+            "mt5": get_mt5_connection_status(ctx, None),
+            "terminals": terminals,
+            "network": network,
+            "websocket": channel,
+            "sync": sync,
+            "last_errors": ctx.logs.tail(20, "ERROR"),
+            "driver_last_error": state.get("last_error"),
+            "diagnostic": diagnostic,
+        },
+    }

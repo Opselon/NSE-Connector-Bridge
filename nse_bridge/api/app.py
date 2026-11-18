@@ -36,7 +36,7 @@ from .. import BRIDGE_VERSION
 from ..engine.common import BridgeContext
 from ..engine.registry import REGISTRY, CommandSpec, all_commands
 from ..errors import BridgeError, ErrorCode
-from ..gui.dashboard import register_dashboard
+from ..gui.dashboard import LOCAL_API_KEY_COOKIE, register_dashboard
 from ..logging_setup import redact_text, sanitize_payload
 from ..realtime.bus import EventBus, start_streaming, stop_streaming
 from ..realtime.channel import ServerChannel
@@ -176,7 +176,7 @@ def create_app(ctx: BridgeContext) -> FastAPI:
             "protects every /api/v1/ endpoint (auto-generated on first run, stored in the "
             "OS secret store); the platform talks to this bridge over an outbound-authenticated "
             "WebSocket channel (no inbound ports).\n\n"
-            "*Real-time:* `/ws/ui` streams ticks + account updates to the local dashboard."
+            "*Real-time:* the local Control Center polls the local API; `/ws/ui` also streams ticks + account updates for local tooling."
         ),
         openapi_tags=TAG_METADATA,
         lifespan=lifespan,
@@ -201,6 +201,13 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         # open mode; /health is a plain liveness probe, not an API call.
         if path.startswith("/api/v1/"):
             presented = request.headers.get("X-API-Key") or ""
+            if not presented:
+                # The loopback GUI (/ui, same app) carries the same key
+                # in an HttpOnly + SameSite=Strict cookie set by the
+                # server itself — page JS never sees the key, and the
+                # credential is still mandatory on every call. No
+                # unauthenticated exemption exists for the GUI.
+                presented = request.cookies.get(LOCAL_API_KEY_COOKIE) or ""
             expected = ctx.settings.local_api_key or ""
             if not expected or not hmac.compare_digest(presented, expected):
                 err = BridgeError(

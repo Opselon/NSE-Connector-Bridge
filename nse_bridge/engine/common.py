@@ -171,6 +171,11 @@ class BridgeContext:
     bus: Any = None  # EventBus, wired at app startup (loop-bound; set once)
     rest_client: Any = None  # RestClient (CONTRACT v1 §3), wired at app startup
     sync_engine: Any = None  # SyncEngine (CONTRACT v1 §3.3), wired at app startup
+    # Last validate-key snapshot (CONTRACT v1 §3.1), stored by the GUI
+    # refresh action (POST /api/v1/account/validate-key) from the Phase 2
+    # REST client. Server-resolved only (user_id, subscription,
+    # entitlements) — NEVER key material. None = never validated.
+    validate_key_result: dict[str, Any] | None = None
     server_channel_state: dict[str, Any] = field(
         default_factory=lambda: {
             "enabled": False, "connected": False, "url": "", "last_connected_at": None,
