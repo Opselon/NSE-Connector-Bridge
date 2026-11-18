@@ -23,12 +23,15 @@ Frames, server → client (§5.2 ONLY):
 
 Unknown frames are silently ignored, never fatal.
 
-Frames, client → server (§5.3 ONLY):
+Frames, client → server (§5.3 ONLY, plus §4.1):
 
 - ``heartbeat`` ``{type, device_id}`` every 15 s (server replies
   ``heartbeat``; session dead after 45 s without one)
 - ``action.result`` (§6.5)
 - ``chart.data``, ``chart.tick`` (§17.1)
+- ``manifest.update`` envelope (``event_type: "manifest.update"``,
+  §4.1) when the manifest changes mid-session; the server treats it
+  the same as the REST manifest POST
 
 No ``ping``, no ``tick``, no ``account_update``/``positions_update``/
 ``orders_update``/``status_update``/``trade_event``,
@@ -78,10 +81,11 @@ from ..server.commands import (
     CommandExecutor,
     CommandValidator,
 )
-from ..server.manifest import build_manifest
+from ..server.manifest import ManifestTracker, build_manifest, build_manifest_update_envelope
 from ..server.queue import BoundedPendingQueue
 from ..server.rest import RestClient
 from ..server.sync import SyncEngine
+from ..server.sync_checkpoint import CHECKPOINT_FILENAME, SyncCheckpointStore
 
 __all__ = ["ServerChannel", "backoff_delay", "backoff_with_jitter"]
 
@@ -209,12 +213,17 @@ class ServerChannel:
         chart_service: ChartService | None = None,
         executor: CommandExecutor | None = None,
         enrolment: Any | None = None,
+        manifest_tracker: ManifestTracker | None = None,
         dead_after_s: float = HEARTBEAT_DEAD_S,
     ) -> None:
         self.ctx = ctx
         self.bus = bus  # kept for the local dashboard bus; the server channel no longer consumes it
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        # Set by _request_ws_open() to interrupt a reconnect backoff
+        # immediately (§3.4: pending_commands > 0 with no WS live must
+        # open/refresh the WS now, not after the backoff expires).
+        self._wake = asyncio.Event()
         self._ws: Any = None
         self.dead_after_s = dead_after_s
         self._outbound = _OutboundQueue()
@@ -240,6 +249,13 @@ class ServerChannel:
         # Falls back to ctx.enrolment when not injected (app startup
         # wires it on the context); None = ungated (legacy callers).
         self._enrolment = enrolment if enrolment is not None else getattr(ctx, "enrolment", None)
+        # Manifest tracker (§4.1), shared with the enrolment manager
+        # when it has one so REST + WS agree on what the server has.
+        self._manifest_tracker = (
+            manifest_tracker
+            or getattr(self._enrolment, "manifest_tracker", None)
+            or ManifestTracker()
+        )
         self._rest_heartbeat_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
@@ -281,6 +297,99 @@ class ServerChannel:
         login = self.ctx.driver.connection_state_dict().get("login")
         return str(login) if login is not None else None
 
+    # ------------------------------------------------------------------
+    # REST heartbeat → WS (§3.4) + manifest (§4.1)
+    # ------------------------------------------------------------------
+    def _is_ws_live(self) -> bool:
+        """True when a WS session is currently up."""
+        return self._ws is not None and bool(self.ctx.server_channel_state.get("connected"))
+
+    def _request_ws_open(self) -> bool:
+        """Open/refresh the WS now (§3.4: ``pending_commands > 0`` and
+        no WS live). Returns True when an open was (re)triggered.
+
+        - WS live → nothing to do.
+        - The ``_run`` supervisor is alive (connecting, or backing
+          off between attempts) → wake it so it reconnects
+          immediately instead of sleeping out the backoff.
+        - The supervisor is not running at all (and the channel is
+          not stopping) → ``start()`` it, provided enrolment allows
+          a connection (REGISTERED, or ungated legacy callers).
+        """
+        if self._is_ws_live():
+            return False
+        if self._task is not None and not self._task.done():
+            self._wake.set()
+            logger.info("[CHANNEL] pending commands with no WS live — waking reconnect (§3.4)")
+            return True
+        if self._stop.is_set():
+            return False
+        if self._enrolment is not None and self._enrolment.to_dict().get("state") != "registered":
+            return False
+        logger.info("[CHANNEL] pending commands with no WS live — (re)opening the channel (§3.4)")
+        self.start()
+        return True
+
+    async def _wait_backoff(self, delay: float) -> None:
+        """Sleep ``delay`` unless stopped or woken (``_request_ws_open``).
+
+        A wake interrupts the backoff immediately; the wait consumes
+        the wake event so a stale wake cannot skip a later backoff.
+        """
+        stop_task = asyncio.create_task(self._stop.wait())
+        wake_task = asyncio.create_task(self._wake.wait())
+        try:
+            await asyncio.wait(
+                {stop_task, wake_task},
+                timeout=delay,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for task in (stop_task, wake_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(stop_task, wake_task, return_exceptions=True)
+            self._wake.clear()
+
+    def _maybe_send_manifest_update(self) -> bool:
+        """Send the §4.1 ``manifest.update`` WS envelope if the
+        manifest changed since the server last saw it.
+
+        Returns True when a frame was enqueued. The frame is a
+        ``MessageEnvelope`` with ``event_type: "manifest.update"``
+        (contract §4.1) carrying the same payload the REST POST
+        carries; the server treats it the same as the REST post. The
+        hash is marked sent once enqueued — the REST post at
+        enrolment is the authoritative delivery, so a frame dropped
+        later by a full outbound queue loses nothing the server does
+        not already have.
+        """
+        manifest = build_manifest(self._device_id(), driver=self.ctx.driver)
+        if not self._manifest_tracker.is_changed(manifest):
+            return False
+        envelope = build_manifest_update_envelope(
+            manifest,
+            user_id=self._rest.user_id if self._rest is not None else None,
+        )
+        self._outbound.put_result(envelope)
+        self._manifest_tracker.mark_sent(manifest)
+        logger.info("[CHANNEL] manifest changed — sent manifest.update (hash {})", manifest["manifest_hash"])
+        return True
+
+    async def _maybe_publish_manifest_rest(self) -> None:
+        """POST the §4.1 manifest over REST when the WS is down.
+
+        Best-effort: a failure is logged and retried on the next
+        change / heartbeat — it must never kill the heartbeat loop.
+        """
+        if self._rest is None:
+            return
+        try:
+            manifest = build_manifest(self._device_id(), driver=self.ctx.driver)
+            await self._manifest_tracker.send_via_rest(self._rest, manifest)
+        except Exception as exc:  # noqa: BLE001 — manifest must never break the loop
+            logger.warning("[CHANNEL] manifest REST post failed ({}); will retry", type(exc).__name__)
+
     def _ensure_components(self) -> None:
         """Build the REST/sync/chart/command components (unless injected)."""
         device_id = self._device_id()
@@ -292,7 +401,13 @@ class ServerChannel:
             # machine so 401 re-enrolments are reflected in it (§3.2).
             self._rest.enrolment = self._enrolment
         if self._sync is None:
-            self._sync = SyncEngine(self._rest, self.ctx)
+            self._sync = SyncEngine(
+                self._rest,
+                self.ctx,
+                checkpoint_store=SyncCheckpointStore(
+                    self.ctx.settings.data_dir / CHECKPOINT_FILENAME
+                ),
+            )
             self.ctx.sync_engine = self._sync
         if self._chart is None:
             from ..server.chart import bind_mt5_fetchers
@@ -354,9 +469,11 @@ class ServerChannel:
         after a terminal auth failure (FAILED_AUTH — the key is dead,
         heartbeat would just 401). While enrolment is retrying it keeps
         running, so the server still sees liveness. If
-        ``pending_commands > 0`` and no WS is live, the ``_run`` loop
-        is already (re)connecting once enrolled — nothing extra to do
-        here. A 401 here re-enrols through the REST client (§3.2).
+        ``pending_commands > 0`` and no WS is live, it wakes the WS
+        supervisor immediately via ``_request_ws_open`` (§3.4) — the
+        ``_run`` loop on its own only retries on its backoff schedule,
+        so without the wake a pending command could wait up to 30 s.
+        A 401 here re-enrols through the REST client (§3.2).
         """
         interval = max(1.0, self.ctx.settings.heartbeat_interval_s)
         while not self._stop.is_set():
@@ -380,6 +497,19 @@ class ServerChannel:
                 logger.debug("[CHANNEL] REST heartbeat failed: {}", type(exc).__name__)
                 continue
             logger.debug("[CHANNEL] REST heartbeat ok (pending_commands={})", result.pending_commands)
+            # §3.4 (verified behaviour — see _request_ws_open): the
+            # server says commands are waiting and no WS is live, so
+            # open/refresh the WS now instead of waiting out the
+            # reconnect backoff. The WS loop on its own only retries
+            # on its backoff schedule; without this wake a pending
+            # command could sit undelivered for up to 30 s.
+            if result.pending_commands > 0 and not self._is_ws_live():
+                self._request_ws_open()
+            # §4.1: while the WS is down, a changed manifest still
+            # reaches the server over REST (the WS frame is the
+            # mid-session path; the REST post is the offline path).
+            if not self._is_ws_live():
+                await self._maybe_publish_manifest_rest()
 
     async def stop(self) -> None:
         """Clean shutdown (§5.4: close() frame; the supervisor exits)."""
@@ -502,10 +632,7 @@ class ServerChannel:
                 )
             )
             logger.info("[CHANNEL] reconnect in {:.2f}s (attempt {})", delay, attempt)
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=delay)
-            except TimeoutError:
-                pass
+            await self._wait_backoff(delay)
 
     # ------------------------------------------------------------------
     async def _session(self, ws: Any) -> bool:
@@ -521,6 +648,12 @@ class ServerChannel:
         self._outbound.clear()
         for result in self._pending_results.snapshot():
             self._outbound.put_result(result)
+        # §4.1: a manifest the server has not seen yet goes out as a
+        # manifest.update frame on (re)connect — e.g. after enrolment
+        # posted it over REST the hash is already known and this is a
+        # no-op; after a registry change mid-session this is the
+        # delivery.
+        self._maybe_send_manifest_update()
         receiver = asyncio.create_task(self._receive_loop(ws), name="nse-channel-recv")
         heartbeat = asyncio.create_task(self._heartbeat_loop(ws), name="nse-channel-hb")
         sender = asyncio.create_task(self._send_loop(ws), name="nse-channel-send")
@@ -598,6 +731,11 @@ class ServerChannel:
                     self._sync.reset_for_account_switch()
                     asyncio.create_task(self._sync.handle_sync_request())
             self._last_login = login
+            # §4.1: the registry can only change mid-session if the
+            # command set changes under the running bridge — check
+            # each heartbeat tick and send a manifest.update frame
+            # when it did. Unchanged hash = no-op (tracker).
+            self._maybe_send_manifest_update()
             try:
                 await ws.send(json.dumps({"type": "heartbeat", "device_id": self._device_id()}))
                 self.ctx.server_channel_state["last_heartbeat_at"] = time.time()

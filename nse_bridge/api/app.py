@@ -153,10 +153,19 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         from ..server.enrolment import EnrolmentManager
         from ..server.rest import RestClient
         from ..server.sync import SyncEngine
+        from ..server.sync_checkpoint import CHECKPOINT_FILENAME, SyncCheckpointStore
         from ..updates import Updater
 
         rest_client = RestClient(ctx.settings, ctx.get_or_create_device_id())
-        sync_engine = SyncEngine(rest_client, ctx)
+        # Spec §16: the sync checkpoint survives restarts — restored
+        # here at startup, persisted on every advance (sync.py).
+        sync_engine = SyncEngine(
+            rest_client,
+            ctx,
+            checkpoint_store=SyncCheckpointStore(
+                ctx.settings.data_dir / CHECKPOINT_FILENAME
+            ),
+        )
         ctx.rest_client = rest_client
         ctx.sync_engine = sync_engine
         app.state.rest_client = rest_client
@@ -177,7 +186,10 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         # stage only; install happens on restart via the staged script.
         app.state.updater = Updater(ctx.settings, rest_client_getter=lambda: ctx.rest_client)
         pollers, stop_event = start_streaming(ctx, bus)
-        channel = ServerChannel(ctx, bus, rest_client=rest_client, sync_engine=sync_engine, enrolment=enrolment)
+        channel = ServerChannel(
+            ctx, bus, rest_client=rest_client, sync_engine=sync_engine,
+            enrolment=enrolment, manifest_tracker=enrolment.manifest_tracker,
+        )
         channel.start()
         app.state.channel = channel
         ctx.bus = bus

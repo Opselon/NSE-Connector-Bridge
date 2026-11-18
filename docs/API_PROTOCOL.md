@@ -55,7 +55,14 @@ history_orders | history_positions`. No per-batch `account_id` (the
 server attributes by device binding, §7.2). Broker timestamps
 verbatim + UTC `produced_at`; never re-localize.
 
-- Checkpoint = max broker time seen, never backwards.
+- Checkpoint = max broker time seen, never backwards. It is
+  persisted to `sync_checkpoint.json` in the bridge data dir on
+  every advance and restored at startup (spec §16) — a restart
+  resumes history from the last synced broker time instead of
+  re-running a full backfill. A corrupt record (or one from another
+  account) is ignored with a warning and falls back to epoch; an
+  account switch resets the checkpoint to epoch and persists the
+  reset (§7.3).
 - Page size 500, 250 ms between pages.
 - Pending queue bounded at 32; the oldest batch is evicted WITH a
   warning (never silently discarded).
@@ -64,8 +71,11 @@ verbatim + UTC `produced_at`; never re-localize.
 ### 1.4 `POST heartbeat` (§3.4)
 
 Request: `{}`. Response: `{ok, server_time, pending_commands}`. If
-`pending_commands > 0` and no WS is live, open/refresh the WS.
-Keep-alive when WS is down — NOT a substitute for the WS heartbeat.
+`pending_commands > 0` and no WS is live, open/refresh the WS: the
+REST heartbeat loop wakes the WS supervisor immediately
+(`ServerChannel._request_ws_open`) instead of waiting out the
+reconnect backoff (up to 30 s). Keep-alive when WS is down — NOT a
+substitute for the WS heartbeat.
 
 ### 1.5 `POST session/refresh` + `POST session/revoke` (§3.4, [client-v1.1])
 
@@ -92,7 +102,28 @@ driver exposes no numeric terminal build, and the Bridge never
 invents one. No tier assignments are ever claimed. Server answers
 `{accepted, manifest_hash}`.
 
-### 1.8 Error contract + retry policy (§3.6)
+Delivery: the manifest is POSTed once on enrolment (after
+`register-device` succeeds) and again only when its hash changes
+(unchanged hash = no-op, tracked by `ManifestTracker`, which the
+enrolment manager and the WS channel share). When the manifest
+changes mid-session, the channel also sends a `manifest.update`
+MessageEnvelope over the WS (same payload; the server treats it the
+same as the REST post). While the WS is down, a changed manifest is
+POSTed over REST from the heartbeat loop. A manifest failure never
+un-enrols the device — it is logged and retried on the next change.
+
+### 1.8 Request cancellation (spec §2)
+
+In-flight REST requests are cancellable via `asyncio` task
+cancellation: `RestClient.cancel_all()` cancels every in-flight
+request (each raises `asyncio.CancelledError` promptly in the task
+that awaited it — never a `ServerError`, never retried), and
+`close()` cancels in-flight requests on shutdown instead of
+awaiting their full timeout. A cancelled request's outcome is
+unknown (it may have reached the server), so the caller decides
+whether to retry — the client never silently retries it.
+
+### 1.9 Error contract + retry policy (§3.6)
 
 | HTTP | Code | Client behaviour |
 |---|---|---|
@@ -135,8 +166,10 @@ account-switch trigger, §7.3), `ack`, `heartbeat`,
 Unknown frames are silently ignored, never fatal.
 
 Client → server (§5.3): ONLY `heartbeat`, `action.result` (§6.5),
-`chart.data`, `chart.tick`. No `ping`, no `account.snapshot`, no
-`command.ack`. Snapshots/events go over REST `sync/batch` (§1.3).
+`chart.data`, `chart.tick` — plus the §4.1 `manifest.update`
+envelope when the manifest changes mid-session. No `ping`, no
+`account.snapshot`, no `command.ack`. Snapshots/events go over REST
+`sync/batch` (§1.3).
 
 ## 3. Commands (§6)
 

@@ -103,6 +103,8 @@ async def test_enrolment_success_stores_subscription_and_session():
         calls.append(request.url.path)
         if request.url.path.endswith("validate-key"):
             return _ok_validate(request)
+        if request.url.path.endswith("manifest"):
+            return httpx.Response(200, json={"accepted": True, "manifest_hash": "deadbeef"})
         return _ok_register(request)
 
     manager, rest, _sleeps, _ctx = _manager(handler)
@@ -112,6 +114,7 @@ async def test_enrolment_success_stores_subscription_and_session():
     assert calls == [
         "/api/v1/connector/validate-key",
         "/api/v1/connector/register-device",
+        "/api/v1/connector/manifest",  # §4.1: manifest posted once enrolled
     ]
     # Server-resolved subscription/entitlements land on the context.
     stored = manager._ctx.validate_key_result

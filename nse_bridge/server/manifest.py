@@ -44,14 +44,24 @@ same payload produced here.
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from loguru import logger
+
 from ..engine.registry import all_commands
+from .uuid7 import new_uuid7_str
 
 if TYPE_CHECKING:
     from ..mt5.driver import Mt5Driver
+    from .rest import RestClient
 
-__all__ = ["build_manifest", "manifest_hash"]
+__all__ = [
+    "ManifestTracker",
+    "build_manifest",
+    "build_manifest_update_envelope",
+    "manifest_hash",
+]
 
 
 def manifest_hash() -> str:
@@ -84,3 +94,79 @@ def build_manifest(device_id: str, *, driver: Mt5Driver | None = None) -> dict[s
             {"name": c.name, "number": c.number, "category": c.category} for c in commands
         ],
     }
+
+
+def build_manifest_update_envelope(
+    manifest: dict[str, Any], *, user_id: str | None = None
+) -> dict[str, Any]:
+    """Build the ``manifest.update`` MessageEnvelope (contract §4.1).
+
+    §4.1: "The Connector also sends a ``manifest.update`` envelope
+    (``event_type: "manifest.update"``) over the WS when the manifest
+    changes mid-session; the server treats it the same as the REST
+    post." The envelope shape mirrors ``action.result`` (§6.5):
+    ``protocol_version`` / ``schema_version`` / ``message_id``
+    (uuidv7) / ``event_type`` / ``event_timestamp`` / ``device_id``,
+    with the §4.1 manifest itself as ``payload``. No frame name is
+    invented here — ``manifest.update`` is the contract's own
+    ``event_type``.
+    """
+    envelope: dict[str, Any] = {
+        "protocol_version": "1.0",
+        "schema_version": "2026-11-17",
+        "message_id": new_uuid7_str(),
+        "event_type": "manifest.update",
+        "event_timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "device_id": manifest.get("device_id"),
+        "payload": manifest,
+        "data_quality": {"validation_warnings": [], "raw_available": True},
+    }
+    if user_id:
+        envelope["user_id"] = user_id  # omit if unknown (§6.5)
+    return envelope
+
+
+class ManifestTracker:
+    """Remembers the last manifest hash the server accepted (§4.1).
+
+    The manifest hash is computed over the local command registry, so
+    it only changes when the registry changes. Both send paths consult
+    this tracker first: an unchanged hash is a no-op — the manifest is
+    never re-POSTed (REST) or re-sent (WS ``manifest.update``) when
+    nothing moved. The tracker is shared between the enrolment
+    manager (REST post at enrolment) and the WS channel (WS frame
+    mid-session) so the two paths agree on what the server already
+    has. Only a successful send marks a hash as sent.
+    """
+
+    def __init__(self) -> None:
+        self.last_sent_hash: str | None = None
+
+    def is_changed(self, manifest: dict[str, Any]) -> bool:
+        """True when ``manifest`` differs from the last sent one."""
+        return manifest.get("manifest_hash") != self.last_sent_hash
+
+    def mark_sent(self, manifest: dict[str, Any]) -> None:
+        """Record ``manifest`` as sent (call only after a successful send)."""
+        self.last_sent_hash = str(manifest.get("manifest_hash"))
+
+    async def send_via_rest(self, rest: RestClient, manifest: dict[str, Any]) -> bool:
+        """POST the manifest (§4.1) unless the hash is unchanged.
+
+        Returns True when a POST was made and accepted, False when the
+        hash was unchanged (no-op). Raises :class:`ServerError` when
+        the server refuses the manifest — the caller decides whether
+        that is fatal (it never is for enrolment: the device is
+        already REGISTERED and the manifest is retried on the next
+        change / re-enrolment).
+        """
+        if not self.is_changed(manifest):
+            logger.debug(
+                "[MANIFEST] unchanged hash {} — not re-posting (§4.1)",
+                manifest.get("manifest_hash"),
+            )
+            return False
+        await rest.send_manifest(manifest)
+        self.mark_sent(manifest)
+        logger.info("[MANIFEST] posted manifest hash {}", manifest.get("manifest_hash"))
+        return True

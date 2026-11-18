@@ -61,6 +61,7 @@ from ..timeutil import normalize_utc
 from .errors import ServerError
 from .queue import BoundedPendingQueue
 from .rest import RestClient
+from .sync_checkpoint import SyncCheckpointStore
 from .uuid7 import new_uuid7_str
 
 if TYPE_CHECKING:
@@ -231,6 +232,13 @@ class SyncEngine:
     Snapshot providers are ``async`` callables returning the ``items``
     dict for a kind; the defaults read the live terminal. ``sleep`` is
     injectable so tests can observe the 250 ms page pause.
+
+    Checkpoint persistence (§3.3, spec §16): when ``checkpoint_store``
+    is given, the checkpoint is restored from it at construction and
+    persisted every time it advances, so a Bridge restart resumes
+    history from the last synced broker time instead of re-running a
+    full backfill. A corrupt or foreign-account record is ignored
+    (epoch backfill) — startup never crashes on a damaged store.
     """
 
     def __init__(
@@ -242,6 +250,7 @@ class SyncEngine:
         page_pause_s: float = PAGE_PAUSE_S,
         sleep: Callable[[float], Awaitable[None]] | None = None,
         checkpoint: SyncCheckpoint | None = None,
+        checkpoint_store: SyncCheckpointStore | None = None,
         account_snapshot: Callable[[], Awaitable[dict[str, Any]]] | None = None,
         positions_snapshot: Callable[[], Awaitable[dict[str, Any]]] | None = None,
         history_orders: Callable[[datetime, datetime], Awaitable[dict[str, Any]]] | None = None,
@@ -252,7 +261,8 @@ class SyncEngine:
         self.page_size = page_size
         self.page_pause_s = page_pause_s
         self._sleep = sleep or asyncio.sleep
-        self.checkpoint = checkpoint or SyncCheckpoint()
+        self.checkpoint_store = checkpoint_store
+        self.checkpoint = checkpoint or self._restore_checkpoint()
         self._pending_history: BoundedPendingQueue[dict[str, Any]] = BoundedPendingQueue(
             MAX_PENDING_BATCHES, "sync/history"
         )
@@ -265,6 +275,58 @@ class SyncEngine:
         self._positions_snapshot = positions_snapshot or self._default_positions_snapshot
         self._history_orders = history_orders or self._default_history_orders
         self._history_positions = history_positions or self._default_history_positions
+
+    # ------------------------------------------------------------------
+    # checkpoint persistence (spec §16)
+    # ------------------------------------------------------------------
+    def _bound_account_id(self) -> str | None:
+        """MT5 login currently bound to this device, if any (§7.2)."""
+        if self.ctx is None:
+            return None
+        try:
+            login = self.ctx.driver.connection_state_dict().get("login")
+        except Exception:  # noqa: BLE001 — a driver error must not break sync
+            return None
+        return str(login) if login is not None else None
+
+    def _restore_checkpoint(self) -> SyncCheckpoint:
+        """Restore the checkpoint from the store, or start at epoch.
+
+        A stored checkpoint is honoured only when it belongs to the
+        currently bound account (or was recorded without an account);
+        a record from another account is ignored so the new account
+        gets its full backfill (§7.3). A missing/corrupt store means
+        epoch — the store already logged why.
+        """
+        if self.checkpoint_store is None:
+            return SyncCheckpoint()
+        record = self.checkpoint_store.load()
+        if record is None:
+            return SyncCheckpoint()
+        stored_account = record.get("account_id")
+        bound = self._bound_account_id()
+        if stored_account is not None and bound is not None and stored_account != bound:
+            logger.warning(
+                "[SYNC] stored checkpoint belongs to account {} but this device "
+                "is bound to {} — ignoring it, full backfill (§7.3)",
+                stored_account, bound,
+            )
+            return SyncCheckpoint()
+        restored = SyncCheckpoint(start=str(record["checkpoint"]))
+        logger.info(
+            "[SYNC] restored sync checkpoint {} (account {}) — resuming, no full backfill",
+            restored.iso, stored_account or bound or "unknown",
+        )
+        return restored
+
+    def _persist_checkpoint(self) -> None:
+        """Persist the current checkpoint (best-effort, never raises)."""
+        if self.checkpoint_store is None:
+            return
+        try:
+            self.checkpoint_store.save(self.checkpoint.iso, account_id=self._bound_account_id())
+        except Exception as exc:  # noqa: BLE001 — persistence must never break sync
+            logger.warning("[SYNC] could not persist sync checkpoint: {}", type(exc).__name__)
 
     # ------------------------------------------------------------------
     # queueing
@@ -439,7 +501,10 @@ class SyncEngine:
             pages = _history_pages(kind, items, self.page_size)
             for page_index, page_items in enumerate(pages):
                 self.enqueue(kind, page_items)
-                self.checkpoint.advance_from_items(page_items)
+                if self.checkpoint.advance_from_items(page_items):
+                    # Persist on every advance: a restart resumes from
+                    # here instead of re-running the full backfill (§16).
+                    self._persist_checkpoint()
                 await self.flush()
                 sent[kind] += 1
                 if page_index < len(pages) - 1:
@@ -461,6 +526,9 @@ class SyncEngine:
         dropped_snapshots = len(self._pending_snapshots)
         self._pending_snapshots.clear()
         self.checkpoint.reset()
+        # Persist the reset: the new account must not inherit the old
+        # account's checkpoint on the next restart (§7.3).
+        self._persist_checkpoint()
         logger.warning(
             "[SYNC] account switch: discarded {} queued history batches + {} snapshots; "
             "checkpoint reset to epoch for a fresh backfill (§7.3)",

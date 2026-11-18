@@ -12,7 +12,9 @@ Implements the contract-conformant channel to NSE Platform:
   terminal for the key; the WS channel gates on REGISTERED.
 - :mod:`nse_bridge.server.sync` — sync engine: flat batch wire shape,
   checkpoint (max broker time, never backwards), bounded pending queue
-  (32), 500-item pages with a 250 ms pause (§3.3).
+  (32), 500-item pages with a 250 ms pause (§3.3); the checkpoint is
+  persisted via :mod:`nse_bridge.server.sync_checkpoint` (spec §16)
+  so a restart resumes instead of re-running a full backfill.
 - :mod:`nse_bridge.server.commands` — command envelope (§6.2),
   validation order (§6.3), lifecycle states (clarification #2),
   ``action.result`` envelope (§6.5), 3-op server allowlist (§6.1).
@@ -40,5 +42,6 @@ __all__ = [
     "queue",
     "rest",
     "sync",
+    "sync_checkpoint",
     "uuid7",
 ]
