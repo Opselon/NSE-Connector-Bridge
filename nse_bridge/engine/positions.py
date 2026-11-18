@@ -6,8 +6,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from ..errors import BridgeError, ErrorCode
-from ..mt5.types import build_position_model, f as _f
+from ..errors import BridgeError
+from ..mt5.types import build_position_model
+from ..mt5.types import f as _f
 from .common import BridgeContext
 from .registry import command
 from .trading import (
@@ -21,7 +22,9 @@ from .trading import (
 class PositionsRequest(BaseModel):
     symbol: str | None = Field(None, description="Filter by symbol")
     magic_filter: str = Field(
-        "all", pattern="^(all|bot)$", description="all = every position (dashboard); bot = our magic only"
+        "all", pattern="^(all|bot)$",
+        description="all = every position (dashboard); bot = our magic only "
+        "(matches nothing while no bridge magic is configured)",
     )
 
 
@@ -107,8 +110,14 @@ def get_trading_open_positions(ctx: BridgeContext, params: PositionsRequest | No
     positions = []
     floating = 0.0
     for row in raw:
-        if p.magic_filter == "bot" and int(_f(row, "magic", -1)) != int(ctx.settings.magic):
-            continue
+        if p.magic_filter == "bot":
+            # "bot" = positions carrying the configured bridge magic.
+            # With no magic configured there is no bridge identity, so
+            # the filter matches nothing (never the manual magic-0
+            # positions, and never every position).
+            bridge_magic = ctx.settings.magic
+            if bridge_magic is None or int(_f(row, "magic", -1)) != int(bridge_magic):
+                continue
         model = build_position_model(row, ctx.settings.broker_utc_offset_minutes)
         floating += float(_f(row, "profit", 0.0) or 0.0)
         positions.append(model.model_dump())
@@ -201,7 +210,6 @@ def get_position_risk(ctx: BridgeContext, params: TicketRequest) -> dict[str, An
     volume = float(_f(raw, "volume", 0.0) or 0.0)
     entry = float(_f(raw, "price_open", 0.0) or 0.0)
     sl = float(_f(raw, "sl", 0.0) or 0.0)
-    spec = None
     point = None
     ctx.driver.ensure_connected()
 

@@ -169,7 +169,6 @@ class BridgeContext:
     subscriptions: SubscriptionManager = field(default_factory=SubscriptionManager)
     trade_metrics: TradeExecMetrics = field(default_factory=TradeExecMetrics)
     bus: Any = None  # EventBus, wired at app startup (loop-bound; set once)
-    agent: Any = None  # AgentService, wired at app startup
     rest_client: Any = None  # RestClient (CONTRACT v1 §3), wired at app startup
     sync_engine: Any = None  # SyncEngine (CONTRACT v1 §3.3), wired at app startup
     server_channel_state: dict[str, Any] = field(

@@ -8,7 +8,8 @@ from loguru import logger
 from pydantic import BaseModel
 
 from ..errors import BridgeError, ErrorCode
-from ..mt5.types import TerminalInfoModel, f as _f
+from ..mt5.types import TerminalInfoModel
+from ..mt5.types import f as _f
 from .common import BridgeContext, datetime_now_iso
 from .registry import command
 
@@ -265,14 +266,18 @@ def get_mt5_server_info(ctx: BridgeContext, params: None) -> dict[str, Any]:
     company = _f(raw, "company") if raw else None
     term_name = _f(raw, "name") if raw else None
 
-    # latency probe: one symbol_info_tick roundtrip on the bot symbol
+    # latency probe: one symbol_info_tick roundtrip on the configured
+    # symbol (skipped when no bot_symbol is configured — there is no
+    # default symbol to probe).
     t0 = __import__("time").perf_counter()
+    tick = None
+    latency = None
+    if ctx.settings.bot_symbol:
+        def tick_job(mt5: Any):
+            return mt5.symbol_info_tick(ctx.settings.bot_symbol)
 
-    def tick_job(mt5: Any):
-        return mt5.symbol_info_tick(ctx.settings.bot_symbol)
-
-    tick = ctx.driver.run(tick_job, op="symbol_info_tick", context={"symbol": ctx.settings.bot_symbol})
-    latency = (__import__("time").perf_counter() - t0) * 1000.0 if tick is not None else None
+        tick = ctx.driver.run(tick_job, op="symbol_info_tick", context={"symbol": ctx.settings.bot_symbol})
+        latency = (__import__("time").perf_counter() - t0) * 1000.0 if tick is not None else None
     return {
         "server": acc.server,
         "company": company,

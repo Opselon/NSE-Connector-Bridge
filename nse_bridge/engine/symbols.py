@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from ..errors import BridgeError, ErrorCode
-from ..mt5.types import TRADE_MODE_LABELS, SymbolInfoModel, f as _f
+from ..mt5.types import TRADE_MODE_LABELS, SymbolInfoModel
+from ..mt5.types import f as _f
 from .common import BridgeContext, datetime_now_iso, require_symbol_info
 from .registry import command
 
@@ -239,7 +239,7 @@ def get_symbol_tick_size(ctx: BridgeContext, params: dict[str, Any] | None) -> d
     number=23,
     category="symbols",
     title="Get Symbol Point",
-    description="One point value for the symbol (e.g. 0.01 on XAUUSD 2-digit).",
+    description="One point value for the symbol (e.g. 0.00001 on EURUSD 5-digit).",
     response_model=PointResponse,
 )
 def get_symbol_point(ctx: BridgeContext, params: dict[str, Any] | None) -> dict[str, Any]:

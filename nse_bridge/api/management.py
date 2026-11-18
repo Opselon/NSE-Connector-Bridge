@@ -7,7 +7,6 @@ These sit on top of the 90-command surface — they operate the BRIDGE itself
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import Any, Literal
 
 from fastapi import APIRouter, Request
@@ -18,7 +17,6 @@ from ..config import persist_settings, validate_server_url
 from ..engine.common import BridgeContext, datetime_now_iso
 from ..errors import BridgeError, ErrorCode
 from ..logging_setup import redact_text
-from ..retcodes import translate_retcode
 from ..secrets import get_secret_store
 
 router = APIRouter(prefix="/api/v1", tags=["system"])
@@ -39,8 +37,10 @@ class SettingsUpdate(BaseModel):
     server_token: str | None = Field(None, description="API key issued on the NSE Platform site (stored in the secret store)")
     local_api_key: str | None = Field(None, description="Local X-API-Key gate (mandatory; stored in the secret store)")
     magic: int | None = Field(None, ge=0, le=2**31 - 1)
-    bot_symbol: str | None = Field(None, min_length=1, max_length=40)
-    default_timeframe: str | None = Field(None, min_length=2, max_length=4)
+    # Empty string = clear the configured value (no default symbol /
+    # timeframe is ever invented by the bridge).
+    bot_symbol: str | None = Field(None, min_length=0, max_length=40)
+    default_timeframe: str | None = Field(None, min_length=0, max_length=4)
     broker_utc_offset_minutes: int | None = Field(None, ge=-720, le=720)
     strict_magic_guard: bool | None = None
     stream_account_interval_ms: int | None = Field(None, ge=200, le=60000)
@@ -127,7 +127,7 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict[str,
     if changed:
         try:
             persist_settings(s)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("[SETTINGS] persist failed: {}", redact_text(str(exc)))
         logger.info("[SETTINGS] updated: {}", ", ".join(changed))
 
@@ -231,8 +231,13 @@ async def run_connection_checks(request: Request) -> dict[str, Any]:
     else:
         add("account_permissions", "Account trading permissions", "fail", "Driver not attached.")
 
-    # 5. bot symbol availability + tick freshness
-    if ctx.driver.connected:
+    # 5. bot symbol availability + tick freshness (skipped with a warn
+    # when no bot_symbol is configured — there is no default symbol).
+    if not ctx.settings.bot_symbol:
+        add("symbol_market", "Market data: (no symbol configured)", "warn",
+            "No bot_symbol is configured — set one in Settings to probe market data.",
+            "Settings → Primary symbol, e.g. the symbol the server trades on this device.")
+    elif ctx.driver.connected:
         try:
             from ..engine.common import require_symbol_info
             from ..engine.symbols import _fresh_tick
@@ -299,7 +304,7 @@ async def _probe_server(url: str, token: str, timeout: float = 5.0) -> tuple[boo
 
         await asyncio.wait_for(probe(), timeout=timeout + 1.0)
         return True, None
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return False, redact_text(str(exc))[:200]
 
 

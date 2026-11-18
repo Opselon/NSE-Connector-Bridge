@@ -41,7 +41,6 @@ from ..logging_setup import redact_text, sanitize_payload
 from ..realtime.bus import EventBus, start_streaming, stop_streaming
 from ..realtime.channel import ServerChannel
 from ..secrets import ensure_local_api_key
-from .agent_routes import router as agent_router
 from .management import router as management_router
 
 T = TypeVar("T")
@@ -183,14 +182,12 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.ctx = ctx
-    from ..agent.engine import AgentService
-    from ..agent.llm import LlmClient
-
-    ctx.agent = AgentService(ctx)
-    ctx.agent.config.llm = LlmClient.from_config(ctx.settings)
-    ctx.agent.config.symbol = ctx.settings.bot_symbol
+    # NOTE: the local AI Agent product (AgentService + agent routes) was
+    # removed in the client-only refactor (Phase 3). The Bridge is
+    # communication infrastructure; it never dispatches orders on its
+    # own analysis. Local commands stay available; the server channel
+    # enforces the contract §6.1 allowlist.
     app.include_router(management_router)
-    app.include_router(agent_router)
     register_dashboard(app)
 
     # --- middleware: request id + latency logs + mandatory API key ------

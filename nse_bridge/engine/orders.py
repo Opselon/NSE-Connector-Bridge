@@ -13,6 +13,8 @@ from ..mt5.types import (
     build_deal_model,
     build_history_order_model,
     build_order_model,
+)
+from ..mt5.types import (
     f as _f,
 )
 from ..retcodes import TRADE_RETCODE_DONE, translate_retcode
@@ -103,7 +105,7 @@ class OrderInfoResponse(BaseModel):
 class HistoryRequest(BaseModel):
     from_utc: str | None = Field(None, description="Default: last 24h")
     to_utc: str | None = None
-    symbol: str | None = Field(None, description="MT5 group filter (e.g. XAUUSD or XAU*)")
+    symbol: str | None = Field(None, description="MT5 group filter (e.g. EURUSD or EUR*)")
 
 
 class HistoryOrdersResponse(BaseModel):

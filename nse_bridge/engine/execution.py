@@ -31,7 +31,7 @@ class MarketOrderRequest(BaseModel):
     tp: float = Field(0.0, ge=0.0)
     deviation: int = Field(20, ge=0, le=1000)
     comment: str = Field("NSE_MARKET", max_length=31)
-    magic: int | None = Field(None, description="Override magic; default = bridge config")
+    magic: int | None = Field(None, description="Override magic; default = explicitly configured bridge magic, or no magic stamped when none is configured")
 
 
 @command(
@@ -153,7 +153,6 @@ def validate_pending(
             reasons.append("volume_not_multiple_of_step")
 
     is_buy = order_type.startswith("BUY")
-    is_stop = order_type.endswith("STOP")
     ask, bid = float(tick.ask), float(tick.bid)
     if order_type == "BUY_LIMIT" and price >= ask - min_gap + 1e-9:
         reasons.append("buy_limit_price_not_below_ask")
@@ -209,6 +208,10 @@ def trade_send_pending_order(ctx: BridgeContext, params: PendingOrderRequest) ->
     filling = resolve_filling_mode(ctx, symbol)
 
     def job(mt5: Any):
+        # No hardcoded magic: per-command magic wins, else the
+        # explicitly configured device magic, else the "magic" key is
+        # omitted entirely (MT5 records magic 0 = no magic stamped).
+        mgc = params.magic if params.magic is not None else ctx.settings.magic
         request = {
             "action": mt5.TRADE_ACTION_PENDING,
             "symbol": symbol,
@@ -217,11 +220,12 @@ def trade_send_pending_order(ctx: BridgeContext, params: PendingOrderRequest) ->
             "price": float(params.price),
             "sl": float(params.sl),
             "tp": float(params.tp),
-            "magic": int(params.magic if params.magic is not None else ctx.settings.magic),
             "comment": params.comment,
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": filling,
         }
+        if mgc is not None:
+            request["magic"] = int(mgc)
         if params.expiration_utc:
             from ..timeutil import broker_dt
 
@@ -232,7 +236,6 @@ def trade_send_pending_order(ctx: BridgeContext, params: PendingOrderRequest) ->
         return mt5.order_send(request)
 
     from ..retcodes import TRADE_RETCODE_DONE
-    from .trading import reject
 
     result = ctx.driver.run(job, op="order_send_pending", context={"symbol": symbol, "type": params.order_type})
     if result is None:

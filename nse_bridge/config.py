@@ -154,18 +154,32 @@ class BridgeSettings(BaseSettings):
     broker_utc_offset_minutes: int = 0  # broker server UTC offset (some brokers deviate)
 
     # --- trading identity ----------------------------------------------
-    magic: int = 888101
-    bot_symbol: str = "XAUUSD"
-    default_timeframe: str = "M1"
+    # No hardcoded trading identity. The Bridge stamps NO magic on an
+    # order unless one is supplied per command (the ``magic`` request
+    # field) or set explicitly as device configuration (PUT /settings
+    # or config.json). ``None`` = no magic stamped: MT5 then records
+    # the order with magic 0 (indistinguishable from a manual order).
+    # Likewise there is no default symbol or timeframe: callers pass
+    # them per command, or an operator sets ``bot_symbol`` /
+    # ``default_timeframe`` explicitly as device configuration. The
+    # server supplies the trading identity per command; the client
+    # never invents one.
+    magic: int | None = None
+    bot_symbol: str = ""
+    default_timeframe: str = ""
     strict_magic_guard: bool = False  # True = only touch positions/orders with our magic
+    # The guard applies ONLY when a magic IS configured (magic is not
+    # None). With no magic configured there is nothing to guard
+    # against, so the guard passes (see engine/trading._position_owns).
 
     # --- streaming ------------------------------------------------------
     stream_account_interval_ms: int = 1000
 
-    # NOTE: the AI-agent secret fields (agent_llm_base_url,
-    # agent_llm_api_key, agent_llm_model) and server_rest_base were
-    # removed in the client-only refactor (Phase 1). The agent package
-    # itself is deleted in Phase 3; these fields are already gone.
+    # NOTE: the AI-agent fields (LLM base URL / API key / model) and
+    # server_rest_base were removed in the client-only refactor; the
+    # local AI Agent product itself was deleted in Phase 3. Any such
+    # plaintext keys left in an old config.json are still scrubbed by
+    # the legacy-key migration in secrets.py.
 
     # --- logging --------------------------------------------------------
     log_level: str = "INFO"

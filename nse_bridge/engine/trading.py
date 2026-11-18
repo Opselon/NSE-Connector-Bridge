@@ -83,8 +83,14 @@ def fetch_position(ctx: BridgeContext, ticket: int) -> Any:
 
 
 def _position_owns(ctx: BridgeContext, raw: Any) -> bool:
-    """strict_magic_guard mode: only touch positions carrying our magic."""
-    if not ctx.settings.strict_magic_guard:
+    """strict_magic_guard mode: only touch positions carrying our magic.
+
+    The guard applies ONLY when a magic IS configured. With no magic
+    configured (``settings.magic is None`` — the default since the
+    client-only refactor removed the hardcoded magic) there is no
+    bridge identity to compare against, so the guard passes.
+    """
+    if not ctx.settings.strict_magic_guard or ctx.settings.magic is None:
         return True
     return int(_f(raw, "magic", -1)) == int(ctx.settings.magic)
 
@@ -148,12 +154,18 @@ def market_order(
     ctx.driver.ensure_connected()
     tick = _fresh_tick(ctx, symbol)
     filling = resolve_filling_mode(ctx, symbol)
-    mgc = int(magic if magic is not None else ctx.settings.magic)
+    # No hardcoded magic: per-command magic wins, else the explicitly
+    # configured device magic, else None = no magic stamped (the
+    # "magic" key is omitted, so MT5 records magic 0). The ambiguous-
+    # fill recovery fingerprint compares against 0 in that case,
+    # because that is the magic MT5 assigns to an unstamped order.
+    mgc = magic if magic is not None else ctx.settings.magic
+    mgc_for_match = mgc if mgc is not None else 0
 
     def job(mt5: Any):
         order_type = mt5.ORDER_TYPE_BUY if side == "buy" else mt5.ORDER_TYPE_SELL
         price = float(tick.ask) if side == "buy" else float(tick.bid)
-        return mt5.order_send({
+        request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
             "volume": float(volume),
@@ -162,11 +174,13 @@ def market_order(
             "sl": float(sl),
             "tp": float(tp),
             "deviation": int(deviation),
-            "magic": mgc,
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": filling,
-        })
+        }
+        if mgc is not None:
+            request["magic"] = int(mgc)
+        return mt5.order_send(request)
 
     raw = ctx.driver.run(job, op="order_send", context={"symbol": symbol, "side": side, "volume": volume})
     ms_probe = 0.0  # metrics handled inside order_send paths below
@@ -174,7 +188,7 @@ def market_order(
     if raw is None:
         ctx.trade_metrics.record("order_send", "unknown", ms_probe, None, {"symbol": symbol, "side": side})
         # ambiguous fill recovery: verify against broker truth before failing
-        recovered = _recover_ambiguous(ctx, symbol, side, mgc)
+        recovered = _recover_ambiguous(ctx, symbol, side, mgc_for_match)
         if recovered is not None:
             ctx.trade_metrics.record("order_send", "done", ms_probe, TRADE_RETCODE_DONE, {"symbol": symbol, "recovered": True})
             return _execution_payload(recovered, symbol, recovered=True)
@@ -186,7 +200,7 @@ def market_order(
     retcode = int(_f(raw, "retcode", 0))
     if retcode != TRADE_RETCODE_DONE:
         ctx.trade_metrics.record("order_send", "rejected", ms_probe, retcode, {"symbol": symbol, "side": side})
-        recovered = _recover_ambiguous(ctx, symbol, side, mgc)
+        recovered = _recover_ambiguous(ctx, symbol, side, mgc_for_match)
         if recovered is not None:
             logger.warning(
                 "[ORDER_WRITE] retcode={} but live position found (ticket={}) — ambiguous fill treated as success",

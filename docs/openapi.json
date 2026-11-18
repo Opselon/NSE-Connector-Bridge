@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "NSE MT5 Bridge API",
-    "description": "**NSE Platform secure local bridge** — one endpoint per command. The bridge attaches to the client's local MetaTrader 5 terminal through the official native C++ IPC driver and exposes exactly the 90 NSE bridge commands documented below. All endpoints are uniform `POST` JSON calls returning `{ok, data}` envelopes; broker rejections carry the official MT5 retcode.\n\n*Security:* bind is localhost-only by default; an optional `X-API-Key` gate is configurable; the platform talks to this bridge over an outbound-authenticated WebSocket channel (no inbound ports).\n\n*Real-time:* `/ws/ui` streams ticks + account updates to the local dashboard.",
+    "description": "**NSE Platform secure local bridge** — one endpoint per command. The bridge attaches to the client's local MetaTrader 5 terminal through the official native C++ IPC driver and exposes exactly the 90 NSE bridge commands documented below. All endpoints are uniform `POST` JSON calls returning `{ok, data}` envelopes; broker rejections carry the official MT5 retcode.\n\n*Security:* bind is localhost-only by default; a mandatory `X-API-Key` gate protects every /api/v1/ endpoint (auto-generated on first run, stored in the OS secret store); the platform talks to this bridge over an outbound-authenticated WebSocket channel (no inbound ports).\n\n*Real-time:* `/ws/ui` streams ticks + account updates to the local dashboard.",
     "version": "1.0.0"
   },
   "paths": {
@@ -34,7 +34,7 @@
           "system"
         ],
         "summary": "Update bridge settings",
-        "description": "Partial update. Persisted to config.json. Server-channel fields apply immediately (the outbound channel restarts when URL/token change).",
+        "description": "Partial update. Non-secret fields are persisted to config.json. Secrets (server_token, local_api_key) are routed through the secret store and never written to config.json. Server-channel fields apply immediately (the outbound channel restarts when URL/token change).",
         "operationId": "update_settings_api_v1_settings_put",
         "requestBody": {
           "content": {
@@ -113,168 +113,6 @@
                   "additionalProperties": true,
                   "type": "object",
                   "title": "Response Restart Server Channel Api V1 Server Channel Restart Post"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/agent/analyze": {
-      "post": {
-        "tags": [
-          "ai-agent"
-        ],
-        "summary": "Run the multi-engine AI Agent analysis",
-        "operationId": "agent_analyze_api_v1_agent_analyze_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/AnalyzeRequest"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "title": "Body"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Agent Analyze Api V1 Agent Analyze Post"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/agent/status": {
-      "get": {
-        "tags": [
-          "ai-agent"
-        ],
-        "summary": "AI Agent status",
-        "operationId": "agent_status_api_v1_agent_status_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Agent Status Api V1 Agent Status Get"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/agent/config": {
-      "put": {
-        "tags": [
-          "ai-agent"
-        ],
-        "summary": "Configure the AI Agent (mode/aggression/LLM/news)",
-        "operationId": "agent_config_api_v1_agent_config_put",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentConfigRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Agent Config Api V1 Agent Config Put"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/agent/execute": {
-      "post": {
-        "tags": [
-          "ai-agent"
-        ],
-        "summary": "Execute the last approved proposal (mode=auto only)",
-        "operationId": "agent_execute_api_v1_agent_execute_post",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Agent Execute Api V1 Agent Execute Post"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/agent/coach": {
-      "get": {
-        "tags": [
-          "ai-agent"
-        ],
-        "summary": "COACH verdict for the current session",
-        "operationId": "agent_coach_api_v1_agent_coach_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Agent Coach Api V1 Agent Coach Get"
                 }
               }
             }
@@ -1423,7 +1261,7 @@
           "symbols"
         ],
         "summary": "[23] Get Symbol Point",
-        "description": "One point value for the symbol (e.g. 0.01 on XAUUSD 2-digit).",
+        "description": "One point value for the symbol (e.g. 0.00001 on EURUSD 5-digit).",
         "operationId": "get_symbol_point",
         "requestBody": {
           "content": {
@@ -4762,130 +4600,6 @@
   },
   "components": {
     "schemas": {
-      "AgentConfigRequest": {
-        "properties": {
-          "mode": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Mode",
-            "description": "one of ('observe', 'advisory', 'auto')"
-          },
-          "aggression": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "maximum": 100.0,
-                "minimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Aggression",
-            "description": "0 = sniper, 100 = degen"
-          },
-          "symbol": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Symbol"
-          },
-          "llm_base_url": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Base Url",
-            "description": "OpenAI-compatible /v1 base; empty keeps current"
-          },
-          "llm_api_key": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Api Key",
-            "description": "empty/absent keeps the current key"
-          },
-          "llm_model": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Model"
-          },
-          "news_items": {
-            "anyOf": [
-              {
-                "items": {
-                  "additionalProperties": true,
-                  "type": "object"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "News Items",
-            "description": "news items for the sentiment engine: {title, impact, time_utc}"
-          },
-          "auto_execute": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Auto Execute",
-            "description": "explicit consent for mode=auto to dispatch orders"
-          }
-        },
-        "type": "object",
-        "title": "AgentConfigRequest"
-      },
-      "AnalyzeRequest": {
-        "properties": {
-          "symbol": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Symbol",
-            "description": "default: the configured agent symbol"
-          }
-        },
-        "type": "object",
-        "title": "AnalyzeRequest"
-      },
       "AvailableTimeframesResponse": {
         "properties": {
           "timeframes": {
@@ -5385,17 +5099,6 @@
             ],
             "title": "Login"
           },
-          "password": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Password"
-          },
           "server": {
             "anyOf": [
               {
@@ -5443,7 +5146,7 @@
         },
         "type": "object",
         "title": "ConnectRequest",
-        "description": "Optional runtime overrides — config file values remain the defaults."
+        "description": "Optional runtime overrides — config file values remain the defaults.\n\nNOTE: there is deliberately NO password field. The user signs in\nthrough MT5 itself; the bridge never asks for the MT5 password."
       },
       "ConnectResponse": {
         "properties": {
@@ -7550,7 +7253,7 @@
               }
             ],
             "title": "Symbol",
-            "description": "MT5 group filter (e.g. XAUUSD or XAU*)"
+            "description": "MT5 group filter (e.g. EURUSD or EUR*)"
           }
         },
         "type": "object",
@@ -7977,7 +7680,7 @@
               }
             ],
             "title": "Magic",
-            "description": "Override magic; default = bridge config"
+            "description": "Override magic; default = explicitly configured bridge magic, or no magic stamped when none is configured"
           }
         },
         "type": "object",
@@ -9003,7 +8706,7 @@
             "type": "string",
             "pattern": "^(all|bot)$",
             "title": "Magic Filter",
-            "description": "all = every position (dashboard); bot = our magic only",
+            "description": "all = every position (dashboard); bot = our magic only (matches nothing while no bridge magic is configured)",
             "default": "all"
           }
         },
@@ -9309,7 +9012,7 @@
               }
             ],
             "title": "Server Token",
-            "description": "API key issued on the NSE Platform site"
+            "description": "API key issued on the NSE Platform site (stored in the secret store)"
           },
           "local_api_key": {
             "anyOf": [
@@ -9321,7 +9024,7 @@
               }
             ],
             "title": "Local Api Key",
-            "description": "Local X-API-Key gate (empty = open on localhost)"
+            "description": "Local X-API-Key gate (mandatory; stored in the secret store)"
           },
           "magic": {
             "anyOf": [
@@ -9341,7 +9044,7 @@
               {
                 "type": "string",
                 "maxLength": 40,
-                "minLength": 1
+                "minLength": 0
               },
               {
                 "type": "null"
@@ -9354,7 +9057,7 @@
               {
                 "type": "string",
                 "maxLength": 4,
-                "minLength": 2
+                "minLength": 0
               },
               {
                 "type": "null"
@@ -9447,7 +9150,7 @@
         },
         "type": "object",
         "title": "SettingsUpdate",
-        "description": "Partial bridge configuration update. Omitted fields stay unchanged."
+        "description": "Partial bridge configuration update. Omitted fields stay unchanged.\n\nSecret fields (``server_token``, ``local_api_key``) are accepted\nhere but NEVER written to config.json — the update handler routes\nthem through the secret store."
       },
       "SimpleOrderRequest": {
         "properties": {

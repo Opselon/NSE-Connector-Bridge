@@ -59,6 +59,19 @@ def test_mt5_defaults():
     assert s.broker_utc_offset_minutes == 0
 
 
+def test_no_hardcoded_trading_identity():
+    # Phase 3 (client-only refactor): the bridge stamps NO magic and
+    # assumes NO symbol or timeframe unless explicitly configured.
+    # Magic/symbol come from the server per command or from explicit
+    # device configuration (PUT /settings / config.json) — never from
+    # a client default. None/"" means "unconfigured".
+    s = _settings()
+    assert s.magic is None
+    assert s.bot_symbol == ""
+    assert s.default_timeframe == ""
+    assert s.strict_magic_guard is False
+
+
 def _backoff_schedule(initial_ms: int, max_ms: int, steps: int) -> list[float]:
     """Mirror of the schedule in realtime/channel.py::backoff_delay (no jitter)."""
     backoff = initial_ms / 1000.0

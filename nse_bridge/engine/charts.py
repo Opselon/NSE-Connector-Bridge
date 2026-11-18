@@ -9,15 +9,29 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from ..errors import BridgeError, ErrorCode
-from ..mt5.types import TIMEFRAME_NAMES, build_rate_bar_model, f as _f
+from ..mt5.types import TIMEFRAME_NAMES, build_rate_bar_model
 from ..timeutil import broker_dt
 from .common import BridgeContext
 from .registry import command
 
 
 def resolve_timeframe(ctx: BridgeContext, timeframe: str | None) -> tuple[int, str]:
-    """MT5 timeframe enum + canonical name; VALIDATION error on unknown."""
-    name = (timeframe or ctx.settings.default_timeframe).upper()
+    """MT5 timeframe enum + canonical name; VALIDATION error on unknown.
+
+    There is no hardcoded default timeframe: the caller must pass one,
+    or the operator must set ``default_timeframe`` explicitly as device
+    configuration. An absent timeframe in both places is a validation
+    error, never a silent fallback.
+    """
+    name = (timeframe or ctx.settings.default_timeframe or "").strip().upper()
+    if not name:
+        raise BridgeError(
+            ErrorCode.VALIDATION,
+            "No timeframe given and no default_timeframe is configured. "
+            "Pass a timeframe (e.g. M1) or set default_timeframe in Settings.",
+            details={"supported": list(TIMEFRAME_NAMES)},
+            http_status=422,
+        )
 
     def job(mt5: Any):
         return getattr(mt5, f"TIMEFRAME_{name}", None)
@@ -319,7 +333,17 @@ def get_chart_objects(ctx: BridgeContext, params: None) -> dict[str, Any]:
     response_model=ChartActiveInfoResponse,
 )
 def get_chart_active_info(ctx: BridgeContext, params: None) -> dict[str, Any]:
+    # No default symbol: the chart context needs an explicitly
+    # configured bot_symbol (device configuration), otherwise the
+    # command cannot know which symbol's tick to report.
     symbol = ctx.settings.bot_symbol
+    if not symbol:
+        raise BridgeError(
+            ErrorCode.VALIDATION,
+            "No chart symbol configured: set bot_symbol in Settings "
+            "(or pass a symbol to a chart command that takes one).",
+            http_status=422,
+        )
     from .symbols import _fresh_tick
 
     tick = _fresh_tick(ctx, symbol)

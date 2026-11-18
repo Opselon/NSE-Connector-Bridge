@@ -22,12 +22,12 @@ import os
 import queue
 import threading
 import time
-import uuid
+from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from loguru import logger
 
@@ -60,7 +60,7 @@ def auto_discover_terminal_path() -> str | None:
                         return str(val)
             except OSError:
                 continue
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     return None
 
@@ -218,14 +218,14 @@ class Mt5Driver:
         try:
             err = self._mt5.last_error() if self._mt5 else None
             return err[0] if err else None
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     def _last_error_message(self) -> str | None:
         try:
             err = self._mt5.last_error() if self._mt5 else None
             return str(err[1]) if err else None
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     # ------------------------------------------------------------------
@@ -318,18 +318,18 @@ class Mt5Driver:
             vers = mt5.version()
             if vers:
                 pkg_ver = f"{vers[0]}.{vers[1]}.{vers[2]}" if len(vers) >= 3 else str(vers[0])
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
         try:
             term_info = mt5.terminal_info()
             term_ver = str(getattr(term_info, "name", "") or "") or None
-        except Exception:
+        except Exception:  # noqa: BLE001
             term_info = None
         try:  # login: terminal_info may not carry it on newer builds — use account
             acc = mt5.account_info()
             if acc is not None and getattr(acc, "login", None):
                 self._login = int(acc.login)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
         self._pkg_version, self._terminal_version = pkg_ver, term_ver
 
@@ -397,11 +397,12 @@ class Mt5Driver:
         """
         try:
             freshest = 0.0
-            for sym in (self.settings.bot_symbol, "EURUSD", "GBPUSD", "USDJPY"):
+            # No default symbol: skip the empty slot when no bot_symbol
+            # is configured (the remaining majors still probe the offset).
+            for sym in (s for s in (self.settings.bot_symbol, "EURUSD", "GBPUSD", "USDJPY") if s):
                 raw = mt5.symbol_info_tick(sym)
                 t = float(getattr(raw, "time", 0) or 0) if raw is not None else 0.0
-                if t > freshest:
-                    freshest = t
+                freshest = max(freshest, t)
             if freshest <= 0:
                 logger.info("[MT5] broker offset detection skipped — no ticks available")
                 return
@@ -415,7 +416,7 @@ class Mt5Driver:
                     offset, self.settings.broker_utc_offset_minutes,
                 )
                 self.settings.broker_utc_offset_minutes = offset
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("[MT5] broker offset detection failed: {}", exc)
 
     def disconnect(self) -> dict[str, Any]:
@@ -423,12 +424,12 @@ class Mt5Driver:
             try:
                 mt5.shutdown()
                 logger.info("MetaTrader 5 IPC connection closed.")
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.warning("[MT5_DISCONNECT] shutdown() raised; handle already released")
 
         try:
             self.run(job, op="shutdown")
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
         self._connected = False
         self._set_state("DISCONNECTED", "disconnected")
@@ -452,7 +453,7 @@ class Mt5Driver:
 
         try:
             info = self.run(job, op="terminal_info")
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
         if info and not info["connected"]:
             self._set_state("TERMINAL_ERROR", "terminal reports disconnected")
