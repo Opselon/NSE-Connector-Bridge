@@ -79,6 +79,16 @@ compute (§7) — but no engine is implemented now.
 │                  lazy import (collection works without MT5);   │
 │                  discovery: env → standard paths → App Paths → │
 │                  custom/portable dirs → running processes      │
+│  symbols/  broker-aware symbol discovery + resolution (spec §4, │
+│            gap C1 — see docs/SYMBOLS.md): SymbolMetadata (all   │
+│            broker fields, None when unreported, never invented),│
+│            SymbolInventory (all/visible/hidden/search/          │
+│            availability), SymbolResolver (canonical BASE/QUOTE  │
+│            → exact broker symbol; ambiguous, never guesses;     │
+│            mapping cache + refresh/invalidate). BRIDGE-LOCAL:   │
+│            CONTRACT v1 defines no canonical format and no      │
+│            symbol-inventory channel (D7); the only contract     │
+│            symbol path is the §17.1 chart protocol.             │
 │  engine/  the 90-command local registry (registry.py) +        │
 │           handlers: connection, account, symbols, market,      │
 │           charts, positions, orders, trading (execution        │
@@ -259,7 +269,25 @@ fallbacks: an unsupported fallback is an explicit structured error,
 never a silent success. `ok` means "the fault was detected AND the
 correct handling ran", not "everything is fine".
 
-## 7. What is deliberately NOT here
+## 8. Symbols — discovery and resolution (spec §4, gap C1)
+
+`nse_bridge/symbols/` maps a server-supplied canonical instrument ID
+(`BASE/QUOTE`, e.g. `XAU/USD` — a BRIDGE-LOCAL scheme, see below) to
+the exact broker symbol name MT5 needs (`XAUUSD.a`), with full broker
+metadata for comparison. `SymbolResolver.resolve()` returns
+`resolved | ambiguous | not_found`; several candidates are reported
+`ambiguous` with the full candidate list — never guessed between —
+unless caller-supplied `expected` metadata leaves exactly one
+standing. The mapping cache (TTL 300 s) is dropped via `invalidate()`
+when the broker environment changes (B3 `broker_connection_change`
+self-healing hook). Contract dependency D7: CONTRACT v1 defines no
+canonical format and no symbol-inventory sync channel — the only
+contract symbol path is the §17.1 chart protocol — so the scheme is
+Bridge-local and no frame or endpoint is invented. Full rules,
+ambiguity policy, cache/refresh, and the honest hidden-symbol
+completeness caveat: **docs/SYMBOLS.md**.
+
+## 9. What is deliberately NOT here
 
 - **No backtest.** Zero backtest code, no backtest screen, no
   backtest status — intentionally excluded per clarification #2.

@@ -964,3 +964,37 @@ class Mt5Driver:
         if info and not info["connected"]:
             self._set_state("TERMINAL_ERROR", "terminal reports disconnected")
         return info
+
+    # ------------------------------------------------------------------
+    # symbol accessors (spec §4 / gap C1 — minimal surface for
+    # nse_bridge.symbols; no IPC or execution behaviour changes here)
+    # ------------------------------------------------------------------
+    def symbols_get(self) -> list[Any] | None:
+        """All symbols the terminal reports (``mt5.symbols_get()``).
+
+        The inventory built from this is exactly what the driver
+        reported — hidden-symbol completeness is driver/broker
+        dependent (see ``nse_bridge.symbols.inventory``). Returns
+        ``None`` only when MT5 itself returns ``None``.
+        """
+
+        def job(mt5: Any) -> list[Any] | None:
+            return mt5.symbols_get()
+
+        return self.run(job, op="symbols_get")
+
+    def symbol_info(self, name: str) -> Any | None:
+        """One symbol's ``SymbolInfo`` record (``None`` when unknown)."""
+
+        def job(mt5: Any) -> Any | None:
+            return mt5.symbol_info(name)
+
+        return self.run(job, op="symbol_info", context={"symbol": name})
+
+    def symbol_select(self, name: str, enable: bool = True) -> bool:
+        """Add/remove ``name`` from Market Watch; returns the broker answer."""
+
+        def job(mt5: Any) -> bool:
+            return bool(mt5.symbol_select(name, enable))
+
+        return self.run(job, op="symbol_select", context={"symbol": name})
