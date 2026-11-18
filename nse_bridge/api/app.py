@@ -136,11 +136,23 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         # context. The diagnostics sink stays inert (NullDiagnosticsSink
         # semantics — no endpoint exists in CONTRACT v1 §4.2) until a
         # future contract version defines one.
-        from ..reliability import SelfHealingRegistry, TelemetryEmitter
+        from ..reliability import (
+            DurableDiagnosticQueue,
+            DurableDiagnosticStore,
+            SelfHealingRegistry,
+            TelemetryEmitter,
+        )
 
+        # Spec §12/§16 (Phase E N2): WARN/ERROR diagnostics survive a
+        # Bridge restart — the emitter's queue is the durable one
+        # (bounded JSONL mirror, pending_diagnostics.jsonl in data_dir),
+        # not the in-memory default. Persistence preserves events; it
+        # does not deliver them — delivery still waits on the Platform
+        # D1 endpoint, and the sink stays inert until then.
         telemetry = TelemetryEmitter(
             ctx.get_or_create_device_id(),
             diagnostic_mode=ctx.settings.diagnostic_mode,
+            queue=DurableDiagnosticQueue(DurableDiagnosticStore(ctx.settings.data_dir / "pending_diagnostics.jsonl")),
         )
         ctx.telemetry = telemetry
         app.state.telemetry = telemetry
@@ -164,6 +176,23 @@ def create_app(ctx: BridgeContext) -> FastAPI:
             ctx,
             checkpoint_store=SyncCheckpointStore(ctx.settings.data_dir / CHECKPOINT_FILENAME),
         )
+        # Spec §8 (Phase C3, Phase E N1): the journal collector is wired
+        # into the production sync engine — it is fed from the records
+        # the engine already fetches (live snapshots + history), never
+        # a second fetch. It shares the engine's checkpoint (advances
+        # from event times) and persists through the engine's own
+        # callback; broker times use the same UTC-offset basis as the
+        # sync checkpoint. account_login stays None until a terminal
+        # account is bound; the engine resets the collector on account
+        # switch (§7.3), so no account inherits another's dedup state.
+        from ..journal.collector import JournalCollector
+
+        journal = JournalCollector(
+            checkpoint=sync_engine.checkpoint,
+            persist_checkpoint=sync_engine._persist_checkpoint,
+            broker_offset_minutes=ctx.settings.broker_utc_offset_minutes,
+        )
+        sync_engine.journal = journal
         ctx.rest_client = rest_client
         ctx.sync_engine = sync_engine
         app.state.rest_client = rest_client
