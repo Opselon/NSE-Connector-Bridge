@@ -182,6 +182,15 @@ class RestClient:
         self._sleep = sleep or asyncio.sleep
         self._transport = transport
         self._client: httpx.AsyncClient | None = None
+        # In-flight requests (spec §2 "request cancellation where
+        # supported"): every ``_request`` registers the asyncio task
+        # awaiting it here, so ``cancel_all()`` / ``close()`` can abort
+        # a request instead of awaiting its full timeout. ``asyncio``
+        # task cancellation is the cancellation mechanism — httpx
+        # propagates ``CancelledError`` out of an awaited request, and
+        # ``_request_inner`` never swallows it (it is not a
+        # ``TransportError`` and is never retried).
+        self._inflight: set[asyncio.Task[Any]] = set()
         # Enrolment state machine (nse_bridge.server.enrolment), wired
         # at app startup. When set, a 401 re-enrolment notifies it so
         # the state (REGISTERED / FAILED_AUTH / FAILED_TRANSIENT) stays
@@ -220,9 +229,36 @@ class RestClient:
         return self._client
 
     async def close(self) -> None:
+        # Shutdown aborts in-flight requests instead of awaiting their
+        # full timeout (spec §2 request cancellation): cancel them,
+        # then wait for them to unwind before closing the client.
+        await self.cancel_all()
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+
+    @property
+    def inflight_count(self) -> int:
+        """Number of requests currently awaiting a response."""
+        return len(self._inflight)
+
+    async def cancel_all(self) -> int:
+        """Cancel every in-flight request except the caller's own task.
+
+        Returns how many requests were cancelled. Each cancelled
+        request raises :class:`asyncio.CancelledError` promptly in the
+        task that awaited it (never a ``ServerError``, never a retry).
+        A request cancelled this way MUST be treated by the caller as
+        "outcome unknown" — it may have reached the server — so it is
+        never silently retried here; the caller decides.
+        """
+        current = asyncio.current_task()
+        targets = [t for t in list(self._inflight) if t is not current and not t.done()]
+        for task in targets:
+            task.cancel()
+        if targets:
+            await asyncio.gather(*targets, return_exceptions=True)
+        return len(targets)
 
     async def __aenter__(self) -> Self:
         return self
@@ -249,6 +285,35 @@ class RestClient:
             return None
 
     async def _request(
+        self,
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None,
+        *,
+        allow_reauth: bool = True,
+        _reattempted: bool = False,
+    ) -> Any:
+        """Register the awaiting task for cancellation, then run it.
+
+        ``asyncio.current_task()`` is the task that owns this request;
+        ``cancel_all()`` cancels it, and ``CancelledError`` propagates
+        out of ``_request_inner`` untouched (never converted to a
+        ``ServerError``, never retried).
+        """
+        task = asyncio.current_task()
+        if task is None:
+            return await self._request_inner(
+                method, path, json_body, allow_reauth=allow_reauth, _reattempted=_reattempted
+            )
+        self._inflight.add(task)
+        try:
+            return await self._request_inner(
+                method, path, json_body, allow_reauth=allow_reauth, _reattempted=_reattempted
+            )
+        finally:
+            self._inflight.discard(task)
+
+    async def _request_inner(
         self,
         method: str,
         path: str,

@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from .errors import ServerError
+from .manifest import ManifestTracker, build_manifest
 
 if TYPE_CHECKING:
     from ..engine.common import BridgeContext
@@ -132,6 +133,7 @@ class EnrolmentManager:
         retry_cap_s: float = ENROLMENT_BACKOFF_CAP_S,
         jitter: bool = True,
         telemetry: Any | None = None,
+        manifest_tracker: ManifestTracker | None = None,
     ) -> None:
         self._ctx = ctx
         self._rest = rest_client
@@ -140,6 +142,10 @@ class EnrolmentManager:
         self._jitter = jitter
         # TelemetryEmitter (ARCHITECTURE-CONTRACT §8), optional.
         self.telemetry = telemetry if telemetry is not None else getattr(ctx, "telemetry", None)
+        # Manifest tracker (§4.1): shared with the WS channel so the
+        # REST post here and the WS ``manifest.update`` frame there
+        # agree on what the server already has.
+        self.manifest_tracker = manifest_tracker or ManifestTracker()
         self._status = EnrolmentStatus(configured=self.is_configured)
         self._transient_failures = 0
         self.backoff_delays: list[float] = []
@@ -317,7 +323,23 @@ class EnrolmentManager:
             "[ENROL] device enrolled (user_id={}, session_expires_at={})",
             self._rest.user_id, self.session_expires_at,
         )
+        # §4.1: POST the action manifest once enrolled (unchanged-hash
+        # no-op via the tracker). Best-effort: a manifest failure must
+        # NOT un-enrol the device — the manifest is retried on the next
+        # change / re-enrolment, and the WS channel also reports it.
+        await self._publish_manifest()
         return True
+
+    async def _publish_manifest(self) -> None:
+        """POST the §4.1 manifest if its hash changed. Never raises."""
+        try:
+            manifest = build_manifest(
+                self._ctx.get_or_create_device_id(),
+                driver=getattr(self._ctx, "driver", None),
+            )
+            await self.manifest_tracker.send_via_rest(self._rest, manifest)
+        except Exception as exc:  # noqa: BLE001 — manifest must never break enrolment
+            logger.warning("[ENROL] manifest post failed ({}); will retry on next change", type(exc).__name__)
 
     # ------------------------------------------------------------------
     # Re-enrolment notifications from the REST client (§3.2). The
