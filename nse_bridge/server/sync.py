@@ -41,6 +41,15 @@ Rules implemented here:
   discarded (they must never be sent under the new account), the
   checkpoint resets to epoch (fresh backfill for the new account),
   and the caller re-sends ``account`` then ``positions`` then history.
+- Journal + accounting labelling (spec §§8-9, Phase C3): when a
+  ``JournalCollector`` is attached, the records this engine already
+  fetches feed it (history records in ``sync_history``, live
+  snapshots in ``send_positions``) — history is never fetched twice
+  for the journal, and journaling never breaks sync. The ``account``
+  batch carries a ``provenance`` map and every history page carries
+  ``provenance`` (+ ``balance_operations`` on deals pages); see
+  ``docs/JOURNAL.md``. There is no journal upload channel in
+  CONTRACT v1 (dependency D6) and no new sync kind (D8).
 
 Snapshot providers are injectable callables so tests can drive the
 engine without MT5; the defaults read the live terminal through the
@@ -57,6 +66,8 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from ..journal.accounting import label_account_snapshot, label_closed_position, surface_balance_operations
+from ..journal.collector import JournalCollector
 from ..timeutil import normalize_utc
 from .errors import ServerError
 from .queue import BoundedPendingQueue
@@ -251,6 +262,7 @@ class SyncEngine:
         positions_snapshot: Callable[[], Awaitable[dict[str, Any]]] | None = None,
         history_orders: Callable[[datetime, datetime], Awaitable[dict[str, Any]]] | None = None,
         history_positions: Callable[[datetime, datetime], Awaitable[dict[str, Any]]] | None = None,
+        journal: JournalCollector | None = None,
     ) -> None:
         self.rest = rest
         self.ctx = ctx
@@ -271,6 +283,15 @@ class SyncEngine:
         self._positions_snapshot = positions_snapshot or self._default_positions_snapshot
         self._history_orders = history_orders or self._default_history_orders
         self._history_positions = history_positions or self._default_history_positions
+        # Journal collector (spec §8, Phase C3): fed from the records
+        # this engine already fetches — history is never fetched twice
+        # for the journal. None means journaling is off (tests, or a
+        # build without the collector wired in). Events live in the
+        # collector's bounded store; there is no journal upload channel
+        # in CONTRACT v1 (dependency D6).
+        self.journal = journal
+        self._last_positions: list[dict[str, Any]] | None = None
+        self._last_orders: list[dict[str, Any]] | None = None
 
     # ------------------------------------------------------------------
     # checkpoint persistence (spec §16)
@@ -466,8 +487,27 @@ class SyncEngine:
     async def send_positions(self) -> dict[str, Any]:
         items = await self._positions_snapshot()
         batch = self.enqueue("positions", items)
+        self._journal_diff_positions(items)
         await self.flush()
         return batch
+
+    def _journal_diff_positions(self, items: dict[str, Any]) -> None:
+        """Feed the live positions/orders snapshot to the journal.
+
+        The first snapshot is the baseline (no events); later ones
+        emit opened/modified/pending events from real state deltas.
+        Journaling must never break sync, so failures are logged only.
+        """
+        if self.journal is None:
+            return
+        try:
+            positions = list(items.get("positions", []))
+            orders = list(items.get("orders", []))
+            self.journal.diff_snapshots(self._last_positions, self._last_orders, positions, orders)
+            self._last_positions = positions
+            self._last_orders = orders
+        except Exception as exc:  # noqa: BLE001 — journaling must never break sync
+            logger.warning("[SYNC] journal snapshot diff failed: {}", type(exc).__name__)
 
     async def handle_sync_request(self) -> None:
         """§5.2 / §7.3 — server asks for an out-of-band refresh.
@@ -500,6 +540,7 @@ class SyncEngine:
             except Exception as exc:  # noqa: BLE001 — one kind must not kill the other
                 logger.warning("[SYNC] history fetch {} failed: {}", kind, type(exc).__name__)
                 continue
+            self._journal_collect_history(kind, items, from_dt, to_dt)
             records = _primary_records(kind, items)
             pages = _history_pages(kind, items, self.page_size)
             for page_index, page_items in enumerate(pages):
@@ -515,6 +556,38 @@ class SyncEngine:
             logger.info("[SYNC] {} sent {} page(s) ({} records)", kind, len(pages), len(records))
         return sent
 
+    def _journal_collect_history(self, kind: str, items: dict[str, Any], from_dt: datetime, to_dt: datetime) -> None:
+        """Feed just-fetched history records to the journal collector.
+
+        The collector builds events only from these MT5 records, with
+        the same bounded range the sync used. Journaling must never
+        break sync, so failures are logged only.
+        """
+        if self.journal is None:
+            return
+        try:
+            if kind == "history_orders":
+                self.journal.collect_from_history(
+                    orders=list(items.get("orders", [])),
+                    deals=list(items.get("deals", [])),
+                    from_dt=from_dt,
+                    to_dt=to_dt,
+                )
+            else:
+                self.journal.collect_from_history(
+                    closed_positions=list(items.get("positions", [])),
+                    from_dt=from_dt,
+                    to_dt=to_dt,
+                )
+        except Exception as exc:  # noqa: BLE001 — journaling must never break sync
+            logger.warning("[SYNC] journal history collection failed: {}", type(exc).__name__)
+
+    def journal_events(self) -> list[dict[str, Any]]:
+        """Current journal events as stable dicts (Phase C4 GUI input)."""
+        if self.journal is None:
+            return []
+        return self.journal.event_dicts()
+
     # ------------------------------------------------------------------
     # account switch (§7.3)
     # ------------------------------------------------------------------
@@ -528,6 +601,12 @@ class SyncEngine:
         dropped = self._pending_history.clear()
         dropped_snapshots = len(self._pending_snapshots)
         self._pending_snapshots.clear()
+        self._last_positions = None
+        self._last_orders = None
+        if self.journal is not None:
+            # The new account must not inherit the old account's dedup
+            # state or events (§7.3).
+            self.journal.reset()
         self.checkpoint.reset()
         # Persist the reset: the new account must not inherit the old
         # account's checkpoint on the next restart (§7.3).
@@ -573,7 +652,13 @@ class SyncEngine:
             "connection": {"state": state.get("state")},
             "program_name": state.get("terminal_version"),
         }
-        return {"account": account, "terminal": terminal}
+        # Accounting provenance (spec §9, Phase C3 / D8): which values
+        # the broker supplied vs the Bridge derived. The labelling
+        # rides inside the existing ``account`` batch — no new sync
+        # kind. ``realized_profit`` is always ``not_reported`` here;
+        # it lives in deal history.
+        provenance = {key: labelled.provenance for key, labelled in label_account_snapshot(account).items()}
+        return {"account": account, "terminal": terminal, "provenance": provenance}
 
     async def _default_account_snapshot(self) -> dict[str, Any]:
         from starlette.concurrency import run_in_threadpool
@@ -680,7 +765,12 @@ def _history_pages(kind: str, items: dict[str, Any], page_size: int) -> list[dic
 
     A history_orders page carries either an ``orders`` chunk or a
     ``deals`` chunk (never a mixed page split by dict equality); a
-    history_positions page carries a ``positions`` chunk.
+    history_positions page carries a ``positions`` chunk. Every page
+    also carries accounting labelling (spec §9, Phase C3 / D8): a
+    ``provenance`` map and, on deals pages, ``balance_operations`` —
+    the deposits/withdrawals/adjustments/fees/credits classified from
+    that page's own deals (raw broker values, no sums). No new sync
+    kind is invented; the labelling rides inside the existing batches.
     """
     if kind == "history_orders":
         pages: list[dict[str, Any]] = []
@@ -688,6 +778,17 @@ def _history_pages(kind: str, items: dict[str, Any], page_size: int) -> list[dic
             for chunk in chunk_items(list(items.get(key, [])), page_size):
                 page: dict[str, Any] = {"orders": [], "deals": []}
                 page[key] = chunk
+                page["balance_operations"] = (
+                    surface_balance_operations(chunk) if key == "deals" else surface_balance_operations([])
+                )
+                page["provenance"] = {
+                    "orders": "mt5_supplied",
+                    "deals": "mt5_supplied",
+                    "balance_operations": "mt5_supplied",
+                }
                 pages.append(page)
         return pages
-    return [{"positions": chunk} for chunk in chunk_items(list(items.get("positions", [])), page_size)]
+    return [
+        {"positions": chunk, "provenance": label_closed_position()}
+        for chunk in chunk_items(list(items.get("positions", [])), page_size)
+    ]
