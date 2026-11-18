@@ -3,7 +3,11 @@ close-all magic safety filter."""
 
 from __future__ import annotations
 
+import pytest
+
 from tests.conftest import call
+
+pytestmark = pytest.mark.real_mt5
 
 SYMBOL = "XAUUSD"
 
@@ -33,9 +37,7 @@ def test_settings_put_updates_and_applies(client):
 def test_settings_put_partial_untouched_fields(client):
     original = client.get("/api/v1/settings").json()["data"]["broker_utc_offset_minutes"]
     new_value = (original + 30) % 721
-    data = client.put(
-        "/api/v1/settings", json={"broker_utc_offset_minutes": new_value}
-    ).json()["data"]
+    data = client.put("/api/v1/settings", json={"broker_utc_offset_minutes": new_value}).json()["data"]
     assert data["changed"] == ["broker_utc_offset_minutes"]
     client.put("/api/v1/settings", json={"broker_utc_offset_minutes": original})
 
@@ -49,8 +51,14 @@ def test_run_connection_checks_structure(client):
     data = call(client, "run_connection_checks")
     ids = [c["id"] for c in data["checks"]]
     assert data["overall"] in ("ok", "warn", "fail")
-    for expected in ("mt5_attached", "terminal_connected", "autotrading_enabled",
-                     "account_permissions", "symbol_market", "server_channel"):
+    for expected in (
+        "mt5_attached",
+        "terminal_connected",
+        "autotrading_enabled",
+        "account_permissions",
+        "symbol_market",
+        "server_channel",
+    ):
         assert expected in ids
     # every check carries status + machine-readable fields
     for c in data["checks"]:

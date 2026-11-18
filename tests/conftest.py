@@ -30,10 +30,28 @@ def ctx():
     context = BridgeContext(settings=settings, driver=driver)
     setup_logging(settings.resolved_log_dir, settings.log_level, extra_sink=context.logs.sink)
     context.get_or_create_device_id()
-    try:  # partial runs (e.g. only cat4) still need a live connection
-        driver.connect()
-    except Exception:
-        pass
+    # TEST HONESTY (PLAN addendum §7 / ARCHITECTURE-CONTRACT §9): a
+    # required-MT5 test MUST FAIL — never silently skip or pass — when
+    # no live terminal is available. The old code swallowed the
+    # connect failure with try/except-pass, which let the whole e2e
+    # suite report green on a machine with no MT5. On Linux (no
+    # MetaTrader5 package) driver.connect() raises ModuleNotFoundError;
+    # on Windows without a running terminal it returns ok=False.
+    # Either way the session fixture fails loudly here, so every e2e
+    # test that depends on it ERRORS at setup instead of passing.
+    try:
+        summary = driver.connect()
+    except Exception as exc:  # noqa: BLE001 — any connect failure is a loud test failure, not a skip
+        pytest.fail(
+            "MT5 terminal unavailable — required-MT5 test cannot run: "
+            f"driver.connect() raised {type(exc).__name__}: {exc}",
+            pytrace=False,
+        )
+    if not summary.get("ok"):
+        pytest.fail(
+            f"MT5 terminal unavailable — required-MT5 test cannot run: {summary.get('error')}",
+            pytrace=False,
+        )
     yield context
     driver.disconnect()
 

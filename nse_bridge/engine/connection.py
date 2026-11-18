@@ -8,16 +8,20 @@ from loguru import logger
 from pydantic import BaseModel
 
 from ..errors import BridgeError, ErrorCode
-from ..mt5.types import TerminalInfoModel, f as _f
+from ..mt5.types import TerminalInfoModel
+from ..mt5.types import f as _f
 from .common import BridgeContext, datetime_now_iso
 from .registry import command
 
 
 class ConnectRequest(BaseModel):
-    """Optional runtime overrides — config file values remain the defaults."""
+    """Optional runtime overrides — config file values remain the defaults.
+
+    NOTE: there is deliberately NO password field. The user signs in
+    through MT5 itself; the bridge never asks for the MT5 password.
+    """
 
     login: int | None = None
-    password: str | None = None
     server: str | None = None
     terminal_path: str | None = None
     timeout_ms: int | None = None
@@ -74,6 +78,7 @@ class DisconnectResponse(BaseModel):
 def get_mt5_connection_status(ctx: BridgeContext, params: None) -> dict[str, Any]:
     state = ctx.driver.connection_state_dict()
     terminal_raw = ctx.driver.refresh_terminal() or {}
+    code = state.get("diagnostic_code")
     return {
         "terminal": {
             "name": terminal_raw.get("name"),
@@ -84,6 +89,14 @@ def get_mt5_connection_status(ctx: BridgeContext, params: None) -> dict[str, Any
         "state": state["state"],
         "pkg_version": state.get("pkg_version"),
         "login": state.get("login"),
+        # Structured MT5 diagnostic code (e.g. MT5_ACCOUNT_NOT_READY) +
+        # guidance; None when the terminal is healthy.
+        "diagnostic_code": code,
+        "guidance": (
+            "Open the MT5 terminal and log in to your trading account, then retry connect."
+            if code == "MT5_ACCOUNT_NOT_READY"
+            else None
+        ),
     }
 
 
@@ -103,9 +116,6 @@ def connect_mt5(ctx: BridgeContext, params: ConnectRequest | None) -> dict[str, 
     changed = False
     if p.login is not None:
         s.mt5_login = p.login
-        changed = True
-    if p.password is not None:
-        s.mt5_password = p.password
         changed = True
     if p.server is not None:
         s.mt5_server = p.server
@@ -256,14 +266,19 @@ def get_mt5_server_info(ctx: BridgeContext, params: None) -> dict[str, Any]:
     company = _f(raw, "company") if raw else None
     term_name = _f(raw, "name") if raw else None
 
-    # latency probe: one symbol_info_tick roundtrip on the bot symbol
+    # latency probe: one symbol_info_tick roundtrip on the configured
+    # symbol (skipped when no bot_symbol is configured — there is no
+    # default symbol to probe).
     t0 = __import__("time").perf_counter()
+    tick = None
+    latency = None
+    if ctx.settings.bot_symbol:
 
-    def tick_job(mt5: Any):
-        return mt5.symbol_info_tick(ctx.settings.bot_symbol)
+        def tick_job(mt5: Any):
+            return mt5.symbol_info_tick(ctx.settings.bot_symbol)
 
-    tick = ctx.driver.run(tick_job, op="symbol_info_tick", context={"symbol": ctx.settings.bot_symbol})
-    latency = (__import__("time").perf_counter() - t0) * 1000.0 if tick is not None else None
+        tick = ctx.driver.run(tick_job, op="symbol_info_tick", context={"symbol": ctx.settings.bot_symbol})
+        latency = (__import__("time").perf_counter() - t0) * 1000.0 if tick is not None else None
     return {
         "server": acc.server,
         "company": company,

@@ -18,7 +18,7 @@ def f(raw: Any, name: str, default: Any = None) -> Any:
     try:
         val = raw[name]
         return default if val is None else _py(val)
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 — item access failed; fall through to attribute access below
         pass
     val = getattr(raw, name, None)
     return default if val is None else _py(val)
@@ -30,7 +30,7 @@ def _py(val: Any) -> Any:
     if t.__module__ == "numpy" and hasattr(val, "item"):
         try:
             return val.item()
-        except Exception:
+        except Exception:  # noqa: BLE001 — numpy scalar conversion is best-effort; keep the raw value
             return val
     return val
 
@@ -42,34 +42,103 @@ def ms_to_iso(epoch_s: float, offset_minutes: int = 0) -> str | None:
 
 
 ORDER_TYPE_LABELS = {
-    0: "BUY", 1: "SELL", 2: "BUY_LIMIT", 3: "SELL_LIMIT",
-    4: "BUY_STOP", 5: "SELL_STOP", 6: "BUY_STOP_LIMIT", 7: "SELL_STOP_LIMIT",
+    0: "BUY",
+    1: "SELL",
+    2: "BUY_LIMIT",
+    3: "SELL_LIMIT",
+    4: "BUY_STOP",
+    5: "SELL_STOP",
+    6: "BUY_STOP_LIMIT",
+    7: "SELL_STOP_LIMIT",
 }
 DEAL_TYPE_LABELS = {
-    0: "BUY", 1: "SELL", 2: "BALANCE", 3: "CREDIT", 4: "CHARGE", 5: "CORRECTION",
-    6: "BONUS", 7: "COMMISSION", 8: "COMMISSION_DAILY", 9: "COMMISSION_MONTHLY",
-    10: "COMMISSION_AGENT_DAILY", 11: "COMMISSION_AGENT_MONTHLY", 12: "COMMISSION_AGENT",
+    0: "BUY",
+    1: "SELL",
+    2: "BALANCE",
+    3: "CREDIT",
+    4: "CHARGE",
+    5: "CORRECTION",
+    6: "BONUS",
+    7: "COMMISSION",
+    8: "COMMISSION_DAILY",
+    9: "COMMISSION_MONTHLY",
+    10: "COMMISSION_AGENT_DAILY",
+    11: "COMMISSION_AGENT_MONTHLY",
+    12: "COMMISSION_AGENT",
     13: "DEAL_SPLIT",
 }
 DEAL_ENTRY_LABELS = {0: "IN", 1: "OUT", 2: "INOUT", 3: "OUT_BY"}
 ORDER_STATE_LABELS = {
-    0: "STARTED", 1: "PLACED", 2: "CANCELED", 3: "PARTIAL",
-    4: "FILLED", 5: "REJECTED", 6: "PENDING_CANCEL", 7: "EXPIRED",
+    0: "STARTED",
+    1: "PLACED",
+    2: "CANCELED",
+    3: "PARTIAL",
+    4: "FILLED",
+    5: "REJECTED",
+    6: "PENDING_CANCEL",
+    7: "EXPIRED",
 }
 TRADE_MODE_LABELS = {
-    0: "DISABLED", 1: "LONG_ONLY", 2: "SHORT_ONLY", 3: "CLOSE_ONLY", 4: "FULL",
+    0: "DISABLED",
+    1: "LONG_ONLY",
+    2: "SHORT_ONLY",
+    3: "CLOSE_ONLY",
+    4: "FULL",
 }
 FILLING_LABELS = {0: "FOK", 1: "IOC", 2: "RETURN"}
 EXECUTION_LABELS = {0: "REQUEST", 1: "INSTANT", 2: "MARKET", 3: "EXCHANGE"}
+#: Calculation-mode labels (MT5 ``trade_calc_mode``, ENUM_SYMBOL_CALC_MODE).
+#: Raw int is authoritative; the label is display-only. Single source of
+#: truth — ``nse_bridge.symbols.metadata`` imports this dict.
+CALC_MODE_LABELS = {0: "FOREX", 1: "FOREX_NO_LEVERAGE", 2: "FUTURES", 3: "CFD", 4: "CFD_LEVERAGE"}
+#: Account margin-mode labels (MT5 ``margin_mode``,
+#: ENUM_ACCOUNT_MARGIN_MODE). Raw int is authoritative.
+MARGIN_MODE_LABELS = {0: "RETAIL_NETTING", 1: "RETAIL_HEDGING", 2: "EXCHANGE"}
 TIMEFRAME_NAMES = (
-    "M1", "M2", "M3", "M4", "M5", "M6", "M10", "M12", "M15", "M20", "M30",
-    "H1", "H2", "H3", "H4", "H6", "H8", "H12", "D1", "W1", "MN1",
+    "M1",
+    "M2",
+    "M3",
+    "M4",
+    "M5",
+    "M6",
+    "M10",
+    "M12",
+    "M15",
+    "M20",
+    "M30",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H6",
+    "H8",
+    "H12",
+    "D1",
+    "W1",
+    "MN1",
 )
 TIMEFRAME_SECONDS = {
-    "M1": 60, "M2": 120, "M3": 180, "M4": 240, "M5": 300, "M6": 360,
-    "M10": 600, "M12": 720, "M15": 900, "M20": 1200, "M30": 1800,
-    "H1": 3600, "H2": 7200, "H3": 10800, "H4": 14400, "H6": 21600,
-    "H8": 28800, "H12": 43200, "D1": 86400, "W1": 604800, "MN1": 2592000,
+    "M1": 60,
+    "M2": 120,
+    "M3": 180,
+    "M4": 240,
+    "M5": 300,
+    "M6": 360,
+    "M10": 600,
+    "M12": 720,
+    "M15": 900,
+    "M20": 1200,
+    "M30": 1800,
+    "H1": 3600,
+    "H2": 7200,
+    "H3": 10800,
+    "H4": 14400,
+    "H6": 21600,
+    "H8": 28800,
+    "H12": 43200,
+    "D1": 86400,
+    "W1": 604800,
+    "MN1": 2592000,
 }
 
 
@@ -107,6 +176,12 @@ class AccountInfoModel(BaseModel):
     margin_so_mode: int | None = None
     margin_so_call: float | None = None
     margin_so_so: float | None = None
+    #: Account margin mode (MT5 ``margin_mode``): 0 netting, 1 hedging,
+    #: 2 exchange. Distinct from ``margin_so_mode`` (stop-out mode) —
+    #: an earlier ``get_trading_permissions`` build returned the stop-out
+    #: mode under the name ``margin_mode`` (fixed in the C2 execution work).
+    margin_mode: int | None = None
+    margin_mode_label: str | None = None
     trade_allowed: bool | None = None
     trade_expert: bool | None = None
 
@@ -151,6 +226,11 @@ class SymbolInfoModel(BaseModel):
     trade_freeze_level: int | None = None
     trade_execution: int | None = None
     trade_execution_label: str | None = None
+    #: Calculation mode (MT5 ``trade_calc_mode``) — distinct from the
+    #: execution mode above. ``build_symbol_model`` used to read
+    #: ``trade_execution`` from ``trade_calc_mode`` (fixed in C2).
+    trade_calc_mode: int | None = None
+    trade_calc_mode_label: str | None = None
     filling_mode: int | None = None
     swap_long: float | None = None
     swap_short: float | None = None
@@ -162,7 +242,6 @@ class SymbolInfoModel(BaseModel):
     bid: float | None = None
     ask: float | None = None
     last: float | None = None
-    session_deals: int | None = None
     session_volume: float | None = None
 
 
@@ -291,6 +370,7 @@ class TickHistoryModel(BaseModel):
 
 # --- builders -----------------------------------------------------------
 
+
 def build_tick_model(raw: Any, symbol: str | None = None, offset_minutes: int = 0) -> TickModel:
     tick = TickModel(
         symbol=symbol or f(raw, "symbol"),
@@ -307,7 +387,7 @@ def build_tick_model(raw: Any, symbol: str | None = None, offset_minutes: int = 
         age = (datetime.now(UTC) - broker_epoch_to_utc(tick.time, offset_minutes)).total_seconds() * 1000.0
         tick.freshness_ms = max(0.0, age)
         tick.stale = tick.freshness_ms > 30_000.0
-    if tick.bid > 0 and tick.ask > 0:
+    if tick.bid is not None and tick.ask is not None and tick.bid > 0 and tick.ask > 0:
         tick.spread_points = round(tick.ask - tick.bid, 8)
     return tick
 
@@ -335,8 +415,10 @@ def build_symbol_model(raw: Any, offset_minutes: int = 0) -> SymbolInfoModel:
         volume_limit=f(raw, "volume_limit"),
         trade_stops_level=f(raw, "trade_stops_level"),
         trade_freeze_level=f(raw, "trade_freeze_level"),
-        trade_execution=f(raw, "trade_calc_mode"),
-        trade_execution_label=EXECUTION_LABELS.get(f(raw, "trade_calc_mode", -1)),
+        trade_execution=f(raw, "trade_exemode"),
+        trade_execution_label=EXECUTION_LABELS.get(f(raw, "trade_exemode", -1)),
+        trade_calc_mode=f(raw, "trade_calc_mode"),
+        trade_calc_mode_label=CALC_MODE_LABELS.get(f(raw, "trade_calc_mode", -1)),
         filling_mode=f(raw, "filling_mode"),
         swap_long=f(raw, "swap_long"),
         swap_short=f(raw, "swap_short"),
@@ -374,6 +456,8 @@ def build_account_model(raw: Any) -> AccountInfoModel:
         margin_so_mode=f(raw, "margin_so_mode"),
         margin_so_call=f(raw, "margin_so_call"),
         margin_so_so=f(raw, "margin_so_so"),
+        margin_mode=f(raw, "margin_mode"),
+        margin_mode_label=MARGIN_MODE_LABELS.get(f(raw, "margin_mode", -1)),
         trade_allowed=f(raw, "trade_allowed"),
         trade_expert=f(raw, "trade_expert"),
     )

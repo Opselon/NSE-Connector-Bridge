@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "NSE MT5 Bridge API",
-    "description": "**NSE Platform secure local bridge** — one endpoint per command. The bridge attaches to the client's local MetaTrader 5 terminal through the official native C++ IPC driver and exposes exactly the 90 NSE bridge commands documented below. All endpoints are uniform `POST` JSON calls returning `{ok, data}` envelopes; broker rejections carry the official MT5 retcode.\n\n*Security:* bind is localhost-only by default; an optional `X-API-Key` gate is configurable; the platform talks to this bridge over an outbound-authenticated WebSocket channel (no inbound ports).\n\n*Real-time:* `/ws/ui` streams ticks + account updates to the local dashboard.",
+    "description": "**NSE Platform secure local bridge** — one endpoint per command. The bridge attaches to the client's local MetaTrader 5 terminal through the official native C++ IPC driver and exposes exactly the 90 NSE bridge commands documented below. All endpoints are uniform `POST` JSON calls returning `{ok, data}` envelopes; broker rejections carry the official MT5 retcode.\n\n*Security:* bind is localhost-only by default; a mandatory `X-API-Key` gate protects every /api/v1/ endpoint (auto-generated on first run, stored in the OS secret store); the platform talks to this bridge over an outbound-authenticated WebSocket channel (no inbound ports).\n\n*Real-time:* the local Control Center polls the local API; `/ws/ui` also streams ticks + account updates for local tooling.",
     "version": "1.0.0"
   },
   "paths": {
@@ -34,7 +34,7 @@
           "system"
         ],
         "summary": "Update bridge settings",
-        "description": "Partial update. Persisted to config.json. Server-channel fields apply immediately (the outbound channel restarts when URL/token change).",
+        "description": "Partial update. Non-secret fields are persisted to config.json. Secrets (server_token, local_api_key) are routed through the secret store and never written to config.json. Server-channel fields apply immediately (the outbound channel restarts when URL/token change). Terminal fields (mt5_terminal_path, mt5_custom_terminal_dirs) re-run discovery immediately (fresh list returned in this response); changing the terminal path while the driver is connected disconnects it from the old terminal instead of keeping a stale selection.",
         "operationId": "update_settings_api_v1_settings_put",
         "requestBody": {
           "content": {
@@ -120,63 +120,14 @@
         }
       }
     },
-    "/api/v1/agent/analyze": {
-      "post": {
-        "tags": [
-          "ai-agent"
-        ],
-        "summary": "Run the multi-engine AI Agent analysis",
-        "operationId": "agent_analyze_api_v1_agent_analyze_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/AnalyzeRequest"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "title": "Body"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Agent Analyze Api V1 Agent Analyze Post"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/agent/status": {
+    "/api/v1/account/subscription": {
       "get": {
         "tags": [
-          "ai-agent"
+          "system"
         ],
-        "summary": "AI Agent status",
-        "operationId": "agent_status_api_v1_agent_status_get",
+        "summary": "Read-only account & subscription (server-resolved)",
+        "description": "Last stored validate-key result (§3.1): identity, subscription, entitlements, device allowance, masked key status. No payment processing; nothing is invented server-side.",
+        "operationId": "get_account_subscription_api_v1_account_subscription_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -185,7 +136,7 @@
                 "schema": {
                   "additionalProperties": true,
                   "type": "object",
-                  "title": "Response Agent Status Api V1 Agent Status Get"
+                  "title": "Response Get Account Subscription Api V1 Account Subscription Get"
                 }
               }
             }
@@ -193,18 +144,163 @@
         }
       }
     },
-    "/api/v1/agent/config": {
-      "put": {
+    "/api/v1/account/validate-key": {
+      "post": {
         "tags": [
-          "ai-agent"
+          "system"
         ],
-        "summary": "Configure the AI Agent (mode/aggression/LLM/news)",
-        "operationId": "agent_config_api_v1_agent_config_put",
+        "summary": "Validate the API key against NSE Platform",
+        "description": "Calls CONTRACT v1 §3.1 validate-key through the REST client and stores the server-resolved result on the bridge context for the read-only Account screen. Never returns key material.",
+        "operationId": "validate_api_key_api_v1_account_validate_key_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Validate Api Key Api V1 Account Validate Key Post"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/updates/latest": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Latest stable release (CONTRACT v1 §3.5 releases/latest)",
+        "description": "Read-only update check via the REST client. Download + install belong to the Phase 5 updater — this endpoint only reports status and never downloads anything.",
+        "operationId": "get_updates_latest_api_v1_updates_latest_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Get Updates Latest Api V1 Updates Latest Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/updates/status": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Verified updater status",
+        "description": "Current updater state: check result, staged (verified) update, restart requirement, and whether an update public key is configured. Pollable by the GUI.",
+        "operationId": "get_updates_status_api_v1_updates_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Get Updates Status Api V1 Updates Status Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/updates/check": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Check for updates (CONTRACT v1 §3.5 releases/latest)",
+        "description": "Polls releases/latest through the REST client. Reports availability or incompatibility (min_connector_version). Never downloads anything.",
+        "operationId": "post_updates_check_api_v1_updates_check_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Post Updates Check Api V1 Updates Check Post"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/updates/download": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Download + verify + stage the latest release",
+        "description": "Downloads the release artifact, verifies SHA-256 AND the Ed25519 signature, then stages it for install on restart. Refuses with a structured error (nothing staged) when no public key is configured, the signature/SHA-256 is missing, verification fails, or min_connector_version is not satisfied. Never executes the downloaded bytes.",
+        "operationId": "post_updates_download_api_v1_updates_download_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Post Updates Download Api V1 Updates Download Post"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mt5/terminals": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Detected MetaTrader 5 terminals",
+        "description": "All discovered terminals (Phase 5): configured path, env var, standard install locations, App Paths registry, custom/portable directories, running processes — each with version, data directory (when determinable, else null — never guessed), + running status. Discovery re-runs on every request, and PUT /settings re-runs it immediately when the terminal path or custom terminal dirs change. Selection stays user-driven (PUT /settings mt5_terminal_path).",
+        "operationId": "list_mt5_terminals_api_v1_mt5_terminals_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response List Mt5 Terminals Api V1 Mt5 Terminals Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mt5/terminals/open": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Open the selected MT5 terminal",
+        "description": "Launches the terminal executable. The path must be one of the discovered / configured terminals — arbitrary paths are rejected. Windows only; on Linux this reports honestly instead of pretending to launch.",
+        "operationId": "open_mt5_terminal_api_v1_mt5_terminals_open_post",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AgentConfigRequest"
+                "$ref": "#/components/schemas/TerminalOpenRequest"
               }
             }
           },
@@ -218,7 +314,7 @@
                 "schema": {
                   "additionalProperties": true,
                   "type": "object",
-                  "title": "Response Agent Config Api V1 Agent Config Put"
+                  "title": "Response Open Mt5 Terminal Api V1 Mt5 Terminals Open Post"
                 }
               }
             }
@@ -236,13 +332,14 @@
         }
       }
     },
-    "/api/v1/agent/execute": {
-      "post": {
+    "/api/v1/diagnostics/summary": {
+      "get": {
         "tags": [
-          "ai-agent"
+          "system"
         ],
-        "summary": "Execute the last approved proposal (mode=auto only)",
-        "operationId": "agent_execute_api_v1_agent_execute_post",
+        "summary": "Guided diagnostics summary",
+        "description": "Bridge / MT5 / network / WebSocket health, sync status, last errors, and the structured MT5 diagnostic code with human-readable guidance. No stack traces.",
+        "operationId": "diagnostics_summary_api_v1_diagnostics_summary_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -251,7 +348,7 @@
                 "schema": {
                   "additionalProperties": true,
                   "type": "object",
-                  "title": "Response Agent Execute Api V1 Agent Execute Post"
+                  "title": "Response Diagnostics Summary Api V1 Diagnostics Summary Get"
                 }
               }
             }
@@ -259,13 +356,14 @@
         }
       }
     },
-    "/api/v1/agent/coach": {
+    "/api/v1/symbols/inventory": {
       "get": {
         "tags": [
-          "ai-agent"
+          "system"
         ],
-        "summary": "COACH verdict for the current session",
-        "operationId": "agent_coach_api_v1_agent_coach_get",
+        "summary": "Broker symbol inventory (Symbols screen)",
+        "description": "All broker-reported symbols with exact verbatim names, full metadata (None = not reported, never invented), and the availability verdict per symbol. Shares the resolver's inventory, so the screen shows exactly the symbols resolution runs against.",
+        "operationId": "get_symbols_inventory_api_v1_symbols_inventory_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -274,7 +372,167 @@
                 "schema": {
                   "additionalProperties": true,
                   "type": "object",
-                  "title": "Response Agent Coach Api V1 Agent Coach Get"
+                  "title": "Response Get Symbols Inventory Api V1 Symbols Inventory Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/symbols/resolve": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Resolve a canonical symbol ID (Symbols screen)",
+        "description": "Canonical ``BASE/QUOTE`` → exact broker symbol. Returns ``resolved`` with the verbatim broker name, ``ambiguous`` with the candidate list, or ``not_found`` — ambiguity is reported, never guessed. Unknown ``expected`` keys are a 422 (fail loudly).",
+        "operationId": "resolve_symbol_api_v1_symbols_resolve_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SymbolResolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Resolve Symbol Api V1 Symbols Resolve Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/symbols/refresh": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Re-read the broker symbol list (Symbols screen)",
+        "description": "Forces a fresh ``symbols_get()`` read and rebuilds the resolver snapshot. The old snapshot stays in place if MT5 cannot be reached.",
+        "operationId": "refresh_symbols_api_v1_symbols_refresh_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Refresh Symbols Api V1 Symbols Refresh Post"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/execution/recent": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Recent server-channel command lifecycle (Execution screen)",
+        "description": "Bounded in-memory history of recently executed server commands with their TRUE local lifecycle state (incl. PARTIALLY_COMPLETED / UNKNOWN), wire status, error, and partial-close facts, plus the count of ``action.result`` frames still queued for delivery. Empty when the channel never opened — never a fabricated entry.",
+        "operationId": "get_execution_recent_api_v1_execution_recent_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Execution Recent Api V1 Execution Recent Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/journal/events": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Recent journal events (Execution screen)",
+        "description": "Raw journal events (spec §8), newest first, bounded by ``limit`` (default 50, max 200). Values are broker-reported facts only — a profit of null means 'not reported', never zero. Empty when journaling is off (no sync engine) — never invented.",
+        "operationId": "get_journal_events_api_v1_journal_events_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Journal Events Api V1 Journal Events Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -1423,7 +1681,7 @@
           "symbols"
         ],
         "summary": "[23] Get Symbol Point",
-        "description": "One point value for the symbol (e.g. 0.01 on XAUUSD 2-digit).",
+        "description": "One point value for the symbol (e.g. 0.00001 on a 5-digit pair).",
         "operationId": "get_symbol_point",
         "requestBody": {
           "content": {
@@ -3005,7 +3263,7 @@
           "orders"
         ],
         "summary": "[55] Get Pending Orders",
-        "description": "All active pending orders (LIMIT/STOP), optionally filtered by symbol.",
+        "description": "All active pending orders (LIMIT/STOP/STOP-LIMIT), optionally filtered by symbol.",
         "operationId": "get_trading_pending_orders",
         "requestBody": {
           "content": {
@@ -3348,7 +3606,7 @@
           "orders"
         ],
         "summary": "[62] Modify Pending Order",
-        "description": "Modify price/SL/TP/volume/expiration of an active pending order (TRADE_ACTION_MODIFY).",
+        "description": "Modify price/SL/TP/expiration of an active pending order (TRADE_ACTION_MODIFY). Volume is NOT changeable via modify (MQL5) — delete + replace instead.",
         "operationId": "trade_modify_pending_order",
         "requestBody": {
           "content": {
@@ -3593,7 +3851,7 @@
           "trading"
         ],
         "summary": "[67] Send Pending Order",
-        "description": "Place LIMIT/STOP order with pre-dispatch structural validation (volume bounds, entry side, stops/freeze distances, SL/TP geometry) — structurally-invalid requests are rejected BEFORE dispatch.",
+        "description": "Place LIMIT/STOP/STOP-LIMIT order with pre-dispatch structural validation (volume bounds, entry side, stops/freeze distances, SL/TP geometry, stop-limit trigger/limit geometry) — structurally-invalid requests are rejected BEFORE dispatch.",
         "operationId": "trade_send_pending_order",
         "requestBody": {
           "content": {
@@ -4758,134 +5016,57 @@
           }
         }
       }
+    },
+    "/api/v1/trade_close_position_by": {
+      "post": {
+        "tags": [
+          "positions"
+        ],
+        "summary": "[91] Close Position By (Close-By)",
+        "description": "Close two opposite positions against each other (TRADE_ACTION_CLOSE_BY, spec §6). Hedging accounts only (margin_mode 1); on netting accounts close-by is impossible — close the position and open an opposing deal instead. The smaller-volume position closes entirely; the larger remains open with the volume difference (both close when volumes are equal). The resulting state is verified against live broker truth before the result is reported. Added by the complete-infrastructure spec (C2); the registry grew 90 → 91 commands.",
+        "operationId": "trade_close_position_by",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CloseByRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
-      "AgentConfigRequest": {
-        "properties": {
-          "mode": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Mode",
-            "description": "one of ('observe', 'advisory', 'auto')"
-          },
-          "aggression": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "maximum": 100.0,
-                "minimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Aggression",
-            "description": "0 = sniper, 100 = degen"
-          },
-          "symbol": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Symbol"
-          },
-          "llm_base_url": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Base Url",
-            "description": "OpenAI-compatible /v1 base; empty keeps current"
-          },
-          "llm_api_key": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Api Key",
-            "description": "empty/absent keeps the current key"
-          },
-          "llm_model": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Model"
-          },
-          "news_items": {
-            "anyOf": [
-              {
-                "items": {
-                  "additionalProperties": true,
-                  "type": "object"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "News Items",
-            "description": "news items for the sentiment engine: {title, impact, time_utc}"
-          },
-          "auto_execute": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Auto Execute",
-            "description": "explicit consent for mode=auto to dispatch orders"
-          }
-        },
-        "type": "object",
-        "title": "AgentConfigRequest"
-      },
-      "AnalyzeRequest": {
-        "properties": {
-          "symbol": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Symbol",
-            "description": "default: the configured agent symbol"
-          }
-        },
-        "type": "object",
-        "title": "AnalyzeRequest"
-      },
       "AvailableTimeframesResponse": {
         "properties": {
           "timeframes": {
@@ -5345,6 +5526,28 @@
         ],
         "title": "CloseAllResponse"
       },
+      "CloseByRequest": {
+        "properties": {
+          "ticket": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Ticket",
+            "description": "Position ticket to close"
+          },
+          "ticket_by": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Ticket By",
+            "description": "Opposite position ticket to close against (same symbol, opposite type)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ticket",
+          "ticket_by"
+        ],
+        "title": "CloseByRequest"
+      },
       "ClosePositionRequest": {
         "properties": {
           "ticket": {
@@ -5384,17 +5587,6 @@
               }
             ],
             "title": "Login"
-          },
-          "password": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Password"
           },
           "server": {
             "anyOf": [
@@ -5443,7 +5635,7 @@
         },
         "type": "object",
         "title": "ConnectRequest",
-        "description": "Optional runtime overrides — config file values remain the defaults."
+        "description": "Optional runtime overrides — config file values remain the defaults.\n\nNOTE: there is deliberately NO password field. The user signs in\nthrough MT5 itself; the bridge never asks for the MT5 password."
       },
       "ConnectResponse": {
         "properties": {
@@ -7550,7 +7742,7 @@
               }
             ],
             "title": "Symbol",
-            "description": "MT5 group filter (e.g. XAUUSD or XAU*)"
+            "description": "MT5 group filter (a broker symbol name, or a prefix wildcard such as EUR*)"
           }
         },
         "type": "object",
@@ -7977,7 +8169,7 @@
               }
             ],
             "title": "Magic",
-            "description": "Override magic; default = bridge config"
+            "description": "Override magic; default = explicitly configured bridge magic, or no magic stamped when none is configured"
           }
         },
         "type": "object",
@@ -8149,18 +8341,6 @@
               }
             ],
             "title": "Tp"
-          },
-          "volume": {
-            "anyOf": [
-              {
-                "type": "number",
-                "exclusiveMinimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Volume"
           },
           "expiration_utc": {
             "anyOf": [
@@ -8511,7 +8691,9 @@
               "BUY_LIMIT",
               "SELL_LIMIT",
               "BUY_STOP",
-              "SELL_STOP"
+              "SELL_STOP",
+              "BUY_STOP_LIMIT",
+              "SELL_STOP_LIMIT"
             ],
             "title": "Order Type"
           },
@@ -8524,6 +8706,18 @@
             "type": "number",
             "exclusiveMinimum": 0.0,
             "title": "Price"
+          },
+          "stoplimit": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stoplimit"
           },
           "sl": {
             "type": "number",
@@ -9003,7 +9197,7 @@
             "type": "string",
             "pattern": "^(all|bot)$",
             "title": "Magic Filter",
-            "description": "all = every position (dashboard); bot = our magic only",
+            "description": "all = every position (dashboard); bot = our magic only (matches nothing while no bridge magic is configured)",
             "default": "all"
           }
         },
@@ -9309,7 +9503,7 @@
               }
             ],
             "title": "Server Token",
-            "description": "API key issued on the NSE Platform site"
+            "description": "API key issued on the NSE Platform site (stored in the secret store)"
           },
           "local_api_key": {
             "anyOf": [
@@ -9321,7 +9515,36 @@
               }
             ],
             "title": "Local Api Key",
-            "description": "Local X-API-Key gate (empty = open on localhost)"
+            "description": "Local X-API-Key gate (mandatory; stored in the secret store)"
+          },
+          "environment": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "production",
+                  "staging",
+                  "dev"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment",
+            "description": "Server environment (production | staging | dev)"
+          },
+          "server_base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Base Url",
+            "description": "NSE server REST base URL (https://...; changing it needs a bridge restart)"
           },
           "magic": {
             "anyOf": [
@@ -9341,7 +9564,7 @@
               {
                 "type": "string",
                 "maxLength": 40,
-                "minLength": 1
+                "minLength": 0
               },
               {
                 "type": "null"
@@ -9354,7 +9577,7 @@
               {
                 "type": "string",
                 "maxLength": 4,
-                "minLength": 2
+                "minLength": 0
               },
               {
                 "type": "null"
@@ -9443,11 +9666,23 @@
               }
             ],
             "title": "Mt5 Terminal Path"
+          },
+          "mt5_custom_terminal_dirs": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mt5 Custom Terminal Dirs",
+            "description": "Comma-separated extra directories searched for terminals (custom/portable installs)"
           }
         },
         "type": "object",
         "title": "SettingsUpdate",
-        "description": "Partial bridge configuration update. Omitted fields stay unchanged."
+        "description": "Partial bridge configuration update. Omitted fields stay unchanged.\n\nSecret fields (``server_token``, ``local_api_key``) are accepted\nhere but NEVER written to config.json — the update handler routes\nthem through the secret store."
       },
       "SimpleOrderRequest": {
         "properties": {
@@ -10014,6 +10249,28 @@
             ],
             "title": "Trade Execution Label"
           },
+          "trade_calc_mode": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trade Calc Mode"
+          },
+          "trade_calc_mode_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trade Calc Mode Label"
+          },
           "filling_mode": {
             "anyOf": [
               {
@@ -10300,6 +10557,35 @@
         ],
         "title": "SymbolPriceResponse"
       },
+      "SymbolResolveRequest": {
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Symbol",
+            "description": "Canonical BASE/QUOTE ID, e.g. EUR/USD"
+          },
+          "expected": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected",
+            "description": "Optional SymbolMetadata field values required for disambiguation"
+          }
+        },
+        "type": "object",
+        "required": [
+          "symbol"
+        ],
+        "title": "SymbolResolveRequest"
+      },
       "SymbolsListRequest": {
         "properties": {
           "filter": {
@@ -10323,7 +10609,7 @@
           "tradeable_only": {
             "type": "boolean",
             "title": "Tradeable Only",
-            "description": "Exclude symbols with trade_mode=DISABLED",
+            "description": "Exclude symbols with trade_mode=DISABLED or unreported trade_mode",
             "default": false
           },
           "limit": {
@@ -10495,6 +10781,20 @@
           "state"
         ],
         "title": "TerminalInfoResponse"
+      },
+      "TerminalOpenRequest": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Path"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "title": "TerminalOpenRequest"
       },
       "TerminalVersionResponse": {
         "properties": {
@@ -11096,6 +11396,17 @@
               }
             ],
             "title": "Margin Mode"
+          },
+          "margin_mode_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Margin Mode Label"
           },
           "account_login": {
             "type": "integer",

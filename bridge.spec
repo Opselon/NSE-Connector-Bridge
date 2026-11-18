@@ -48,7 +48,18 @@ exe = EXE(
     a.binaries,
     a.datas,
     name="NSE-MT5-Bridge",
-    console=True,
+    # Phase 6: windowed exe — no console window in production.
+    # Diagnostics use `NSE-MT5-Bridge.exe --diagnostic`, which enables
+    # DEBUG telemetry/logging and (frozen Windows) allocates a console.
+    console=False,
     disable_windowed_traceback=False,
     upx=False,
+    # Version metadata + Windows manifest, generated from
+    # nse_bridge.BRIDGE_VERSION by scripts/write_version_info.py
+    # (run it after every version bump; CI --check enforces freshness).
+    version="version_info.txt",
+    manifest="windows/NSE-MT5-Bridge.exe.manifest",
+    # NOTE: no `icon=` — the repo has no .ico asset (see
+    # docs/RELEASE.md §"Known gaps"). Do NOT fabricate a binary icon;
+    # PyInstaller falls back to its default icon until one is supplied.
 )

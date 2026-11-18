@@ -31,9 +31,7 @@ def normalize_utc(value: Any, offset_minutes: int = 0) -> datetime | None:
         if value > 1e12:
             value = value / 1000.0
         try:
-            return datetime.fromtimestamp(float(value), tz=UTC) - timedelta(
-                minutes=offset_minutes
-            )
+            return datetime.fromtimestamp(float(value), tz=UTC) - timedelta(minutes=offset_minutes)
         except (OverflowError, OSError, ValueError):
             return None
     else:
@@ -41,7 +39,7 @@ def normalize_utc(value: Any, offset_minutes: int = 0) -> datetime | None:
         if not text:
             return None
         try:
-            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(text)
         except ValueError:
             return None
         if dt.tzinfo is None:

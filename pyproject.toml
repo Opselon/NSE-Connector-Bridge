@@ -3,14 +3,52 @@ name = "nse-bridge"
 version = "1.0.0"
 description = "NSE MT5 Bridge - secure local bridge between MetaTrader 5 terminal and the NSE Platform server"
 requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.163.2",
+    "uvicorn[standard]==0.54.0",
+    "pydantic==2.14.3",
+    "pydantic-settings==2.16.3",
+    "websockets==17.4",
+    "httpx==0.28.1",
+    # Ed25519 release-signature verification for the Phase 5 updater.
+    "cryptography==50.0.2",
+    "loguru==0.8.0",
+    "numpy==2.5.5",
+    "pywebview==6.2.1",
+    # keyring provides Windows Credential Manager on win32; on Linux the
+    # dev-only file fallback is used instead (never required for tests).
+    "keyring==25.7.0; sys_platform == 'win32'",
+    # MetaTrader5 ships Windows-only wheels.
+    "MetaTrader5==5.0.6231; sys_platform == 'win32'",
+    "pyinstaller==6.22.3",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "trade: tests that execute real trades on the connected account (demo-safe, 0.01 lots, auto-cleanup)",
+    "unit: Linux-runnable unit tests (no MT5)",
+    "mock_integration: integration tests against the CONTRACT v1 mock server (real local WS/HTTP, no MT5)",
+    "real_mt5: tests that require a live MT5 terminal (Windows CI only; must FAIL, never skip, when MT5 is unavailable)",
+    "manual: manual verification steps, not automated",
 ]
 log_cli = false
 
 [tool.ruff]
 line-length = 120
+
+[tool.mypy]
+# Pragmatic baseline (spec §20 static analysis): mypy runs in CI and
+# must pass. The pydantic plugin is required — without it mypy treats
+# `Field(...)` defaults as required `__init__` arguments and reports
+# false "missing named argument" errors on every request model.
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = "keyring.*"
+# keyring ships no type stubs; its Windows backend is loaded at
+# runtime only (see secrets.py). Nothing else in nse_bridge imports
+# an untyped third-party module, so this stays narrow on purpose.
+ignore_missing_imports = true

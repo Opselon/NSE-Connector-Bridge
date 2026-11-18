@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tests.conftest import call
+
+pytestmark = pytest.mark.real_mt5
 
 SYMBOL = "XAUUSD"
 
@@ -85,7 +89,13 @@ def test_80_calculate_profit_loss(client):
     data = call(
         client,
         "calculate_profit_loss",
-        {"symbol": SYMBOL, "side": "buy", "volume": 0.01, "entry_price": tick["ask"], "exit_price": round(tick["ask"] + 2.0, 2)},
+        {
+            "symbol": SYMBOL,
+            "side": "buy",
+            "volume": 0.01,
+            "entry_price": tick["ask"],
+            "exit_price": round(tick["ask"] + 2.0, 2),
+        },
     )
     assert data["profit"] == pytest_approx(2.0)
     assert data["source"] == "BROKER_NATIVE"

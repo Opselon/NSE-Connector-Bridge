@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NSE MT5 Bridge — Control Panel</title>
+<title>NSE Bridge — Connector Control Center</title>
 <style>
 :root{
   --bg:#0a0e14;--bg2:#0d1220;--panel:#121a26;--panel2:#0f1520;--line:#1c2634;--line2:#253146;
@@ -32,8 +32,6 @@ nav{display:flex;flex-direction:column;gap:4px;margin-top:6px}
 .navitem:hover{background:#131c2b;color:var(--txt)}
 .navitem.active{background:linear-gradient(90deg,rgba(37,99,235,.16),rgba(124,58,237,.10));
   color:var(--txt);border-color:#223252}
-.navitem .pill{margin-left:auto;font-size:10.5px;padding:1px 8px;border-radius:999px;background:#1a2434;color:var(--dim)}
-.navitem.active .pill{background:#25314a;color:var(--txt)}
 .side-foot{margin-top:auto;padding:10px 12px;font-size:11px;color:var(--dim2);line-height:1.7}
 .side-foot b{color:var(--dim)}
 
@@ -56,45 +54,43 @@ main{flex:1;display:flex;flex-direction:column;min-width:0}
 
 .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
 .card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);
-  border-radius:14px;padding:16px 18px;box-shadow:var(--shadow)}
+  border-radius:14px;padding:16px 18px;box-shadow:var(--shadow);margin-bottom:14px}
 .card h2{font-size:11.5px;text-transform:uppercase;letter-spacing:1.4px;color:var(--dim);margin-bottom:12px;
-  display:flex;justify-content:space-between;align-items:center}
-.kv{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed var(--line)}
+  display:flex;justify-content:space-between;align-items:center;gap:10px}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px dashed var(--line)}
 .kv:last-child{border-bottom:none}
-.kv .k{color:var(--dim)}
-.kv .v{font-weight:600;font-variant-numeric:tabular-nums}
+.kv .k{color:var(--dim);flex:none}
+.kv .v{font-weight:600;font-variant-numeric:tabular-nums;text-align:right;word-break:break-word}
 .up{color:var(--green)}.down{color:var(--red)}.warn{color:var(--amber)}
 
 table{width:100%;border-collapse:collapse;font-size:13px}
 th{color:var(--dim2);text-align:left;font-weight:600;padding:7px 9px;border-bottom:1px solid var(--line2);
   font-size:10.5px;text-transform:uppercase;letter-spacing:.9px}
-td{padding:7px 9px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+td{padding:7px 9px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums;word-break:break-word}
 tr:last-child td{border-bottom:none}
 tr:hover td{background:#131c2b}
 .empty{color:var(--dim2);padding:14px 4px;font-size:13px}
 .badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:700}
-.badge.buy{background:#0a2e1d;color:var(--green)}.badge.sell{background:#3a0e0e;color:var(--red)}
-.badge.gray{background:#1a2434;color:var(--dim)}
+.badge.ok{background:#0a2e1d;color:var(--green)}.badge.bad{background:#3a0e0e;color:var(--red)}
+.badge.warnb{background:#33230a;color:var(--amber)}.badge.gray{background:#1a2434;color:var(--dim)}
 
-/* tickers */
-#tickers{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(215px,1fr))}
-.ticker{background:linear-gradient(180deg,#131c2b,#0f1520);border:1px solid var(--line2);border-radius:13px;
-  padding:13px 15px;position:relative;overflow:hidden}
-.ticker .sym{font-weight:700;font-size:13px;color:var(--cyan);letter-spacing:.5px}
-.ticker .px{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums;margin:3px 0 1px}
-.ticker .ba{display:flex;justify-content:space-between;font-size:11.5px;color:var(--dim)}
-.ticker .spark{margin-top:8px}
-.ticker .x{position:absolute;top:9px;right:11px;color:var(--dim2);cursor:pointer;font-size:13px}
-.ticker .x:hover{color:var(--red)}
-.fx-up{color:var(--green)!important}.fx-down{color:var(--red)!important}
+.diag{border-radius:12px;padding:14px 16px;margin-bottom:14px;border:1px solid var(--line2);background:var(--panel2)}
+.diag.err{border-color:#5b1d1d;background:#1c1114}
+.diag.warnb{border-color:#5b4a17;background:#1c1810}
+.diag.ok{border-color:#14532d;background:#0e1a13}
+.diag .code{font-weight:800;letter-spacing:.4px}
+.diag .t{font-weight:700;margin:2px 0 6px}
+.diag p{color:var(--dim);font-size:13px}
+.diag ul{margin:8px 0 0 18px;color:var(--dim);font-size:13px}
+.diag ul li{margin:3px 0}
+.diag .actions{margin-top:12px;display:flex;gap:10px;flex-wrap:wrap}
 
-/* logs */
-#logs{font:11.5px/1.65 Consolas,'Cascadia Mono',monospace;max-height:calc(100vh - 210px);overflow:auto;
-  background:#0b0f17;border:1px solid var(--line);border-radius:12px;padding:12px 14px}
-#logs div{padding:1px 0;white-space:pre-wrap;border-bottom:1px solid #0e1520}
-.lg-ERROR{color:var(--red)}.lg-WARNING{color:var(--amber)}.lg-INFO{color:#9db2cc}.lg-DEBUG{color:var(--dim2)}
+pre.report{font:11.5px/1.6 Consolas,'Cascadia Mono',monospace;max-height:420px;overflow:auto;
+  background:#0b0f17;border:1px solid var(--line);border-radius:12px;padding:12px 14px;white-space:pre-wrap}
+.errlist{font:12px/1.65 Consolas,'Cascadia Mono',monospace}
+.errlist div{padding:4px 0;border-bottom:1px solid #0e1520;white-space:pre-wrap}
+.errlist .ts{color:var(--dim2)}
 
-/* checks */
 .check{display:flex;gap:13px;align-items:flex-start;padding:13px 4px;border-bottom:1px solid var(--line)}
 .check:last-child{border-bottom:none}
 .check .ic{width:26px;height:26px;border-radius:8px;flex:none;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800}
@@ -108,7 +104,6 @@ tr:hover td{background:#131c2b}
 #overall{font-size:13px;font-weight:700;padding:6px 14px;border-radius:999px}
 #overall.ok{background:#0a2e1d;color:var(--green)}#overall.fail{background:#3a0e0e;color:var(--red)}#overall.warn{background:#33230a;color:var(--amber)}
 
-/* settings */
 form.settings{max-width:640px}
 .field{margin-bottom:15px}
 .field label{display:block;font-size:12px;color:var(--dim);margin-bottom:6px;font-weight:600;letter-spacing:.4px}
@@ -123,135 +118,315 @@ form.settings{max-width:640px}
 .btn.ghost{background:transparent;border:1px solid var(--line2);color:var(--dim)}
 .btn.ghost:hover{color:var(--txt);border-color:var(--blue)}
 .btn.small{padding:7px 13px;font-size:12.5px}
+.btn:disabled{opacity:.45;cursor:default}
 #saveMsg{font-size:12.5px;margin-left:12px}
 .tophint{background:#0f1b2c;border:1px solid #1c3049;color:#a9c3e8;border-radius:12px;padding:12px 16px;
   font-size:13px;margin-bottom:16px;line-height:1.6}
 .tophint b{color:var(--cyan)}
+.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.note{font-size:12.5px;color:var(--dim2);margin-top:10px;line-height:1.6}
+.statusline{font-size:12.5px;color:var(--dim);margin-top:8px}
 </style>
 </head>
 <body>
 <aside>
   <div class="logo">
     <div class="mark">N</div>
-    <div><div class="t">NSE Bridge</div><div class="s">MetaTrader 5 control</div></div>
+    <div><div class="t">NSE Bridge</div><div class="s">Connector Control Center</div></div>
   </div>
   <nav id="nav">
-    <div class="navitem active" data-page="overview">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
-      Overview</div>
-    <div class="navitem" data-page="positions">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>
-      Positions <span class="pill" id="pill-pos">0</span></div>
-    <div class="navitem" data-page="orders">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
-      Pending Orders <span class="pill" id="pill-ord">0</span></div>
-    <div class="navitem" data-page="logs">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
-      Logs</div>
-    <div class="navitem" data-page="checks">
+    <div class="navitem active" data-page="connection">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.5.5l3-3a5 5 0 00-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 00-7.5-.5l-3 3a5 5 0 007 7l1.7-1.7"/></svg>
+      Connection</div>
+    <div class="navitem" data-page="metatrader">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 22h8M12 18v4"/></svg>
+      MetaTrader</div>
+    <div class="navitem" data-page="account">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"/></svg>
+      Account &amp; Subscription</div>
+    <div class="navitem" data-page="symbols">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5M4 15c4-3 6 3 10 0s6 3 6 0"/><path d="M20 5v14"/></svg>
+      Symbols</div>
+    <div class="navitem" data-page="execution">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      Execution</div>
+    <div class="navitem" data-page="diagnostics">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-5"/><circle cx="12" cy="12" r="9"/></svg>
-      Connection Checks</div>
-    <div class="navitem" data-page="settings">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.9-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1-1.5 1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.9 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1 1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.9.3h0a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5h0a1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.9v0a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>
-      Settings</div>
-    <div class="navitem" data-page="aiagent" style="margin-top:8px">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="7" width="16" height="12" rx="3"/><circle cx="9" cy="13" r="1.6" fill="currentColor" stroke="none"/><circle cx="15" cy="13" r="1.6" fill="currentColor" stroke="none"/><path d="M12 7V4M8 4h8"/></svg>
-      AI Agent <span class="pill" id="pill-agent" style="background:#2a1d4a;color:#c4b5fd">NEW</span></div>
+      Diagnostics</div>
+    <div class="navitem" data-page="updates">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg>
+      Updates &amp; Releases</div>
   </nav>
   <div class="side-foot">
-    <b id="sfVer">v1.1.0</b><br>device <span id="sfDevice">—</span><br>
+    <b id="sfVer">—</b><br>device <span id="sfDevice">—</span><br>
     <a href="/docs" target="_blank" style="color:var(--blue);text-decoration:none">Swagger API ↗</a>
   </div>
 </aside>
 
 <main>
   <div class="topbar">
-    <h1 id="pageTitle">Overview</h1>
+    <h1 id="pageTitle">Connection</h1>
     <div class="spacer"></div>
-    <span class="chip"><span class="dot" id="dotWs"></span> UI feed</span>
     <span class="chip"><span class="dot" id="dotMt5"></span> MT5 <b id="chipMt5">—</b></span>
-    <span class="chip">Balance <b id="chipBal">—</b></span>
-    <span class="chip">Equity <b id="chipEq">—</b></span>
     <span class="chip">Server <b id="chipSrv">—</b></span>
+    <span class="chip">Bridge <b id="chipVer">—</b></span>
   </div>
 
   <div class="view">
-    <!-- ================= OVERVIEW ================= -->
-    <section class="page active" id="page-overview">
-      <div class="grid" style="margin-bottom:14px">
+    <!-- ================= CONNECTION ================= -->
+    <section class="page active" id="page-connection">
+      <div id="connDiag"></div>
+      <div class="grid">
         <div class="card">
-          <h2>MetaTrader 5</h2>
-          <div class="kv"><span class="k">State</span><span class="v" id="mt5State">—</span></div>
-          <div class="kv"><span class="k">Terminal</span><span class="v" id="termName">—</span></div>
-          <div class="kv"><span class="k">Login / Server</span><span class="v" id="accLogin">—</span></div>
-          <div class="kv"><span class="k">Uptime</span><span class="v" id="uptime">—</span></div>
-          <div class="kv"><span class="k">Floating PnL</span><span class="v" id="pnl">—</span></div>
+          <h2>NSE Platform</h2>
+          <div class="kv"><span class="k">Environment</span><span class="v" id="cEnv">—</span></div>
+          <div class="kv"><span class="k">REST base URL</span><span class="v" id="cBase">—</span></div>
+          <div class="kv"><span class="k">Channel URL</span><span class="v" id="cWsUrl">—</span></div>
+          <div class="kv"><span class="k">Key validation</span><span class="v" id="cAuth">—</span></div>
+          <div class="kv"><span class="k">Account identity</span><span class="v" id="cUser">—</span></div>
+          <div class="kv"><span class="k">Device registration</span><span class="v" id="cReg">—</span></div>
+          <div class="kv"><span class="k">Session expires</span><span class="v" id="cSess">—</span></div>
+        </div>
+        <div class="card">
+          <h2>WebSocket Channel</h2>
+          <div class="kv"><span class="k">State</span><span class="v" id="cWsState">—</span></div>
+          <div class="kv"><span class="k">Last heartbeat sent</span><span class="v" id="cHbOut">—</span></div>
+          <div class="kv"><span class="k">Last heartbeat received</span><span class="v" id="cHbIn">—</span></div>
+          <div class="kv"><span class="k">Last connected</span><span class="v" id="cLastConn">—</span></div>
+          <div class="kv"><span class="k">Reconnects</span><span class="v" id="cReconn">—</span></div>
+          <div class="kv"><span class="k">Last error</span><span class="v" id="cWsErr">—</span></div>
+        </div>
+        <div class="card">
+          <h2>Synchronization</h2>
+          <div class="kv"><span class="k">Status</span><span class="v" id="cSyncState">—</span></div>
+          <div class="kv"><span class="k">Queued batches</span><span class="v" id="cSyncPend">—</span></div>
+          <div class="kv"><span class="k">Checkpoint</span><span class="v" id="cSyncCp">—</span></div>
+          <div class="kv"><span class="k">Network</span><span class="v" id="cNet">—</span></div>
+          <div class="kv"><span class="k">Bridge uptime</span><span class="v" id="cUptime">—</span></div>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn" id="btnReconnect">Reconnect channel</button>
+        <button class="btn ghost" id="btnValidateKey">Validate key</button>
+        <button class="btn ghost" id="btnConnRefresh">Refresh</button>
+        <span class="statusline" id="connMsg"></span>
+      </div>
+      <form class="settings card" onsubmit="return false" style="margin-top:14px">
+        <h2>NSE Platform Settings</h2>
+        <div class="tophint" style="margin-bottom:14px">
+          Paste the <b>API key</b> generated on the <b>NSE Platform site</b>. The bridge then dials
+          <b>out</b> to your server (no inbound ports, firewall-friendly). Secrets are stored in the
+          OS secret store and are never shown back — only masked status is displayed.
+        </div>
+        <div class="field">
+          <label>Server base URL <small>— REST base, e.g. https://bridge.nexusverse.space</small></label>
+          <input id="setBaseUrl" placeholder="https://…" spellcheck="false">
+        </div>
+        <div class="field">
+          <label>Server channel URL <small>— wss://…, empty = derived from the base URL</small></label>
+          <input id="setUrl" placeholder="wss://…" spellcheck="false">
+        </div>
+        <div class="field">
+          <label>Environment</label>
+          <select id="setEnv"><option value="production">production</option><option value="staging">staging</option><option value="dev">dev</option></select>
+        </div>
+        <div class="field">
+          <label>API key from the NSE Platform site <small>— stored in the secret store, never displayed</small></label>
+          <input id="setToken" type="password" placeholder="paste your API key" spellcheck="false" autocomplete="off">
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Log level</label>
+            <select id="setLogLevel"><option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select>
+          </div>
+          <div class="field">
+            <label>GUI mode</label>
+            <select id="setGuiMode"><option value="auto">auto</option><option value="webview">webview</option><option value="browser">browser</option><option value="none">none</option></select>
+          </div>
+        </div>
+        <div class="kv"><span class="k">Local API key</span><span class="v" id="setLocalKey">—</span></div>
+        <div class="kv"><span class="k">Device ID</span><span class="v" id="setDevice">—</span></div>
+        <div class="kv"><span class="k">Config file</span><span class="v" id="cfgPath">—</span></div>
+        <div style="display:flex;gap:10px;align-items:center;margin-top:14px">
+          <button class="btn" id="saveSettings">Save &amp; apply</button>
+          <span id="saveMsg"></span>
+        </div>
+        <p class="note" id="restartNote" style="display:none">Environment or server base URL changed —
+          restart the bridge for the new environment to take effect.</p>
+      </form>
+    </section>
+
+    <!-- ================= METATRADER ================= -->
+    <section class="page" id="page-metatrader">
+      <div id="mtDiag"></div>
+      <div class="grid">
+        <div class="card">
+          <h2>Terminal</h2>
+          <div class="kv"><span class="k">State</span><span class="v" id="mtState">—</span></div>
+          <div class="kv"><span class="k">Selected terminal</span><span class="v" id="mtPath">—</span></div>
+          <div class="kv"><span class="k">Terminal name</span><span class="v" id="mtName">—</span></div>
+          <div class="kv"><span class="k">Terminal build</span><span class="v" id="mtBuild">—</span></div>
+          <div class="kv"><span class="k">IPC status</span><span class="v" id="mtIpc">—</span></div>
+          <div class="kv"><span class="k">Algo trading allowed</span><span class="v" id="mtAlgo">—</span></div>
         </div>
         <div class="card">
           <h2>Account</h2>
-          <div class="kv"><span class="k">Balance</span><span class="v" id="balance">—</span></div>
-          <div class="kv"><span class="k">Equity</span><span class="v" id="equity">—</span></div>
-          <div class="kv"><span class="k">Margin / Free</span><span class="v" id="margins">—</span></div>
-          <div class="kv"><span class="k">Margin Level</span><span class="v" id="mLvl">—</span></div>
-          <div class="kv"><span class="k">Currency</span><span class="v" id="currency">—</span></div>
+          <div class="kv"><span class="k">Login</span><span class="v" id="mtLogin">—</span></div>
+          <div class="kv"><span class="k">Broker server</span><span class="v" id="mtServer">—</span></div>
+          <div class="kv"><span class="k">Company</span><span class="v" id="mtCompany">—</span></div>
+          <div class="kv"><span class="k">Currency</span><span class="v" id="mtCurrency">—</span></div>
+          <div class="kv"><span class="k">Account status</span><span class="v" id="mtAccState">—</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Detected Terminals</h2>
+        <table><thead><tr><th>Path</th><th>Source</th><th>Exists</th><th>Version</th><th>Running</th><th>Selected</th><th></th></tr></thead>
+        <tbody id="mtTerms"><tr><td colspan="7" class="empty">—</td></tr></tbody></table>
+      </div>
+      <div class="actions">
+        <button class="btn" id="btnMtConnect">Connect</button>
+        <button class="btn ghost" id="btnMtDisconnect">Disconnect</button>
+        <button class="btn ghost" id="btnMtDiscover">Discover terminals</button>
+        <button class="btn ghost" id="btnMtOpen">Open terminal</button>
+        <button class="btn ghost" id="btnMtRetry">Retry diagnostics</button>
+        <span class="statusline" id="mtMsg"></span>
+      </div>
+      <p class="note">The bridge never asks for your MT5 password. If no account is logged in,
+        sign in through the MT5 terminal itself (File → Login to Trade Account), then press Connect.</p>
+    </section>
+
+    <!-- ================= ACCOUNT & SUBSCRIPTION ================= -->
+    <section class="page" id="page-account">
+      <div class="tophint">Read-only. Everything below comes from the NSE Platform server
+        (key validation). All subscription and billing decisions are made server-side — the
+        bridge stores no prices or plans and processes no payments.</div>
+      <div class="grid">
+        <div class="card">
+          <h2>Account Identity</h2>
+          <div class="kv"><span class="k">Validation</span><span class="v" id="acValid">—</span></div>
+          <div class="kv"><span class="k">User ID</span><span class="v" id="acUser">—</span></div>
+          <div class="kv"><span class="k">Validated at</span><span class="v" id="acAt">—</span></div>
+          <div class="kv"><span class="k">Device ID</span><span class="v" id="acDevice">—</span></div>
+          <div class="kv"><span class="k">Session expires</span><span class="v" id="acSess">—</span></div>
+          <div class="kv"><span class="k">API key status</span><span class="v" id="acKey">—</span></div>
         </div>
         <div class="card">
-          <h2>NSE Server Channel</h2>
-          <div class="kv"><span class="k">State</span><span class="v" id="chState">—</span></div>
-          <div class="kv"><span class="k">URL</span><span class="v" id="chUrl">—</span></div>
-          <div class="kv"><span class="k">Reconnects</span><span class="v" id="chReconn">—</span></div>
-          <div class="kv"><span class="k">Last error</span><span class="v" id="chErr">—</span></div>
-          <div class="kv"><span class="k">API key</span><span class="v" id="chKey">—</span></div>
+          <h2>Subscription</h2>
+          <div id="acSub"><div class="empty">Not validated yet — press Refresh below.</div></div>
+        </div>
+        <div class="card">
+          <h2>Enabled Features</h2>
+          <div id="acFeat"><div class="empty">—</div></div>
+          <div class="kv"><span class="k">Device allowance</span><span class="v" id="acMaxDev">—</span></div>
+          <div class="kv"><span class="k">Account allowance</span><span class="v" id="acMaxAcc">—</span></div>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn" id="btnAcRefresh">Refresh from server</button>
+        <span class="statusline" id="acMsg"></span>
+      </div>
+    </section>
+
+    <!-- ================= SYMBOLS ================= -->
+    <section class="page" id="page-symbols">
+      <div class="tophint">Broker-reported symbols, exact names as the terminal reports them.
+        Nothing here is canonicalised or guessed — a canonical ID (EUR/USD) is resolved to the
+        broker name only through the resolver below, and ambiguity is shown, never decided for you.</div>
+      <div class="grid">
+        <div class="card">
+          <h2>Inventory
+            <span><button class="btn small" id="btnSymRefresh">Refresh</button></span>
+          </h2>
+          <div class="kv"><span class="k">Total symbols</span><span class="v" id="symTotal">—</span></div>
+          <div class="kv"><span class="k">Visible / hidden / unknown</span><span class="v" id="symVis">—</span></div>
+          <div class="kv"><span class="k">Tradable</span><span class="v" id="symTrad">—</span></div>
+          <div class="kv"><span class="k">Loaded at</span><span class="v" id="symLoaded">—</span></div>
+          <div class="kv"><span class="k">Completeness</span><span class="v" id="symComplete">—</span></div>
+        </div>
+        <div class="card">
+          <h2>Resolve a canonical ID</h2>
+          <div class="field">
+            <label>Canonical ID <small>— e.g. EUR/USD, XAU/USD</small></label>
+            <input id="symResolveInput" placeholder="EUR/USD" spellcheck="false">
+          </div>
+          <div class="actions">
+            <button class="btn small" id="btnSymResolve">Resolve</button>
+            <span class="statusline" id="symResolveMsg"></span>
+          </div>
+          <div id="symResolveOut"><div class="empty">Type a canonical ID and press Resolve. Ambiguity is shown with its candidates — never guessed.</div></div>
         </div>
       </div>
       <div class="card">
-        <h2>Live Tickers
-          <span><input id="symInput" placeholder="XAUUSD" list="symbols" style="width:120px">
-          <button class="btn small ghost" id="addSym">+ Watch</button></span>
+        <h2>Symbols</h2>
+        <div class="field" style="margin-bottom:10px">
+          <input id="symFilter" placeholder="filter by name…" spellcheck="false">
+        </div>
+        <table><thead><tr><th>Symbol</th><th>Visible</th><th>Availability</th><th>Digits</th><th>Point</th><th>Contract size</th><th>Volume min / max / step</th><th>Stops level</th><th>Exec mode</th><th>Calc mode</th><th>Currencies</th></tr></thead>
+        <tbody id="symRows"><tr><td colspan="11" class="empty">—</td></tr></tbody></table>
+        <span class="statusline" id="symMsg"></span>
+      </div>
+      <p class="note">Metadata is broker-reported; a field the broker does not report shows as
+        “not reported”. Market-closed cannot be detected from metadata — availability never claims it.</p>
+    </section>
+
+    <!-- ================= EXECUTION ================= -->
+    <section class="page" id="page-execution">
+      <div class="tophint">Recent server-channel commands and journal events. Lifecycle states are the
+        bridge's local states. UNKNOWN means the outcome is uncertain — reconcile MT5 state before
+        any retry. There is deliberately no retry button here.</div>
+      <div class="grid">
+        <div class="card">
+          <h2>Command channel</h2>
+          <div class="kv"><span class="k">Results awaiting delivery</span><span class="v" id="exPend">—</span></div>
+          <div class="kv"><span class="k">UNKNOWN awaiting reconciliation</span><span class="v" id="exUnknown">—</span></div>
+          <div class="kv"><span class="k">Executor history</span><span class="v" id="exAvail">—</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Recent commands
+          <span><button class="btn small" id="btnExRefresh">Refresh</button></span>
         </h2>
-        <div id="tickers"><div class="empty">No subscriptions — add a symbol above</div></div>
-        <datalist id="symbols"></datalist>
+        <table><thead><tr><th>Command</th><th>Operation</th><th>Local state</th><th>Wire status</th><th>Started</th><th>Duration</th><th>Error</th><th>Partial close</th></tr></thead>
+        <tbody id="exRows"><tr><td colspan="8" class="empty">—</td></tr></tbody></table>
       </div>
-    </section>
-
-    <!-- ================= POSITIONS ================= -->
-    <section class="page" id="page-positions">
       <div class="card">
-        <h2>Open Positions <span id="posFloat" style="color:var(--dim)"></span></h2>
-        <table><thead><tr><th>Ticket</th><th>Symbol</th><th>Side</th><th>Volume</th><th>Open</th><th>Now</th><th>SL</th><th>TP</th><th>Swap</th><th>PnL</th><th>Magic</th></tr></thead>
-        <tbody id="posBody"><tr><td colspan="11" class="empty">—</td></tr></tbody></table>
-      </div>
-    </section>
-
-    <!-- ================= ORDERS ================= -->
-    <section class="page" id="page-orders">
-      <div class="card">
-        <h2>Pending Orders</h2>
-        <table><thead><tr><th>Ticket</th><th>Symbol</th><th>Type</th><th>Volume</th><th>Price</th><th>SL</th><th>TP</th><th>State</th><th>Magic</th></tr></thead>
-        <tbody id="ordBody"><tr><td colspan="9" class="empty">—</td></tr></tbody></table>
-      </div>
-    </section>
-
-    <!-- ================= LOGS ================= -->
-    <section class="page" id="page-logs">
-      <div class="card">
-        <h2>Bridge Logs
-          <span>
-            <select id="logLevel" style="background:#0b0f17;border:1px solid var(--line2);color:var(--txt);border-radius:8px;padding:5px 9px;font-size:12px">
-              <option value="">ALL</option><option>ERROR</option><option>WARNING</option><option>INFO</option>
-            </select>
-            <button class="btn small ghost" id="logRefresh">Refresh</button>
-          </span>
+        <h2>Journal events
+          <span><button class="btn small" id="btnJrRefresh">Refresh</button></span>
         </h2>
-        <div id="logs"></div>
+        <table><thead><tr><th>Time</th><th>Event</th><th>Ticket</th><th>Symbol</th><th>Volume</th><th>Price</th><th>Profit</th><th>Retcode</th></tr></thead>
+        <tbody id="jrRows"><tr><td colspan="8" class="empty">—</td></tr></tbody></table>
+        <span class="statusline" id="jrMsg"></span>
       </div>
     </section>
 
-    <!-- ================= CHECKS ================= -->
-    <section class="page" id="page-checks">
-      <div class="tophint">
-        Run the full <b>pre-flight checklist</b> before connecting the bridge to the NSE Platform:
-        terminal link, <b>Algo Trading</b> button, account permissions, market data and server-channel reachability.
+    <!-- ================= DIAGNOSTICS ================= -->
+    <section class="page" id="page-diagnostics">
+      <div id="dgDiag"></div>
+      <div class="grid">
+        <div class="card">
+          <h2>Bridge Health</h2>
+          <div class="kv"><span class="k">Healthy</span><span class="v" id="dgHealthy">—</span></div>
+          <div class="kv"><span class="k">MT5 calls / failures</span><span class="v" id="dgCalls">—</span></div>
+          <div class="kv"><span class="k">MT5 error rate</span><span class="v" id="dgErrRate">—</span></div>
+          <div class="kv"><span class="k">Uptime</span><span class="v" id="dgUptime">—</span></div>
+        </div>
+        <div class="card">
+          <h2>MT5 Health</h2>
+          <div class="kv"><span class="k">State</span><span class="v" id="dgMt5State">—</span></div>
+          <div class="kv"><span class="k">Connected</span><span class="v" id="dgMt5Conn">—</span></div>
+          <div class="kv"><span class="k">Login</span><span class="v" id="dgMt5Login">—</span></div>
+        </div>
+        <div class="card">
+          <h2>Network &amp; Channel Health</h2>
+          <div class="kv"><span class="k">Network</span><span class="v" id="dgNet">—</span></div>
+          <div class="kv"><span class="k">Channel</span><span class="v" id="dgWs">—</span></div>
+          <div class="kv"><span class="k">Reconnects</span><span class="v" id="dgReconn">—</span></div>
+          <div class="kv"><span class="k">Queued sync batches</span><span class="v" id="dgSyncPend">—</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Last Errors</h2>
+        <div class="errlist" id="dgErrors"><div class="empty">No errors recorded.</div></div>
       </div>
       <div class="card">
         <h2>Connection Checks
@@ -262,298 +437,450 @@ form.settings{max-width:640px}
         </h2>
         <div id="checkList"><div class="empty">Press “Run checks”</div></div>
       </div>
-    </section>
-
-    <!-- ================= AI AGENT ================= -->
-    <section class="page" id="page-aiagent">
-      <div class="tophint">
-        The <b>AI Agent</b> runs 5 engines (trend, momentum, volatility, news sentiment, risk math)
-        through <b>9 decision gates</b> and the <b>COACH</b> discipline system. The aggression dial
-        maps to risk-per-trade, required confidence and stop geometry — the math always sizes the trade,
-        the LLM (optional) only reviews. <b>Observe</b> = analysis only · <b>Advisory</b> = propose, you confirm ·
-        <b>Auto</b> = dispatch approved proposals automatically.
-      </div>
-      <div class="grid" style="margin-bottom:14px">
-        <div class="card">
-          <h2>Aggression Dial</h2>
-          <input type="range" id="aggrSlider" min="0" max="100" value="45" style="width:100%;accent-color:#7c3aed">
-          <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--dim)">
-            <span>0 · Sniper</span><span id="aggrLabel" style="color:var(--violet);font-weight:700;font-size:14px">45 · Balanced</span><span>100 · Degen</span>
-          </div>
-          <div class="kv" style="margin-top:10px"><span class="k">Risk / trade</span><span class="v" id="aggrRisk">—</span></div>
-          <div class="kv"><span class="k">Required confidence</span><span class="v" id="aggrConf">—</span></div>
-          <div class="kv"><span class="k">Stop (ATR mult)</span><span class="v" id="aggrSl">—</span></div>
-          <div class="kv"><span class="k">Target (ATR mult)</span><span class="v" id="aggrTp">—</span></div>
-        </div>
-        <div class="card">
-          <h2>Agent Control</h2>
-          <div class="field"><label>Mode</label>
-            <select id="agentMode"><option value="observe">Observe — analysis only</option>
-              <option value="advisory">Advisory — propose, confirm manually</option>
-              <option value="auto">Auto — dispatch approved proposals</option></select></div>
-          <div class="field"><label>Symbol</label><input id="agentSymbol" placeholder="XAUUSD"></div>
-          <div class="field"><label>Auto-execute consent <small>(required with mode=auto)</small></label>
-            <select id="agentAutoExec"><option value="false">Off</option><option value="true">I consent to automated order dispatch</option></select></div>
-          <div style="display:flex;gap:10px;margin-top:6px;flex-wrap:wrap">
-            <button class="btn" id="runAnalyze">🧠 Analyze now</button>
-            <button class="btn ghost" id="agentExec">⚡ Execute proposal</button>
-            <span id="agentMsg" style="font-size:12.5px"></span>
-          </div>
-        </div>
-      </div>
-      <div class="card" id="decisionCard" style="margin-bottom:14px;display:none">
-        <h2>Decision
-          <span style="display:flex;gap:10px;align-items:center">
-            <span id="decisionBadge" style="font-weight:800;font-size:13px"></span>
-            <span id="decisionConf" style="color:var(--dim);font-size:12.5px"></span>
+      <div class="card">
+        <h2>Diagnostic Report
+          <span>
+            <button class="btn small" id="loadReport">Load report</button>
+            <button class="btn small ghost" id="copyDiag">Copy diagnostics</button>
           </span>
         </h2>
-        <div id="gates" style="display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));margin-bottom:12px"></div>
-        <div id="proposalBox"></div>
-        <div id="llmBox"></div>
-      </div>
-      <div class="card">
-        <h2>COACH — Discipline System <span id="coachBadge" style="font-size:12px"></span></h2>
-        <div id="coachMsgs" class="empty">Run an analysis to see the coach verdict</div>
-        <div id="coachStats" style="margin-top:8px;font-size:12px;color:var(--dim)"></div>
-      </div>
-      <div class="card" style="margin-top:14px">
-        <h2>LLM Reviewer (optional — OpenAI-compatible)</h2>
-        <div class="row">
-          <div class="field"><label>Base URL</label><input id="llmUrl" placeholder="https://api.openai.com"></div>
-          <div class="field"><label>API key</label><input id="llmKey" type="password" placeholder="sk-…"></div>
-          <div class="field" style="max-width:180px"><label>Model</label><input id="llmModel" placeholder="gpt-4o-mini"></div>
-        </div>
-        <button class="btn small ghost" id="saveLlm">Save LLM settings</button>
-        <span id="llmMsg" style="font-size:12.5px;color:var(--dim)"></span>
+        <pre class="report" id="diagReport">Press “Load report” — the report is assembled on demand and never leaves this machine unless you copy it.</pre>
+        <span class="statusline" id="copyMsg"></span>
       </div>
     </section>
 
-    <!-- ================= SETTINGS ================= -->
-    <section class="page" id="page-settings">
-      <div class="tophint">
-        Paste the <b>API key</b> generated on the <b>NSE Platform site</b> plus the bridge endpoint URL —
-        the bridge then dials <b>out</b> to your server (no inbound ports, firewall-friendly). Everything is
-        stored locally in <span style="color:var(--cyan)" id="cfgPath">config.json</span>.
+    <!-- ================= UPDATES & RELEASES ================= -->
+    <section class="page" id="page-updates">
+      <div class="grid">
+        <div class="card">
+          <h2>Bridge Version</h2>
+          <div class="kv"><span class="k">Installed version</span><span class="v" id="upInstalled">—</span></div>
+          <div class="kv"><span class="k">Latest stable version</span><span class="v" id="upLatest">—</span></div>
+          <div class="kv"><span class="k">Update status</span><span class="v" id="upStatus">—</span></div>
+          <div class="kv"><span class="k">Details</span><span class="v" id="upDetail">—</span></div>
+          <div class="kv"><span class="k">Staged update</span><span class="v" id="upStaged">—</span></div>
+        </div>
+        <div class="card">
+          <h2>Latest Release</h2>
+          <div class="kv"><span class="k">Released at</span><span class="v" id="upReleased">—</span></div>
+          <div class="kv"><span class="k">Size</span><span class="v" id="upSize">—</span></div>
+          <div class="kv"><span class="k">SHA-256</span><span class="v" id="upSha">—</span></div>
+          <div class="kv"><span class="k">Min. connector version</span><span class="v" id="upMin">—</span></div>
+          <div class="kv"><span class="k">Signed metadata</span><span class="v" id="upSig">—</span></div>
+          <div class="kv"><span class="k">Release notes</span><span class="v" id="upNotes">—</span></div>
+        </div>
       </div>
-      <form class="settings card" onsubmit="return false">
-        <h2>NSE Platform Connection</h2>
-        <div class="field">
-          <label>Server endpoint URL <small>— e.g. wss://bridge.nse-platform.io/ws</small></label>
-          <input id="setUrl" placeholder="wss://…" spellcheck="false">
-        </div>
-        <div class="field">
-          <label>API key from the NSE Platform site <small>— sent as Bearer token</small></label>
-          <input id="setToken" type="password" placeholder="paste your API key" spellcheck="false">
-        </div>
-        <div class="row">
-          <div class="field">
-            <label>Magic number <small>— stamped on bridge orders</small></label>
-            <input id="setMagic" type="number">
-          </div>
-          <div class="field">
-            <label>Primary symbol</label>
-            <input id="setSymbol" placeholder="XAUUSD">
-          </div>
-        </div>
-        <div class="row">
-          <div class="field">
-            <label>Broker UTC offset <small>minutes</small></label>
-            <input id="setOffset" type="number">
-          </div>
-          <div class="field">
-            <label>Strict magic guard <small>— never touch foreign positions</small></label>
-            <select id="setGuard"><option value="false">Off</option><option value="true">On</option></select>
-          </div>
-          <div class="field">
-            <label>Log level</label>
-            <select id="setLogLevel"><option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select>
-          </div>
-        </div>
-        <div style="display:flex;gap:10px;align-items:center;margin-top:6px">
-          <button class="btn" id="saveSettings">💾 Save & apply</button>
-          <button class="btn ghost" id="restartChannel">↻ Restart server channel</button>
-          <span id="saveMsg"></span>
-        </div>
-      </form>
+      <div class="actions">
+        <button class="btn" id="btnUpCheck">Check for updates</button>
+        <button class="btn ghost" id="btnUpDownload">Download update</button>
+        <span class="statusline" id="upMsg"></span>
+      </div>
+      <p class="note">Verified updates download here and install on restart, after SHA-256 and
+        Ed25519 signature verification. A release with no signature, no public key configured,
+        or a failed verification is never installed.</p>
     </section>
   </div>
 </main>
 
 <script>
 const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = (v, d=2) => v == null ? '—' : Number(v).toFixed(d);
-const api = (cmd, params, method='POST') => fetch(`/api/v1/${cmd}`, {
-  method, headers:{'Content-Type':'application/json'}, body: params === undefined ? undefined : JSON.stringify(params || {})
-}).then(r => r.json()).then(j => j.ok ? j.data : Promise.reject(j.error));
+const fmtBytes = b => b == null ? '—' : (b < 1024 ? b + ' B' : (b < 1048576 ? (b/1024).toFixed(1) + ' KB' : (b/1048576).toFixed(1) + ' MB'));
+const human = s => String(s).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+function fmtTime(v){
+  if (v == null || v === '') return '—';
+  let d;
+  if (typeof v === 'number') d = new Date(v < 1e12 ? v * 1000 : v);
+  else d = new Date(v);
+  return isNaN(d) ? '—' : d.toLocaleString();
+}
+function ago(v){
+  if (v == null || v === '') return '—';
+  let t = typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : Date.parse(v);
+  if (isNaN(t)) return '—';
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 5) return 'just now';
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  return Math.floor(s / 3600) + 'h ago';
+}
+async function api(path, opts){
+  const o = opts || {};
+  const res = await fetch(path, {
+    method: o.method || 'GET',
+    headers: {'Content-Type': 'application/json'},
+    body: o.body === undefined ? undefined : JSON.stringify(o.body)
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok || j.ok === false) throw new Error((j.error && j.error.message) || ('HTTP ' + res.status));
+  return j.data;
+}
+const post = (path, body) => api(path, {method: 'POST', body: body === undefined ? {} : body});
+const setMsg = (el, txt, cls) => { const n = $(el); n.textContent = txt; n.className = 'statusline ' + (cls || ''); };
 
 /* ---------- navigation ---------- */
-const titles = {overview:'Overview', positions:'Open Positions', orders:'Pending Orders', logs:'Bridge Logs', checks:'Connection Checks', settings:'Settings', aiagent:'AI Agent'};
-document.querySelectorAll('.navitem').forEach(el => el.onclick = () => {
-  document.querySelectorAll('.navitem').forEach(n => n.classList.remove('active'));
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  el.classList.add('active');
-  $('page-' + el.dataset.page).classList.add('active');
-  $('pageTitle').textContent = titles[el.dataset.page];
-  if (el.dataset.page === 'checks') runChecks();
-  if (el.dataset.page === 'settings') loadSettings();
-  if (el.dataset.page === 'aiagent') { loadAgentStatus(); }
-});
-
-/* ---------- websocket feed ---------- */
-let ws = null;
-function connectWs(){
-  ws = new WebSocket(`ws://${location.host}/ws/ui`);
-  ws.onopen = () => $('dotWs').className = 'dot on';
-  ws.onclose = () => { $('dotWs').className = 'dot off'; setTimeout(connectWs, 2000); };
-  ws.onmessage = ev => {
-    const m = JSON.parse(ev.data);
-    if (m.type === 'tick') upsertTicker(m.data);
-    else if (m.type === 'account_update') paintAccount(m.data);
-    else if (m.type === 'positions_update') paintPositions(m.data);
-    else if (m.type === 'orders_update') paintOrders(m.data);
-    else if (m.type === 'status_update') paintStatusLite(m.data);
-    else if (m.type === 'trade_event') pushLogLine({ts:m.data.ts, level:'TRADE', message:`${m.data.op} → ${m.data.outcome} (retcode ${m.data.retcode}) ${m.data.symbol||''}`});
-  };
+const titles = {connection:'Connection', metatrader:'MetaTrader', account:'Account & Subscription', symbols:'Symbols', execution:'Execution', diagnostics:'Diagnostics', updates:'Updates & Releases'};
+let current = 'connection';
+function show(page){
+  document.querySelectorAll('.navitem').forEach(n => n.classList.toggle('active', n.dataset.page === page));
+  document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'page-' + page));
+  $('pageTitle').textContent = titles[page];
+  current = page;
+  refreshActive();
 }
-connectWs();
-
-/* ---------- overview ---------- */
-async function paintStatusLite(d){
-  $('mt5State').textContent = d.mt5_state;
-  $('mt5State').className = 'v ' + (d.mt5_connected ? 'up' : 'down');
-  $('dotMt5').className = 'dot ' + (d.mt5_connected ? 'on' : '');
-  $('chipMt5').textContent = d.mt5_state;
-  $('uptime').textContent = Math.floor(d.uptime_seconds) + 's';
-  const ch = d.server_channel || {};
-  $('chState').textContent = ch.enabled ? (ch.connected ? 'CONNECTED' : 'RECONNECTING') : 'DISABLED';
-  $('chState').className = 'v ' + (ch.connected ? 'up' : (ch.enabled ? 'warn' : 'down'));
-  $('chipSrv').textContent = ch.connected ? 'LIVE' : (ch.enabled ? 'RETRY' : 'OFF');
-  $('chipSrv').style.color = ch.connected ? 'var(--green)' : 'var(--dim)';
-  $('chUrl').textContent = ch.url || '—';
-  $('chReconn').textContent = ch.reconnects ?? 0;
-  $('chErr').textContent = ch.last_error ? String(ch.last_error).slice(0,40) : '—';
-}
-async function paintAccount(a){
-  if (!a) { try { a = (await api('get_trading_account_info')).account; } catch(e){ return; } }
-  $('balance').textContent = fmt(a.balance); $('chipBal').textContent = fmt(a.balance);
-  $('equity').textContent = fmt(a.equity); $('chipEq').textContent = fmt(a.equity);
-  $('pnl').textContent = fmt(a.profit); $('pnl').className = 'v ' + (a.profit >= 0 ? 'up' : 'down');
-  $('margins').textContent = `${fmt(a.margin)} / ${fmt(a.margin_free)}`;
-  $('currency').textContent = a.currency || '—';
-  $('accLogin').textContent = `${a.login || '—'} @ ${a.server || '—'}`;
-  if (a.margin > 0) $('mLvl').textContent = fmt((a.equity / a.margin) * 100, 1) + '%'; else $('mLvl').textContent = '∞';
-}
-async function paintTerminal(){
+document.querySelectorAll('.navitem').forEach(el => el.onclick = () => show(el.dataset.page));
+async function refreshActive(){
   try {
-    const t = (await api('get_mt5_terminal_info')).terminal;
-    $('termName').textContent = t.name || '—';
-  } catch(e){}
+    if (current === 'connection') await loadConnection();
+    else if (current === 'metatrader') await loadMetatrader();
+    else if (current === 'account') await loadAccount();
+    else if (current === 'symbols') await loadSymbols();
+    else if (current === 'execution') await loadExecution();
+    else if (current === 'diagnostics') await loadDiagnostics();
+    else if (current === 'updates') await loadUpdates();
+  } catch(e){ /* per-screen handlers surface their own errors */ }
+}
+setInterval(() => { if (['connection','metatrader','execution','diagnostics'].includes(current)) refreshActive(); }, 10000);
+
+/* ---------- shared bits ---------- */
+function diagBanner(d){
+  if (!d) return '<div class="diag ok"><div class="t">No diagnostic issues</div><p>The terminal link looks healthy.</p></div>';
+  const cls = d.severity === 'warning' ? 'warnb' : 'err';
+  return `<div class="diag ${cls}">
+    <div class="code">${esc(d.code)}</div><div class="t">${esc(d.title)}</div>
+    <p>${esc(d.explanation)}</p>
+    <ul>${d.recovery.map(r => `<li>${esc(r)}</li>`).join('')}</ul>
+    <div class="actions"><button class="btn small" data-retry-diag>Retry diagnostics</button></div>
+  </div>`;
+}
+function wireRetryDiag(root){
+  root.querySelectorAll('[data-retry-diag]').forEach(b => b.onclick = async () => {
+    try { await post('/api/v1/reconnect_mt5'); refreshActive(); }
+    catch(e){ alert('Retry failed: ' + e.message); }
+  });
+}
+function paintChips(summary){
+  const mt5 = summary && summary.mt5 ? summary.mt5 : {};
+  const ws = summary && summary.websocket ? summary.websocket : {};
+  const st = mt5.state || '—';
+  $('chipMt5').textContent = st;
+  $('dotMt5').className = 'dot ' + (mt5.terminal && mt5.terminal.connected ? 'on' : (st === 'CONNECTED' ? 'on' : ''));
+  $('chipSrv').textContent = ws.connected ? 'LIVE' : (ws.enabled ? 'RETRY' : 'OFF');
+  const bs = summary && summary.bridge_status ? summary.bridge_status : {};
+  $('chipVer').textContent = bs.bridge_version ? 'v' + bs.bridge_version : '—';
+  $('sfVer').textContent = bs.bridge_version ? 'v' + bs.bridge_version : '—';
+  $('sfDevice').textContent = bs.device_id || '—';
 }
 
-/* ---------- tickers + sparklines ---------- */
-const tickers = {};   // symbol -> {el, prices:[], lastPx}
-function upsertTicker(t){
-  let o = tickers[t.symbol];
-  if (!o) {
-    if (Object.keys(tickers).length === 0) $('tickers').innerHTML = '';
-    const el = document.createElement('div');
-    el.className = 'ticker';
-    el.innerHTML = `<span class="x" title="remove">✕</span><div class="sym">${t.symbol}</div>
-      <div class="px">—</div><div class="ba"><span>bid —</span><span>ask —</span></div>
-      <svg class="spark" width="100%" height="26" preserveAspectRatio="none"></svg>`;
-    el.querySelector('.x').onclick = () => {
-      delete tickers[t.symbol]; el.remove();
-      ws.send(JSON.stringify({type:'unsubscribe', symbol:t.symbol}));
-      if (!Object.keys(tickers).length) $('tickers').innerHTML = '<div class="empty">No subscriptions</div>';
-    };
-    $('tickers').appendChild(el);
-    o = tickers[t.symbol] = {el, prices: [], lastPx: null};
-  }
-  const px = t.bid || t.last;
-  const pxEl = o.el.querySelector('.px');
-  if (px && o.lastPx != null && px !== o.lastPx)
-    pxEl.className = 'px ' + (px > o.lastPx ? 'fx-up' : 'fx-down');
-  pxEl.textContent = fmt(px, t.bid > 500 ? 2 : 5);
-  o.lastPx = px;
-  o.el.querySelector('.ba').children[0].textContent = 'bid ' + fmt(t.bid, 5);
-  o.el.querySelector('.ba').children[1].textContent = 'ask ' + fmt(t.ask, 5);
-  if (px) {
-    o.prices.push(px); if (o.prices.length > 80) o.prices.shift();
-    drawSpark(o);
-  }
+/* ---------- Connection ---------- */
+async function loadConnection(){
+  const [summary, sub, settings] = await Promise.all([
+    api('/api/v1/diagnostics/summary'),
+    api('/api/v1/account/subscription'),
+    api('/api/v1/settings')
+  ]);
+  paintChips(summary);
+  $('cEnv').textContent = settings.environment || '—';
+  $('cBase').textContent = settings.server_base_url || '—';
+  $('cWsUrl').textContent = settings.server_url || '(derived from base URL)';
+  const authEl = $('cAuth');
+  authEl.textContent = sub.validated ? 'Valid' : (sub.validation_error ? 'Invalid — ' + sub.validation_error : 'Not validated yet');
+  authEl.className = 'v ' + (sub.validated ? 'up' : 'warn');
+  $('cUser').textContent = sub.user_id || '—';
+  $('cReg').textContent = sub.session_expires_at ? 'Registered' : 'Not registered';
+  $('cSess').textContent = fmtTime(sub.session_expires_at);
+  const ws = summary.websocket || {};
+  const wsEl = $('cWsState');
+  wsEl.textContent = ws.connected ? 'CONNECTED' : (ws.enabled ? 'RECONNECTING' : 'DISABLED');
+  wsEl.className = 'v ' + (ws.connected ? 'up' : (ws.enabled ? 'warn' : 'down'));
+  $('cHbOut').textContent = ws.last_heartbeat_at ? ago(ws.last_heartbeat_at) : '—';
+  $('cHbIn').textContent = ws.last_server_heartbeat_at ? ago(ws.last_server_heartbeat_at) : '—';
+  $('cLastConn').textContent = ws.last_connected_at ? ago(ws.last_connected_at) : '—';
+  $('cReconn').textContent = ws.reconnects ?? 0;
+  $('cWsErr').textContent = ws.last_error || '—';
+  const sync = summary.sync || {};
+  $('cSyncState').textContent = !sync.available ? 'Unavailable' : (sync.pending_batches ? 'Catching up (' + sync.pending_batches + ' queued)' : 'Up to date');
+  $('cSyncPend').textContent = sync.pending_batches ?? '—';
+  $('cSyncCp').textContent = fmtTime(sync.checkpoint);
+  const net = summary.network || {};
+  const netEl = $('cNet');
+  netEl.textContent = net.status + (net.detail ? ' — ' + net.detail : '');
+  netEl.className = 'v ' + (net.status === 'ok' ? 'up' : (net.status === 'not_configured' ? 'warn' : 'down'));
+  $('cUptime').textContent = summary.bridge_status ? Math.floor(summary.bridge_status.uptime_seconds || 0) + 's' : '—';
+  const host = $('connDiag');
+  host.innerHTML = diagBanner(summary.diagnostic);
+  wireRetryDiag(host);
+  // Settings live on this screen (spec §17): keep the form fresh.
+  try { await loadSettings(); } catch(e){ /* settings load surfaces its own errors */ }
 }
-function drawSpark(o){
-  const svg = o.el.querySelector('.spark');
-  const pts = o.prices;
-  if (pts.length < 2) return;
-  const min = Math.min(...pts), max = Math.max(...pts), range = (max - min) || 1e-9;
-  const w = svg.clientWidth || 190, h = 26;
-  const path = pts.map((p, i) => `${(i / (pts.length - 1)) * w},${h - 2 - ((p - min) / range) * (h - 4)}`).join(' ');
-  const up = pts[pts.length - 1] >= pts[0];
-  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
-  svg.innerHTML = `<polyline points="${path}" fill="none" stroke="${up ? '#34d399' : '#f87171'}" stroke-width="1.6"/>
-    <polyline points="0,${h} ${path} ${w},${h}" fill="${up ? 'rgba(52,211,153,.08)' : 'rgba(248,113,113,.08)'}" stroke="none"/>`;
-}
-$('addSym').onclick = () => {
-  const s = $('symInput').value.trim().toUpperCase();
-  if (!s) return;
-  ws.send(JSON.stringify({type:'subscribe', symbol:s, interval_ms:500}));
-  $('symInput').value = '';
+$('btnReconnect').onclick = async () => {
+  setMsg('connMsg', 'restarting channel…');
+  try { await post('/api/v1/server_channel/restart'); setMsg('connMsg', 'channel restarted', 'up'); loadConnection(); }
+  catch(e){ setMsg('connMsg', 'failed: ' + e.message, 'down'); }
 };
-$('symInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('addSym').click(); });
-api('get_trading_symbols', {limit: 400}).then(d => {
-  $('symbols').innerHTML = d.symbols.map(s => `<option value="${s.name}">`).join('');
-  if (!$('symInput').value) $('symInput').value = 'XAUUSD';
-}).catch(()=>{});
-api('subscribe_market_ticks', {symbol:'XAUUSD', interval_ms:500}).catch(()=>{});
+$('btnValidateKey').onclick = async () => {
+  setMsg('connMsg', 'validating key…');
+  try { await post('/api/v1/account/validate-key'); setMsg('connMsg', 'key valid — subscription refreshed', 'up'); loadConnection(); }
+  catch(e){ setMsg('connMsg', 'validation failed: ' + e.message, 'down'); loadConnection(); }
+};
+$('btnConnRefresh').onclick = loadConnection;
 
-/* ---------- positions & orders ---------- */
-function paintPositions(d){
-  if (d) {
-    $('pill-pos').textContent = d.count;
-    $('posFloat').textContent = d.count ? `floating: ${fmt(d.positions.reduce((s,p)=>s+(p.profit||0),0))}` : '';
-    $('posBody').innerHTML = d.count === 0 ? '<tr><td colspan="11" class="empty">No open positions</td></tr>' :
-      d.positions.map(p => `<tr><td>${p.ticket}</td><td>${p.symbol}</td>
-        <td><span class="badge ${String(p.type_label).startsWith('BUY')?'buy':'sell'}">${p.type_label}</span></td>
-        <td>${fmt(p.volume)}</td><td>${fmt(p.price_open)}</td><td>${fmt(p.price_current)}</td>
-        <td>${fmt(p.sl)}</td><td>${fmt(p.tp)}</td><td>${fmt(p.swap)}</td>
-        <td class="${p.profit>=0?'up':'down'}">${fmt(p.profit)}</td><td>${p.magic ?? ''}</td></tr>`).join('');
-  }
+/* ---------- MetaTrader ---------- */
+async function loadMetatrader(){
+  const [terms, status, summary] = await Promise.all([
+    api('/api/v1/mt5/terminals'),
+    post('/api/v1/get_mt5_connection_status'),
+    api('/api/v1/diagnostics/summary')
+  ]);
+  paintChips(summary);
+  const stEl = $('mtState');
+  stEl.textContent = status.state || '—';
+  stEl.className = 'v ' + (status.state === 'CONNECTED' ? 'up' : 'down');
+  $('mtPath').textContent = terms.selected_path || '—';
+  const term = status.terminal || {};
+  $('mtName').textContent = term.name || '—';
+  $('mtIpc').textContent = status.state === 'CONNECTED' ? 'Attached' : (status.state || 'Not attached');
+  $('mtAlgo').textContent = term.trade_allowed == null ? '—' : (term.trade_allowed ? 'Yes' : 'No');
+  let ver = null, srv = null;
+  try { ver = await post('/api/v1/get_mt5_terminal_version'); } catch(e){ /* not connected */ }
+  try { srv = await post('/api/v1/get_mt5_server_info'); } catch(e){ /* not connected */ }
+  $('mtBuild').textContent = ver && ver.build != null ? String(ver.build) + (ver.build_date ? ' (' + ver.build_date + ')' : '') : '—';
+  $('mtLogin').textContent = srv && srv.login != null ? String(srv.login) : (status.login != null ? String(status.login) : '—');
+  $('mtServer').textContent = srv && srv.server ? srv.server : '—';
+  $('mtCompany').textContent = srv && srv.company ? srv.company : '—';
+  $('mtCurrency').textContent = srv && srv.currency ? srv.currency : '—';
+  const accEl = $('mtAccState');
+  if (srv && srv.login != null) { accEl.textContent = 'Connected'; accEl.className = 'v up'; }
+  else if (status.diagnostic_code === 'MT5_ACCOUNT_NOT_READY') { accEl.textContent = 'Not logged in — sign in through MT5'; accEl.className = 'v warn'; }
+  else { accEl.textContent = 'Not connected'; accEl.className = 'v down'; }
+  const rows = (terms.terminals || []).map(t => `<tr>
+    <td>${esc(t.path)}</td><td>${esc(t.source)}</td>
+    <td>${t.exists ? '<span class="badge ok">found</span>' : '<span class="badge bad">missing</span>'}</td>
+    <td>${esc(t.version || '—')}</td>
+    <td>${t.running ? '<span class="badge ok">running</span>' : '—'}</td>
+    <td>${t.selected ? '<span class="badge ok">selected</span>' : ''}</td>
+    <td>${t.selected ? '' : `<button class="btn small ghost" data-select-term="${esc(t.path)}">Select</button>`}</td>
+  </tr>`).join('');
+  $('mtTerms').innerHTML = rows || '<tr><td colspan="7" class="empty">No terminal found on this machine.</td></tr>';
+  $('mtTerms').querySelectorAll('[data-select-term]').forEach(b => b.onclick = async () => {
+    try {
+      await api('/api/v1/settings', {method: 'PUT', body: {mt5_terminal_path: b.dataset.selectTerm}});
+      setMsg('mtMsg', 'terminal selected', 'up'); loadMetatrader();
+    } catch(e){ setMsg('mtMsg', 'failed: ' + e.message, 'down'); }
+  });
+  const host = $('mtDiag');
+  host.innerHTML = diagBanner(summary.diagnostic);
+  wireRetryDiag(host);
 }
-function paintOrders(d){
-  if (d) {
-    $('pill-ord').textContent = d.count;
-    $('ordBody').innerHTML = d.count === 0 ? '<tr><td colspan="9" class="empty">No pending orders</td></tr>' :
-      d.orders.map(o => `<tr><td>${o.ticket}</td><td>${o.symbol}</td><td>${o.type_label}</td>
-        <td>${fmt(o.volume_current)}</td><td>${fmt(o.price_open)}</td><td>${fmt(o.sl)}</td><td>${fmt(o.tp)}</td>
-        <td><span class="badge gray">${o.state_label||''}</span></td><td>${o.magic ?? ''}</td></tr>`).join('');
-  }
-}
-
-/* ---------- logs ---------- */
-let logLines = [];
-function pushLogLine(e){ logLines.push(e); if (logLines.length > 400) logLines.shift(); renderLogs(); }
-function renderLogs(){
-  const lvl = $('logLevel').value;
-  const rows = logLines.filter(e => !lvl || e.level === lvl).slice(-160);
-  $('logs').innerHTML = rows.map(e => `<div class="lg-${e.level}">${e.ts ? e.ts.slice(11,23) : ''} ${String(e.level).padEnd(7)} ${e.message.slice(0,220)}</div>`).join('');
-  $('logs').scrollTop = $('logs').scrollHeight;
-}
-async function paintLogs(){
+$('btnMtConnect').onclick = async () => {
+  setMsg('mtMsg', 'connecting…');
   try {
-    const d = await api('get_bridge_logs', {limit: 150});
-    logLines = d.entries; renderLogs();
-  } catch(e){}
-}
-$('logRefresh').onclick = paintLogs;
-$('logLevel').onchange = renderLogs;
+    const r = await post('/api/v1/connect_mt5');
+    setMsg('mtMsg', r.ok ? 'connected' : ('failed: ' + (r.error || 'unknown')), r.ok ? 'up' : 'down');
+    loadMetatrader();
+  } catch(e){ setMsg('mtMsg', 'failed: ' + e.message, 'down'); loadMetatrader(); }
+};
+$('btnMtDisconnect').onclick = async () => {
+  try { await post('/api/v1/disconnect_mt5'); setMsg('mtMsg', 'disconnected', 'up'); loadMetatrader(); }
+  catch(e){ setMsg('mtMsg', 'failed: ' + e.message, 'down'); }
+};
+$('btnMtDiscover').onclick = loadMetatrader;
+$('btnMtOpen').onclick = async () => {
+  try {
+    const terms = await api('/api/v1/mt5/terminals');
+    if (!terms.selected_path) { setMsg('mtMsg', 'no terminal selected', 'down'); return; }
+    await post('/api/v1/mt5/terminals/open', {path: terms.selected_path});
+    setMsg('mtMsg', 'terminal launched', 'up');
+  } catch(e){ setMsg('mtMsg', 'failed: ' + e.message, 'down'); }
+};
+$('btnMtRetry').onclick = async () => {
+  setMsg('mtMsg', 'retrying…');
+  try { await post('/api/v1/reconnect_mt5'); setMsg('mtMsg', 'retry done', 'up'); }
+  catch(e){ setMsg('mtMsg', 'failed: ' + e.message, 'down'); }
+  loadMetatrader();
+};
 
-/* ---------- checks ---------- */
-async function runChecks(){
+/* ---------- Account & Subscription ---------- */
+const FEAT_LABELS = {history_sync:'History sync', ai_coach:'AI Coach (server feature)', position_manager:'Position manager', auto_trade:'Auto trade'};
+async function loadAccount(){
+  const sub = await api('/api/v1/account/subscription');
+  const vEl = $('acValid');
+  vEl.textContent = sub.validated ? 'Valid' : (sub.validation_error ? 'Invalid — ' + sub.validation_error : 'Not validated yet');
+  vEl.className = 'v ' + (sub.validated ? 'up' : 'warn');
+  $('acUser').textContent = sub.user_id || '—';
+  $('acAt').textContent = fmtTime(sub.validated_at);
+  $('acDevice').textContent = sub.device_id || '—';
+  $('acSess').textContent = fmtTime(sub.session_expires_at);
+  $('acKey').textContent = sub.api_key_set ? ('set: ' + (sub.api_key_masked || '')) : 'not set';
+  const entries = Object.entries(sub.subscription || {});
+  $('acSub').innerHTML = entries.length === 0
+    ? '<div class="empty">No subscription data returned by the server yet.</div>'
+    : entries.map(([k, v]) => `<div class="kv"><span class="k">${esc(human(k))}</span><span class="v">${esc(typeof v === 'object' ? JSON.stringify(v) : String(v))}</span></div>`).join('');
+  const ent = sub.entitlements || {};
+  $('acFeat').innerHTML = Object.keys(FEAT_LABELS).map(k =>
+    `<div class="kv"><span class="k">${FEAT_LABELS[k]}</span><span class="v ${ent[k] ? 'up' : ''}">${ent[k] ? 'Enabled' : 'Disabled'}</span></div>`).join('');
+  $('acMaxDev').textContent = ent.max_devices ?? '—';
+  $('acMaxAcc').textContent = ent.max_accounts ?? '—';
+}
+$('btnAcRefresh').onclick = async () => {
+  setMsg('acMsg', 'refreshing from server…');
+  try { await post('/api/v1/account/validate-key'); setMsg('acMsg', 'refreshed', 'up'); }
+  catch(e){ setMsg('acMsg', 'refresh failed: ' + e.message, 'down'); }
+  loadAccount();
+};
+
+/* ---------- Symbols ---------- */
+let symData = [];
+function symVal(v){ return v == null ? 'not reported' : String(v); }
+function stateBadge(s){
+  const cls = {COMPLETED:'ok', PARTIALLY_COMPLETED:'warnb', FAILED:'bad', UNKNOWN:'warnb', EXPIRED:'gray', RECEIVED:'gray', VALIDATED:'gray', AUTHORIZED:'gray', DISPATCHED:'gray', EXECUTING:'warnb'}[s] || 'gray';
+  return '<span class="badge ' + cls + '">' + esc(s) + '</span>';
+}
+function renderSymbols(){
+  const q = ($('symFilter').value || '').trim().toLowerCase();
+  const rows = symData.filter(s => !q || s.metadata.name.toLowerCase().includes(q));
+  $('symRows').innerHTML = rows.length === 0
+    ? '<tr><td colspan="11" class="empty">' + (symData.length === 0 ? 'No symbols reported by this broker.' : 'No symbols match the filter.') + '</td></tr>'
+    : rows.map(s => {
+        const m = s.metadata, a = s.availability || {};
+        const cur = [m.currency_base, m.currency_profit].filter(Boolean).join(' / ') || 'not reported';
+        const vol = [m.volume_min, m.volume_max, m.volume_step].map(v => v == null ? '—' : v).join(' / ');
+        return '<tr><td><b>' + esc(m.name) + '</b></td>'
+          + '<td>' + (m.visible == null ? '—' : (m.visible ? 'yes' : 'no')) + '</td>'
+          + '<td>' + (a.tradable ? '<span class="badge ok">tradable</span>' : '<span class="badge warnb">not tradable</span>')
+          + '<br><span style="color:var(--dim2);font-size:12px">' + esc(a.reason || '') + '</span></td>'
+          + '<td>' + symVal(m.digits) + '</td><td>' + symVal(m.point) + '</td><td>' + symVal(m.contract_size) + '</td>'
+          + '<td>' + esc(vol) + '</td><td>' + symVal(m.stop_level) + '</td>'
+          + '<td>' + esc(m.execution_mode_label || 'not reported') + '</td><td>' + esc(m.calculation_mode_label || 'not reported') + '</td>'
+          + '<td>' + esc(cur) + '</td></tr>';
+      }).join('');
+}
+async function loadSymbols(){
+  let inv;
+  try { inv = await api('/api/v1/symbols/inventory'); }
+  catch(e){
+    symData = [];
+    $('symRows').innerHTML = '<tr><td colspan="11" class="empty">Symbols unavailable: ' + esc(e.message) + '</td></tr>';
+    return;
+  }
+  symData = inv.symbols || [];
+  const sum = inv.summary || {};
+  $('symTotal').textContent = sum.total ?? symData.length;
+  $('symVis').textContent = (sum.visible ?? '—') + ' / ' + (sum.hidden ?? '—') + ' / ' + (sum.visibility_unknown ?? '—');
+  $('symTrad').textContent = sum.tradable ?? '—';
+  $('symLoaded').textContent = fmtTime(sum.loaded_at);
+  $('symComplete').textContent = sum.completeness || '—';
+  renderSymbols();
+}
+$('symFilter').oninput = renderSymbols;
+$('btnSymRefresh').onclick = async () => {
+  setMsg('symMsg', 'refreshing…');
+  try { await post('/api/v1/symbols/refresh'); setMsg('symMsg', 'refreshed', 'up'); await loadSymbols(); }
+  catch(e){ setMsg('symMsg', 'refresh failed: ' + e.message, 'down'); }
+};
+$('btnSymResolve').onclick = async () => {
+  const input = $('symResolveInput').value.trim();
+  if (!input) { setMsg('symResolveMsg', 'type a canonical ID first', 'down'); return; }
+  setMsg('symResolveMsg', 'resolving…');
+  try {
+    const r = await post('/api/v1/symbols/resolve', {symbol: input});
+    setMsg('symResolveMsg', '', '');
+    if (r.status === 'resolved') {
+      $('symResolveOut').innerHTML = '<div class="kv"><span class="k">Resolved</span><span class="v">' + esc(r.exact_symbol) + '</span></div>'
+        + '<div class="kv"><span class="k">Canonical ID</span><span class="v">' + esc(r.canonical_id || '') + '</span></div>'
+        + '<p class="note">' + esc(r.reason || '') + '</p>';
+    } else if (r.status === 'ambiguous') {
+      $('symResolveOut').innerHTML = '<p class="note" style="margin-top:0">Ambiguous — ' + esc(r.reason || '') + '</p>'
+        + (r.candidates || []).map(c => '<div class="kv"><span class="k">' + esc(c.name) + '</span><span class="v">contract ' + symVal(c.contract_size) + ' · digits ' + symVal(c.digits) + '</span></div>').join('')
+        + '<p class="note">Pick the exact broker name yourself — the bridge never guesses.</p>';
+    } else {
+      $('symResolveOut').innerHTML = '<div class="empty">Not found — ' + esc(r.reason || 'no broker symbol matches') + '</div>';
+    }
+  } catch(e){ setMsg('symResolveMsg', 'resolve failed: ' + e.message, 'down'); }
+};
+
+/* ---------- Execution ---------- */
+async function loadExecution(){
+  let rec;
+  try { rec = await api('/api/v1/execution/recent'); }
+  catch(e){
+    $('exRows').innerHTML = '<tr><td colspan="8" class="empty">Execution history unavailable: ' + esc(e.message) + '</td></tr>';
+    return;
+  }
+  const execs = rec.executions || [];
+  $('exPend').textContent = rec.pending_results ?? '—';
+  $('exUnknown').textContent = execs.filter(x => x.state === 'UNKNOWN').length;
+  $('exAvail').textContent = rec.executor_available ? 'available' : 'not started yet (no commands executed)';
+  $('exRows').innerHTML = execs.length === 0
+    ? '<tr><td colspan="8" class="empty">No server-channel commands executed yet in this session.</td></tr>'
+    : execs.map(x => {
+        const partial = x.partial
+          ? ('closed ' + (x.closed_volume ?? '?') + ' · remaining ' + (x.remaining_volume ?? '?') + ' · ' + (x.reconciled ? 'reconciled' : 'not reconciled'))
+          : '—';
+        return '<tr><td>' + esc((x.command_id || '').slice(0, 8)) + '</td><td>' + esc(x.operation || '—') + '</td>'
+          + '<td>' + stateBadge(x.state) + '</td><td>' + esc(x.wire_status || '—') + '</td>'
+          + '<td>' + fmtTime(x.started_at) + '</td><td>' + (x.duration_ms == null ? '—' : Math.round(x.duration_ms) + ' ms') + '</td>'
+          + '<td>' + esc(x.error_code ? (x.error_code + (x.error_message ? ' — ' + x.error_message : '')) : '—') + '</td>'
+          + '<td>' + esc(partial) + '</td></tr>';
+      }).join('');
+  let jr;
+  try { jr = await api('/api/v1/journal/events'); }
+  catch(e){ $('jrMsg').textContent = 'journal unavailable: ' + e.message; return; }
+  const events = jr.events || [];
+  $('jrRows').innerHTML = events.length === 0
+    ? '<tr><td colspan="8" class="empty">' + (jr.sync_available ? 'No journal events collected yet.' : 'Journaling is off — no sync engine running.') + '</td></tr>'
+    : events.map(ev => {
+        const ticket = ev.ticket || ev.position_id || ev.order_id || ev.deal_id || '—';
+        const rc = ev.broker_retcode == null ? '—' : (ev.broker_retcode + (ev.retcode_label ? ' (' + ev.retcode_label + ')' : ''));
+        return '<tr><td>' + fmtTime(ev.execution_time) + '</td><td>' + esc(ev.event_type || '—') + '</td>'
+          + '<td>' + esc(String(ticket)) + '</td><td>' + esc(ev.symbol || '—') + '</td>'
+          + '<td>' + (ev.volume == null ? '—' : ev.volume) + '</td><td>' + (ev.price == null ? '—' : ev.price) + '</td>'
+          + '<td>' + (ev.profit == null ? 'not reported' : ev.profit) + '</td><td>' + esc(rc) + '</td></tr>';
+      }).join('');
+  $('jrMsg').textContent = jr.total ? (jr.total + ' events stored') : '';
+}
+$('btnExRefresh').onclick = loadExecution;
+$('btnJrRefresh').onclick = loadExecution;
+
+/* ---------- Diagnostics ---------- */
+let diagReport = null;
+async function loadDiagnostics(){
+  const summary = await api('/api/v1/diagnostics/summary');
+  paintChips(summary);
+  const host = $('dgDiag');
+  host.innerHTML = diagBanner(summary.diagnostic);
+  wireRetryDiag(host);
+  const b = summary.bridge || {};
+  const hEl = $('dgHealthy');
+  hEl.textContent = b.healthy ? 'Yes' : 'No';
+  hEl.className = 'v ' + (b.healthy ? 'up' : 'down');
+  const checks = b.checks || {};
+  $('dgCalls').textContent = (checks.total_mt5_calls ?? '—') + ' / ' + (checks.total_mt5_failures ?? '—');
+  $('dgErrRate').textContent = checks.mt5_error_rate != null ? (checks.mt5_error_rate * 100).toFixed(2) + '%' : '—';
+  $('dgUptime').textContent = b.uptime_seconds != null ? Math.floor(b.uptime_seconds) + 's' : '—';
+  const m = summary.mt5 || {};
+  $('dgMt5State').textContent = m.state || '—';
+  $('dgMt5Conn').textContent = m.terminal && m.terminal.connected ? 'Yes' : 'No';
+  $('dgMt5Login').textContent = (m.terminal && m.terminal.login != null) ? String(m.terminal.login) : (m.login != null ? String(m.login) : '—');
+  const net = summary.network || {};
+  const netEl = $('dgNet');
+  netEl.textContent = net.status + (net.detail ? ' — ' + net.detail : '');
+  netEl.className = 'v ' + (net.status === 'ok' ? 'up' : (net.status === 'not_configured' ? 'warn' : 'down'));
+  const ws = summary.websocket || {};
+  $('dgWs').textContent = ws.connected ? 'CONNECTED' : (ws.enabled ? 'RECONNECTING' : 'DISABLED');
+  $('dgReconn').textContent = ws.reconnects ?? 0;
+  $('dgSyncPend').textContent = summary.sync && summary.sync.pending_batches != null ? String(summary.sync.pending_batches) : '—';
+  const errs = summary.last_errors || [];
+  $('dgErrors').innerHTML = errs.length === 0
+    ? '<div class="empty">No errors recorded.</div>'
+    : errs.map(e => `<div><span class="ts">${esc((e.ts || '').slice(11, 23))}</span> ${esc(e.message || '')}</div>`).join('')
+      + (summary.driver_last_error ? `<div><span class="ts">driver</span> ${esc(JSON.stringify(summary.driver_last_error))}</div>` : '');
+}
+$('runChecks').onclick = async () => {
   $('checkList').innerHTML = '<div class="empty">Running…</div>';
   try {
-    const d = await api('run_connection_checks');
+    const d = await post('/api/v1/run_connection_checks');
     const o = $('overall');
     o.textContent = d.overall.toUpperCase();
     o.className = d.overall;
@@ -561,50 +888,101 @@ async function runChecks(){
       <div class="check">
         <div class="ic ${c.status}">${c.status === 'ok' ? '✓' : c.status === 'warn' ? '!' : '✕'}</div>
         <div style="min-width:0">
-          <div class="t">${c.title}</div>
-          ${c.detail ? `<div class="d">${c.detail}</div>` : ''}
-          ${c.hint ? `<div class="h">💡 ${c.hint}</div>` : ''}
+          <div class="t">${esc(c.title)}</div>
+          ${c.detail ? `<div class="d">${esc(c.detail)}</div>` : ''}
+          ${c.hint ? `<div class="h">${esc(c.hint)}</div>` : ''}
         </div>
       </div>`).join('');
   } catch(e) {
-    $('checkList').innerHTML = `<div class="empty down">Checks failed: ${e.message || e}</div>`;
+    $('checkList').innerHTML = `<div class="empty down">Checks failed: ${esc(e.message || e)}</div>`;
   }
-}
-$('runChecks').onclick = runChecks;
-
-/* ---------- settings ---------- */
-async function loadSettings(){
+};
+$('loadReport').onclick = async () => {
   try {
-    const d = await api('settings', undefined, 'GET');
-    $('setUrl').value = d.server_url || '';
-    $('setToken').placeholder = d.server_token_set ? `saved: ${d.server_token_masked}` : 'paste your API key';
-    $('setMagic').value = d.magic;
-    $('setSymbol').value = d.bot_symbol || '';
-    $('setOffset').value = d.broker_utc_offset_minutes;
-    $('setGuard').value = String(!!d.strict_magic_guard);
-    $('setLogLevel').value = d.log_level || 'INFO';
-    $('cfgPath').textContent = d.config_file || 'config.json';
-    $('sfDevice').textContent = d.device_id || '—';
-    $('chKey').textContent = d.server_token_set ? d.server_token_masked : 'not set';
-    $('chKey').className = 'v ' + (d.server_token_set ? 'up' : 'down');
-    $('sfVer').textContent = 'v' + (d.config_file ? '1.1.0' : '1.1.0');
-  } catch(e){}
+    diagReport = await post('/api/v1/get_mt5_diagnostic_report');
+    $('diagReport').textContent = JSON.stringify(diagReport, null, 2);
+  } catch(e){ $('diagReport').textContent = 'Report failed: ' + e.message; }
+};
+$('copyDiag').onclick = async () => {
+  if (!diagReport) { setMsg('copyMsg', 'load the report first', 'down'); return; }
+  const text = JSON.stringify(diagReport, null, 2);
+  try {
+    await navigator.clipboard.writeText(text);
+    setMsg('copyMsg', 'diagnostics copied to clipboard', 'up');
+  } catch(e) {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); setMsg('copyMsg', 'diagnostics copied to clipboard', 'up'); }
+    catch(err){ setMsg('copyMsg', 'copy failed: ' + err.message, 'down'); }
+    ta.remove();
+  }
+};
+
+/* ---------- Updates & Releases ---------- */
+async function loadUpdates(){
+  const d = await api('/api/v1/updates/latest');
+  $('upInstalled').textContent = d.installed_version || '—';
+  const latest = d.latest || {};
+  $('upLatest').textContent = latest.version || 'unknown';
+  const stEl = $('upStatus');
+  stEl.textContent = d.status || '—';
+  stEl.className = 'v ' + (d.status === 'current' ? 'up' : (d.status === 'update_available' ? 'warn' : 'down'));
+  $('upDetail').textContent = d.detail || '—';
+  $('upReleased').textContent = fmtTime(latest.released_at);
+  $('upSize').textContent = fmtBytes(latest.size_bytes);
+  $('upSha').textContent = latest.sha256 ? latest.sha256.slice(0, 16) + '…' : '—';
+  $('upMin').textContent = latest.min_connector_version || '—';
+  $('upSig').textContent = latest.signature_present ? 'Yes' : '—';
+  $('upNotes').textContent = 'No release notes in the releases/latest response.';
+  try {
+    const st = await api('/api/v1/updates/status');
+    $('upStaged').textContent = st.staged_version
+      ? (st.staged_version + (st.restart_required ? ' — installs on restart' : ''))
+      : '—';
+  } catch(e){ /* updater status is best-effort here */ }
+}
+$('btnUpCheck').onclick = async () => {
+  setMsg('upMsg', 'checking…');
+  try { await loadUpdates(); setMsg('upMsg', 'check complete', 'up'); }
+  catch(e){ setMsg('upMsg', 'check failed: ' + e.message, 'down'); }
+};
+$('btnUpDownload').onclick = async () => {
+  setMsg('upMsg', 'downloading and verifying…');
+  try {
+    const r = await post('/api/v1/updates/download');
+    setMsg('upMsg', r.detail || r.state, r.state === 'staged' ? 'up' : 'down');
+    await loadUpdates();
+  } catch(e){ setMsg('upMsg', 'download failed: ' + e.message, 'down'); }
+};
+
+/* ---------- Settings ---------- */
+async function loadSettings(){
+  const d = await api('/api/v1/settings');
+  $('setBaseUrl').value = d.server_base_url || '';
+  $('setUrl').value = d.server_url || '';
+  $('setEnv').value = d.environment || 'production';
+  $('setToken').placeholder = d.server_token_set ? ('saved: ' + (d.server_token_masked || '')) : 'paste your API key';
+  $('setLogLevel').value = d.log_level || 'INFO';
+  $('setGuiMode').value = d.gui_mode || 'auto';
+  $('setLocalKey').textContent = d.local_api_key_set ? 'set (mandatory gate)' : 'not set';
+  $('setDevice').textContent = d.device_id || '—';
+  $('cfgPath').textContent = d.config_file || 'config.json';
 }
 $('saveSettings').onclick = async () => {
   const body = {
+    server_base_url: $('setBaseUrl').value.trim(),
     server_url: $('setUrl').value.trim(),
-    magic: Number($('setMagic').value) || 0,
-    bot_symbol: $('setSymbol').value.trim(),
-    broker_utc_offset_minutes: Number($('setOffset').value) || 0,
-    strict_magic_guard: $('setGuard').value === 'true',
+    environment: $('setEnv').value,
     log_level: $('setLogLevel').value,
+    gui_mode: $('setGuiMode').value,
   };
   const tok = $('setToken').value.trim();
   if (tok) body.server_token = tok;  // empty = keep existing
   try {
-    const d = await api('settings', body, 'PUT');
-    $('saveMsg').textContent = d.changed.length ? `saved: ${d.changed.join(', ')}` : 'no changes';
+    const d = await api('/api/v1/settings', {method: 'PUT', body});
+    $('saveMsg').textContent = d.changed.length ? 'saved: ' + d.changed.join(', ') : 'no changes';
     $('saveMsg').className = d.changed.length ? 'up' : '';
+    $('restartNote').style.display = d.restart_required ? 'block' : 'none';
     $('setToken').value = '';
     loadSettings();
   } catch(e) {
@@ -612,123 +990,9 @@ $('saveSettings').onclick = async () => {
     $('saveMsg').className = 'down';
   }
 };
-$('restartChannel').onclick = async () => {
-  $('saveMsg').textContent = 'restarting…';
-  try {
-    await api('server_channel/restart');
-    $('saveMsg').textContent = 'channel restarted';
-    $('saveMsg').className = 'up';
-  } catch(e) {
-    $('saveMsg').textContent = 'failed: ' + (e.message || e);
-    $('saveMsg').className = 'down';
-  }
-};
-
-
-/* ---------- AI AGENT ---------- */
-const AGGR_LABELS = v => v<=20?'Sniper':v<=40?'Conservative':v<=60?'Balanced':v<=80?'Aggressive':'Degen';
-function paintAggr(v){
-  $('aggrLabel').textContent = v + ' · ' + AGGR_LABELS(v);
-  $('aggrRisk').textContent = (0.25 + v*0.045).toFixed(3) + ' %';
-  $('aggrConf').textContent = (95 - v*0.55).toFixed(1) + ' %';
-  $('aggrSl').textContent = (2.2 - v*0.012).toFixed(2) + '\u00d7 ATR';
-  $('aggrTp').textContent = (2.6 - v*0.01).toFixed(2) + '\u00d7 ATR';
-}
-$('aggrSlider').oninput = e => paintAggr(+e.target.value);
-paintAggr(45);
-
-async function loadAgentStatus(){
-  try {
-    const s = await api('agent/status', undefined, 'GET');
-    $('agentMode').value = s.mode;
-    $('agentSymbol').value = s.symbol || 'XAUUSD';
-    $('aggrSlider').value = s.aggression;
-    paintAggr(s.aggression);
-    $('agentAutoExec').value = String(!!s.auto_execute);
-    const pill = $('pill-agent');
-    pill.textContent = s.mode.toUpperCase();
-    pill.style.background = s.mode === 'auto' ? '#3a0e0e' : '#2a1d4a';
-  } catch(e){}
-}
-$('saveLlm').onclick = async () => {
-  try {
-    await api('agent/config', {
-      llm_base_url: $('llmUrl').value.trim(), llm_model: $('llmModel').value.trim(),
-      llm_api_key: $('llmKey').value.trim() || undefined,
-    }, 'PUT');
-    $('llmMsg').textContent = 'saved';
-  } catch(e){ $('llmMsg').textContent = 'failed: ' + (e.message||e); }
-};
-$('runAnalyze').onclick = async () => {
-  const msg = $('agentMsg');
-  msg.textContent = 'running engines…'; msg.className = '';
-  try {
-    await api('agent/config', {
-      mode: $('agentMode').value, aggression: +$('aggrSlider').value,
-      symbol: $('agentSymbol').value.trim(),
-      auto_execute: $('agentAutoExec').value === 'true',
-    }, 'PUT');
-    const r = await api('agent/analyze', {}, 'POST');
-    msg.textContent = '';
-    paintDecision(r);
-  } catch(e){ msg.textContent = 'failed: ' + (e.message||e); msg.className='down'; }
-};
-$('agentExec').onclick = async () => {
-  const msg = $('agentMsg');
-  try {
-    const r = await api('agent/execute', {}, 'POST');
-    msg.textContent = 'executed: ' + r.side + ' ' + r.volume + ' lots @ ' + r.price + ' (retcode ' + r.retcode + ')';
-    msg.className = 'up';
-  } catch(e){ msg.textContent = 'refused: ' + (e.message||e); msg.className='down'; }
-};
-function paintDecision(d){
-  const card = $('decisionCard'); card.style.display = '';
-  const badge = $('decisionBadge');
-  const dir = d.direction !== 'none' ? d.direction.toUpperCase() : '\u2014';
-  badge.textContent = d.decision + ' \u00b7 ' + dir + ' @ ' + d.confidence + '/100';
-  badge.style.color = d.decision === 'TRADE' ? 'var(--green)' : 'var(--red)';
-  $('decisionConf').textContent = 'required: ' + d.min_confidence + ' \u00b7 mode: ' + d.mode + ' \u00b7 aggression: ' + d.aggression;
-  $('gates').innerHTML = d.gates.map(g => {
-    const col = g.verdict==='pass'?'var(--green)':g.verdict==='warn'?'var(--amber)':'var(--red)';
-    return '<div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 11px">' +
-      '<div style="display:flex;justify-content:space-between;font-size:12px">' +
-      '<span style="color:var(--dim);text-transform:uppercase;letter-spacing:1px">' + g.name + '</span>' +
-      '<span style="color:' + col + ';font-weight:700">' + g.score.toFixed(0) + '</span></div>' +
-      '<div style="height:5px;background:#0d1521;border-radius:4px;margin:6px 0">' +
-      '<div style="width:' + g.score + '%;height:100%;background:' + col + ';border-radius:4px"></div></div>' +
-      '<div style="font-size:11px;color:var(--dim)">' + g.detail + '</div></div>';
-  }).join('');
-  const pr = d.proposal;
-  $('proposalBox').innerHTML = pr ? (
-    '<div style="background:#0f1b2c;border:1px solid #1c3049;border-radius:10px;padding:12px 14px;margin-top:6px">' +
-    '<b style="color:var(--cyan)">Proposal</b> \u2014 <span class="badge ' + (pr.side==='buy'?'buy':'sell') + '">' + pr.side + '</span>' +
-    ' entry <b>' + pr.entry + '</b> \u00b7 SL <b class="down">' + pr.sl + '</b> \u00b7 TP <b class="up">' + pr.tp + '</b>' +
-    ' \u00b7 risk <b>' + pr.risk_pct + '%</b>' +
-    '<div style="font-size:11px;color:var(--dim);margin-top:4px">' + pr.note + '</div></div>'
-  ) : '<div class="empty">No proposal \u2014 the router said NO_TRADE.</div>';
-  $('llmBox').innerHTML = d.llm ? (
-    '<div style="margin-top:8px;font-size:12.5px"><b style="color:var(--violet)">LLM review:</b> ' +
-    d.llm.critique + (d.llm.risks.length ? ' \u00b7 risks: ' + d.llm.risks.join(', ') : '') + '</div>'
-  ) : '';
-  const cb = $('coachBadge');
-  cb.textContent = d.coach.verdict.toUpperCase() + ' (' + d.coach.score + ')';
-  cb.style.color = d.coach.verdict==='pass'?'var(--green)':d.coach.verdict==='warn'?'var(--amber)':'var(--red)';
-  $('coachMsgs').innerHTML = d.coach.messages.length
-    ? d.coach.messages.map(m => '<div style="padding:4px 0">\ud83d\udca1 ' + m + '</div>').join('')
-    : '<div style="color:var(--dim)">Discipline clean \u2014 keep it up.</div>';
-  $('coachStats').textContent = JSON.stringify(d.coach.stats);
-}
 
 /* ---------- boot ---------- */
-paintStatusLite({mt5_state:'…', mt5_connected:false, uptime_seconds:0, server_channel:{}});
-paintTerminal(); paintAccount(); paintPositions(null); paintOrders(null); paintLogs(); loadSettings();
-setInterval(paintTerminal, 5000);
-setInterval(() => api('get_bridge_status').then(st => paintStatusLite({
-  mt5_state: st.mt5_state, mt5_connected: st.mt5_connected,
-  uptime_seconds: st.uptime_seconds, server_channel: st.server_channel})).catch(()=>{}), 5000);
-setInterval(() => { if (!wsUpPlaceholder()) paintAccount(); }, 4000);
-function wsUpPlaceholder(){ return false; }
-setInterval(paintPositions, 2500); setInterval(paintOrders, 3500); setInterval(paintLogs, 4000);
+show('connection');
 </script>
 </body>
 </html>

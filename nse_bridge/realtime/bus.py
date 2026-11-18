@@ -1,8 +1,21 @@
-"""Async event bus feeding both WebSocket channels (dashboard + NSE server).
+"""Async event bus feeding the local dashboard WS channel (/ws/ui).
 
 Streaming tasks:
 - tick poller: fresh tick per subscribed symbol at its interval
+  (dashboard only — the server gets ticks via §17.1 chart.tick under
+  a subscription, never as ``tick`` frames)
 - account poller: account snapshot at the configured interval
+  (dashboard bus + §3.3 ``account`` sync batch via the sync engine)
+- positions poller: open positions + pending orders (dashboard bus +
+  §3.3 ``positions`` sync batch)
+- orders poller: pending-order snapshots (dashboard only)
+- status poller: periodic bridge status (dashboard only)
+
+CONTRACT v1 (§5.3): the old server frames (``tick``,
+``account_update``, ``positions_update``, ``orders_update``,
+``status_update``, ``trade_event``) no longer exist on the server
+channel. The server channel reads nothing from this bus; snapshots
+reach the server as REST sync batches, ticks as chart frames.
 """
 
 from __future__ import annotations
@@ -50,23 +63,22 @@ async def tick_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) ->
         try:
             subs = ctx.subscriptions.snapshot()
             now = time.monotonic()
-            due = [
-                s
-                for s in subs
-                if now - last_sent.get(s.symbol, 0.0) >= s.interval_ms / 1000.0
-            ]
+            due = [s for s in subs if now - last_sent.get(s.symbol, 0.0) >= s.interval_ms / 1000.0]
             if due:
                 ctx.driver.ensure_connected()
 
-                def job(mt5: Any):
+                def job(mt5: Any, due=due):
                     out = {}
                     for s in due:
                         try:
                             raw = mt5.symbol_info_tick(s.symbol)
                             if raw is not None:
-                                out[s.symbol] = build_tick_model(raw, s.symbol, ctx.settings.broker_utc_offset_minutes).model_dump()
-                        except Exception:
-                            pass
+                                out[s.symbol] = build_tick_model(
+                                    raw, s.symbol, ctx.settings.broker_utc_offset_minutes
+                                ).model_dump()
+                        except Exception as exc:  # noqa: BLE001 — one bad tick must not kill the poller
+                            logger.debug("[STREAM] tick for {} skipped: {}", s.symbol, type(exc).__name__)
+                            continue
                     return out
 
                 ticks = await run_in_threadpool(ctx.driver.run, job, "tick_poll")
@@ -74,16 +86,21 @@ async def tick_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) ->
                     last_sent[symbol] = time.monotonic()
                     ctx.subscriptions.record_tick(symbol, payload)
                     bus.publish("tick", payload)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — a poller must never die on a stray MT5 error
             logger.debug("[STREAM] tick poll skipped: {}", exc)
         try:
             await asyncio.wait_for(stop.wait(), timeout=0.05)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 
 async def account_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) -> None:
-    """Push account snapshots at the configured interval."""
+    """Push account snapshots at the configured interval.
+
+    The snapshot goes to the local dashboard bus AND — as a §3.3
+    ``account`` sync batch — to the server via the sync engine (the
+    old ``account_update`` server frame no longer exists in v1).
+    """
     from ..engine.common import account_info_model
 
     interval = max(0.2, ctx.settings.stream_account_interval_ms / 1000.0)
@@ -92,72 +109,84 @@ async def account_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event)
             if ctx.driver.connected:
                 acc = await run_in_threadpool(account_info_model, ctx)
                 bus.publish("account_update", acc.model_dump())
-        except Exception as exc:
+                sync_engine = getattr(ctx, "sync_engine", None)
+                if sync_engine is not None:
+                    items = sync_engine.account_items(acc, ctx.driver.connection_state_dict())
+                    sync_engine.enqueue("account", items)
+        except Exception as exc:  # noqa: BLE001 — a poller must never die on a stray MT5 error
             logger.debug("[STREAM] account poll skipped: {}", exc)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 
 async def positions_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) -> None:
-    """Push open-positions snapshots to the server (2s interval)."""
-    from ..mt5.types import build_position_model
+    """Push open-positions snapshots to the server (2s interval).
+
+    The snapshot goes to the local dashboard bus AND — as a §3.3
+    ``positions`` sync batch (open positions + pending orders) — to
+    the server via the sync engine. The old ``positions_update`` server
+    frame no longer exists in v1.
+    """
     from ..errors import BridgeError
+    from ..mt5.types import build_order_model, build_position_model
 
     interval = 2.0
     while not stop.is_set():
         try:
             if ctx.driver.connected:
-                def job(mt5: Any):
-                    raw = mt5.positions_get()
-                    return list(raw) if raw else []
 
-                rows = await run_in_threadpool(ctx.driver.run, job, "positions_poll")
-                positions = [
-                    build_position_model(r, ctx.settings.broker_utc_offset_minutes).model_dump()
-                    for r in rows
-                ]
+                def job(mt5: Any):
+                    raw_positions = mt5.positions_get()
+                    raw_orders = mt5.orders_get()
+                    return (list(raw_positions) if raw_positions else [], list(raw_orders) if raw_orders else [])
+
+                raw_positions, raw_orders = await run_in_threadpool(ctx.driver.run, job, "positions_poll")
+                offset = ctx.settings.broker_utc_offset_minutes
+                positions = [build_position_model(r, offset).model_dump() for r in raw_positions]
+                orders = [build_order_model(r, offset).model_dump() for r in raw_orders]
                 bus.publish(
                     "positions_update",
                     {"count": len(positions), "positions": positions},
                 )
+                sync_engine = getattr(ctx, "sync_engine", None)
+                if sync_engine is not None:
+                    sync_engine.enqueue("positions", sync_engine.positions_items(positions, orders))
         except BridgeError:
             pass  # not connected — skip silently
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — a poller must never die on a stray MT5 error
             logger.debug("[STREAM] positions poll skipped: {}", exc)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 
 async def orders_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) -> None:
     """Push pending-order snapshots to the server (3s interval)."""
-    from ..mt5.types import build_order_model
     from ..errors import BridgeError
+    from ..mt5.types import build_order_model
 
     interval = 3.0
     while not stop.is_set():
         try:
             if ctx.driver.connected:
+
                 def job(mt5: Any):
                     raw = mt5.orders_get()
                     return list(raw) if raw else []
 
                 rows = await run_in_threadpool(ctx.driver.run, job, "orders_poll")
-                orders = [
-                    build_order_model(r, ctx.settings.broker_utc_offset_minutes).model_dump()
-                    for r in rows
-                ]
+                orders = [build_order_model(r, ctx.settings.broker_utc_offset_minutes).model_dump() for r in rows]
                 bus.publish("orders_update", {"count": len(orders), "orders": orders})
         except BridgeError:
             pass
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — a poller must never die on a stray MT5 error
             logger.debug("[STREAM] orders poll skipped: {}", exc)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 
@@ -183,11 +212,11 @@ async def status_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) 
                     "avg_call_ms": round(slowest[1]["avg_ms"], 2) if slowest else None,
                 },
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — a poller must never die on a stray MT5 error
             logger.debug("[STREAM] status poll skipped: {}", exc)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 

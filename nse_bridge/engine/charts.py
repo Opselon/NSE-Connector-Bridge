@@ -9,15 +9,29 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from ..errors import BridgeError, ErrorCode
-from ..mt5.types import TIMEFRAME_NAMES, build_rate_bar_model, f as _f
+from ..mt5.types import TIMEFRAME_NAMES, build_rate_bar_model
 from ..timeutil import broker_dt
 from .common import BridgeContext
 from .registry import command
 
 
 def resolve_timeframe(ctx: BridgeContext, timeframe: str | None) -> tuple[int, str]:
-    """MT5 timeframe enum + canonical name; VALIDATION error on unknown."""
-    name = (timeframe or ctx.settings.default_timeframe).upper()
+    """MT5 timeframe enum + canonical name; VALIDATION error on unknown.
+
+    There is no hardcoded default timeframe: the caller must pass one,
+    or the operator must set ``default_timeframe`` explicitly as device
+    configuration. An absent timeframe in both places is a validation
+    error, never a silent fallback.
+    """
+    name = (timeframe or ctx.settings.default_timeframe or "").strip().upper()
+    if not name:
+        raise BridgeError(
+            ErrorCode.VALIDATION,
+            "No timeframe given and no default_timeframe is configured. "
+            "Pass a timeframe (e.g. M1) or set default_timeframe in Settings.",
+            details={"supported": list(TIMEFRAME_NAMES)},
+            http_status=422,
+        )
 
     def job(mt5: Any):
         return getattr(mt5, f"TIMEFRAME_{name}", None)
@@ -153,9 +167,7 @@ def get_chart_history(ctx: BridgeContext, params: ChartHistoryRequest) -> dict[s
             return mt5.copy_rates_range(symbol, tf, from_dt, datetime.now(UTC))
         return mt5.copy_rates_from_pos(symbol, tf, 0, params.count)
 
-    raw = ctx.driver.run(
-        job, op="copy_rates", context={"symbol": symbol, "timeframe": tf_name, "count": params.count}
-    )
+    raw = ctx.driver.run(job, op="copy_rates", context={"symbol": symbol, "timeframe": tf_name, "count": params.count})
     if raw is None or len(raw) == 0:
         raise BridgeError(
             ErrorCode.MT5_CALL_FAILED,
@@ -244,7 +256,11 @@ def get_chart_current_timeframe(ctx: BridgeContext, params: None) -> dict[str, A
 )
 def get_chart_available_timeframes(ctx: BridgeContext, params: None) -> dict[str, Any]:
     def job(mt5: Any):
-        return {name: int(getattr(mt5, f"TIMEFRAME_{name}")) for name in TIMEFRAME_NAMES if hasattr(mt5, f"TIMEFRAME_{name}")}
+        return {
+            name: int(getattr(mt5, f"TIMEFRAME_{name}"))
+            for name in TIMEFRAME_NAMES
+            if hasattr(mt5, f"TIMEFRAME_{name}")
+        }
 
     values = ctx.driver.run(job, op="timeframes_enum")
     return {"timeframes": list(values.keys()), "enum_values": values}
@@ -319,7 +335,17 @@ def get_chart_objects(ctx: BridgeContext, params: None) -> dict[str, Any]:
     response_model=ChartActiveInfoResponse,
 )
 def get_chart_active_info(ctx: BridgeContext, params: None) -> dict[str, Any]:
+    # No default symbol: the chart context needs an explicitly
+    # configured bot_symbol (device configuration), otherwise the
+    # command cannot know which symbol's tick to report.
     symbol = ctx.settings.bot_symbol
+    if not symbol:
+        raise BridgeError(
+            ErrorCode.VALIDATION,
+            "No chart symbol configured: set bot_symbol in Settings "
+            "(or pass a symbol to a chart command that takes one).",
+            http_status=422,
+        )
     from .symbols import _fresh_tick
 
     tick = _fresh_tick(ctx, symbol)

@@ -18,11 +18,11 @@ eager annotation evaluation so FastAPI/pydantic can resolve `rm | None`.
 """
 
 import asyncio
-import json
+import hmac
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Generic, Optional, TypeVar
+from typing import Any, Generic, TypeVar
 
 from fastapi import Body, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
@@ -34,13 +34,14 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .. import BRIDGE_VERSION
 from ..engine.common import BridgeContext
-from ..engine.registry import CATEGORY_ORDER, REGISTRY, CommandSpec, all_commands
+from ..engine.registry import REGISTRY, CommandSpec, all_commands
 from ..errors import BridgeError, ErrorCode
+from ..gui.dashboard import LOCAL_API_KEY_COOKIE, register_dashboard
+from ..logging_setup import redact_text, sanitize_payload
 from ..realtime.bus import EventBus, start_streaming, stop_streaming
 from ..realtime.channel import ServerChannel
-from ..gui.dashboard import register_dashboard
+from ..secrets import ensure_local_api_key
 from .management import router as management_router
-from .agent_routes import router as agent_router
 
 T = TypeVar("T")
 
@@ -59,9 +60,9 @@ TAG_METADATA = [
 ]
 
 
-class Envelope(BaseModel, Generic[T]):
+class Envelope(BaseModel, Generic[T]):  # noqa: UP046 — pydantic/FastAPI generic compat; keep Generic[T]
     ok: bool = True
-    data: Optional[T] = None
+    data: T | None = None
 
 
 class ErrorDetail(BaseModel):
@@ -83,10 +84,10 @@ def _error_response(err: BridgeError, request_id: str) -> JSONResponse:
         ok=False,
         error=ErrorDetail(
             code=err.code.value,
-            message=err.message,
+            message=redact_text(err.message),
             retcode=err.retcode,
             retcode_label=None,
-            details=err.details or None,
+            details=sanitize_payload(err.details) or None,
         ),
         request_id=request_id,
     )
@@ -113,7 +114,7 @@ def build_endpoint(spec: CommandSpec, ctx: BridgeContext):
 
     else:
 
-        async def endpoint(request: Request, body: dict | None = Body(None)):
+        async def endpoint(request: Request, body: dict | None = Body(None)):  # type: ignore[misc] # noqa: B008 — FastAPI Body() default is the documented pattern; conditional variant of the typed endpoint above
             result = await run_in_threadpool(spec.handler, ctx, body)
             return {"ok": True, "data": result}
 
@@ -122,23 +123,113 @@ def build_endpoint(spec: CommandSpec, ctx: BridgeContext):
 
 
 def create_app(ctx: BridgeContext) -> FastAPI:
+    # Mandatory local API key: auto-generated on first run and stored
+    # in the secret store. There is no empty-key = open mode.
+    ensure_local_api_key(ctx.settings)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         bus = EventBus()
         app.state.bus = bus
+        # Reliability (§8): structured telemetry + self-healing matrix.
+        # Created first so every component below can read them off the
+        # context. The diagnostics sink stays inert (NullDiagnosticsSink
+        # semantics — no endpoint exists in CONTRACT v1 §4.2) until a
+        # future contract version defines one.
+        from ..reliability import SelfHealingRegistry, TelemetryEmitter
+
+        telemetry = TelemetryEmitter(
+            ctx.get_or_create_device_id(),
+            diagnostic_mode=ctx.settings.diagnostic_mode,
+        )
+        ctx.telemetry = telemetry
+        app.state.telemetry = telemetry
+        self_healing = SelfHealingRegistry(telemetry=telemetry)
+        ctx.self_healing = self_healing
+        app.state.self_healing = self_healing
+        # CONTRACT v1 §3: REST client + sync engine (the ONLY sync
+        # channel). The server channel reuses them; the pollers enqueue
+        # account/positions batches into the engine.
+        from ..server.enrolment import EnrolmentManager
+        from ..server.rest import RestClient
+        from ..server.sync import SyncEngine
+        from ..server.sync_checkpoint import CHECKPOINT_FILENAME, SyncCheckpointStore
+        from ..updates import Updater
+
+        rest_client = RestClient(ctx.settings, ctx.get_or_create_device_id())
+        # Spec §16: the sync checkpoint survives restarts — restored
+        # here at startup, persisted on every advance (sync.py).
+        sync_engine = SyncEngine(
+            rest_client,
+            ctx,
+            checkpoint_store=SyncCheckpointStore(ctx.settings.data_dir / CHECKPOINT_FILENAME),
+        )
+        ctx.rest_client = rest_client
+        ctx.sync_engine = sync_engine
+        app.state.rest_client = rest_client
+        app.state.sync_engine = sync_engine
+        # Enrolment at startup (§3.1/§3.2, §5.1): validate-key →
+        # register-device runs in a BACKGROUND task — app start never
+        # blocks on the Platform, and the local GUI + MT5 keep working
+        # while the Platform is down. The WS channel gates on it.
+        enrolment = EnrolmentManager(ctx, rest_client, telemetry=telemetry)
+        rest_client.enrolment = enrolment
+        ctx.enrolment = enrolment
+        app.state.enrolment = enrolment
+        enrolment_stop = asyncio.Event()
+        app.state.enrolment_stop = enrolment_stop
+        enrolment_task = asyncio.create_task(enrolment.run(enrolment_stop), name="nse-enrolment")
+        app.state.enrolment_task = enrolment_task
+        # Phase 5 verified updater (CONTRACT v1 §3.5): check/download/
+        # stage only; install happens on restart via the staged script.
+        app.state.updater = Updater(ctx.settings, rest_client_getter=lambda: ctx.rest_client)
         pollers, stop_event = start_streaming(ctx, bus)
-        channel = ServerChannel(ctx, bus)
+        channel = ServerChannel(
+            ctx,
+            bus,
+            rest_client=rest_client,
+            sync_engine=sync_engine,
+            enrolment=enrolment,
+            manifest_tracker=enrolment.manifest_tracker,
+        )
         channel.start()
         app.state.channel = channel
         ctx.bus = bus
+        sync_engine.start_flush_loop(interval_s=5.0)  # engine tracks the task itself
         # every order dispatch outcome flows to dashboard + server as trade_event
         ctx.trade_metrics.event_sink = lambda evt: bus.publish("trade_event", evt)
         logger.info("[APP] realtime streaming started (server_channel={})", bool(ctx.settings.server_url))
         yield
         await channel.stop()
+        enrolment_stop.set()
+        try:
+            await asyncio.wait_for(enrolment_task, timeout=5.0)
+        except (TimeoutError, asyncio.CancelledError):
+            enrolment_task.cancel()
+            try:
+                await enrolment_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001, S110 — shutdown must never raise
+                pass
+        await sync_engine.stop_flush_loop()
+        await rest_client.close()
+        # A verified staged update installs on restart: launch the
+        # staged installer detached (best-effort; it only runs when a
+        # verified update is staged AND the bridge runs frozen).
+        updater = getattr(app.state, "updater", None)
+        if updater is not None:
+            try:
+                updater.launch_restart_installer()
+            except Exception:  # noqa: BLE001, S110 — shutdown hook must never break teardown
+                pass
         stop_streaming(pollers, stop_event)
         ctx.trade_metrics.event_sink = None
         ctx.bus = None
+        ctx.rest_client = None
+        ctx.sync_engine = None
+        ctx.enrolment = None
+        # Reliability state stays attached to the context (it is cheap
+        # diagnostics state, not a live connection), so a summary read
+        # after shutdown still reports the last known state.
         logger.info("[APP] realtime streaming stopped")
 
     app = FastAPI(
@@ -150,43 +241,46 @@ def create_app(ctx: BridgeContext) -> FastAPI:
             "official native C++ IPC driver and exposes exactly the 90 NSE bridge commands "
             "documented below. All endpoints are uniform `POST` JSON calls returning "
             "`{ok, data}` envelopes; broker rejections carry the official MT5 retcode.\n\n"
-            "*Security:* bind is localhost-only by default; an optional `X-API-Key` gate is "
-            "configurable; the platform talks to this bridge over an outbound-authenticated "
+            "*Security:* bind is localhost-only by default; a mandatory `X-API-Key` gate "
+            "protects every /api/v1/ endpoint (auto-generated on first run, stored in the "
+            "OS secret store); the platform talks to this bridge over an outbound-authenticated "
             "WebSocket channel (no inbound ports).\n\n"
-            "*Real-time:* `/ws/ui` streams ticks + account updates to the local dashboard."
+            "*Real-time:* the local Control Center polls the local API; `/ws/ui` also streams ticks + account updates for local tooling."
         ),
         openapi_tags=TAG_METADATA,
         lifespan=lifespan,
     )
     app.state.ctx = ctx
-    from ..agent.engine import AgentService
-    from ..agent.llm import LlmClient
-
-    ctx.agent = AgentService(ctx)
-    ctx.agent.config.llm = LlmClient.from_config(ctx.settings)
-    ctx.agent.config.symbol = ctx.settings.bot_symbol
+    # NOTE: the local AI Agent product (AgentService + agent routes) was
+    # removed in the client-only refactor (Phase 3). The Bridge is
+    # communication infrastructure; it never dispatches orders on its
+    # own analysis. Local commands stay available; the server channel
+    # enforces the contract §6.1 allowlist.
     app.include_router(management_router)
-    app.include_router(agent_router)
     register_dashboard(app)
 
-    # --- middleware: request id + latency logs + optional API key -------
+    # --- middleware: request id + latency logs + mandatory API key ------
     @app.middleware("http")
     async def request_context_middleware(request: Request, call_next):
         request_id = uuid.uuid4().hex[:12]
         request.state.request_id = request_id
         t0 = time.perf_counter()
-        api_key = ctx.settings.local_api_key
         path = request.url.path
-        if (
-            api_key
-            and path.startswith("/api/v1/")
-            and path != "/api/v1/get_bridge_health"
-            and request.headers.get("X-API-Key") != api_key
-        ):
-            err = BridgeError(
-                ErrorCode.UNAUTHORIZED, "Missing or invalid X-API-Key header", http_status=401
-            )
-            return _error_response(err, request_id)
+        # Mandatory X-API-Key on EVERY local API request. No empty-key =
+        # open mode; /health is a plain liveness probe, not an API call.
+        if path.startswith("/api/v1/"):
+            presented = request.headers.get("X-API-Key") or ""
+            if not presented:
+                # The loopback GUI (/ui, same app) carries the same key
+                # in an HttpOnly + SameSite=Strict cookie set by the
+                # server itself — page JS never sees the key, and the
+                # credential is still mandatory on every call. No
+                # unauthenticated exemption exists for the GUI.
+                presented = request.cookies.get(LOCAL_API_KEY_COOKIE) or ""
+            expected = ctx.settings.local_api_key or ""
+            if not expected or not hmac.compare_digest(presented, expected):
+                err = BridgeError(ErrorCode.UNAUTHORIZED, "Missing or invalid X-API-Key header", http_status=401)
+                return _error_response(err, request_id)
         try:
             response = await call_next(request)
         except BridgeError as exc:
@@ -194,15 +288,18 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             logger.exception("[API] unhandled error on {} {}", request.method, path)
             response = _error_response(
-                BridgeError(ErrorCode.INTERNAL, f"Internal error: {exc}", http_status=500),
+                BridgeError(ErrorCode.INTERNAL, f"Internal error: {redact_text(str(exc))}", http_status=500),
                 request_id,
             )
         response.headers["X-Request-Id"] = request_id
         if path.startswith("/api/"):
             logger.info(
                 "[API] {} {} -> {} ({:.1f}ms) rid={}",
-                request.method, path, response.status_code,
-                (time.perf_counter() - t0) * 1000.0, request_id,
+                request.method,
+                path,
+                response.status_code,
+                (time.perf_counter() - t0) * 1000.0,
+                request_id,
             )
         return response
 
@@ -308,13 +405,15 @@ def create_app(ctx: BridgeContext) -> FastAPI:
                 reader_task.cancel()
                 try:
                     await reader_task
-                except (asyncio.CancelledError, Exception):
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001, S110 — dashboard socket teardown must never raise
                     pass
 
     # --- dynamic per-command endpoints ------------------------------------
     for spec in sorted(REGISTRY, key=lambda c: c.number):
         rm = spec.response_model
-        response_model = Envelope[rm] if (rm and rm is not object) else None
+        # rm is a runtime value, not a static type: Envelope[rm] is
+        # correct at runtime; mypy cannot express a variable type arg.
+        response_model = Envelope[rm] if (rm and rm is not object) else None  # type: ignore[valid-type]
         app.add_api_route(
             f"/api/v1/{spec.name}",
             build_endpoint(spec, ctx),

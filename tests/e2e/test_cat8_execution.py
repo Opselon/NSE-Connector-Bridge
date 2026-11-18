@@ -10,6 +10,8 @@ from starlette.testclient import TestClient
 
 from tests.conftest import call
 
+pytestmark = pytest.mark.real_mt5
+
 SYMBOL = "XAUUSD"
 
 
@@ -46,7 +48,9 @@ def test_64_trade_send_market_order(client):
 
 @pytest.mark.trade
 def test_64b_market_order_unknown_symbol_rejected(client):
-    err = call(client, "trade_send_market_order", {"symbol": "NOPE_NOT_REAL", "side": "buy", "volume": 0.01}, expect_ok=False)
+    err = call(
+        client, "trade_send_market_order", {"symbol": "NOPE_NOT_REAL", "side": "buy", "volume": 0.01}, expect_ok=False
+    )
     assert err["code"] in ("MT5_CALL_FAILED", "TRADE_REJECTED", "TRADE_UNVERIFIED")
 
 
@@ -70,7 +74,7 @@ def test_65_66_buy_sell_orders(client):
 def test_67_trade_send_pending_order_and_validation(client):
     try:
         tick = call(client, "get_market_tick", {"symbol": SYMBOL})["tick"]
-        ask, bid = tick["ask"], tick["bid"]
+        ask = tick["ask"]
 
         # valid BUY_LIMIT well below the market
         placed = call(
@@ -117,9 +121,7 @@ def test_68_trade_close_partial_position(client):
         ticket = positions[-1]["ticket"]
 
         # validation: partial volume must be smaller than position volume (422)
-        resp = client.post(
-            "/api/v1/trade_close_partial_position", json={"ticket": ticket, "volume": 0.02}
-        )
+        resp = client.post("/api/v1/trade_close_partial_position", json={"ticket": ticket, "volume": 0.02})
         assert resp.status_code == 422
         body = resp.json()
         assert body["error"]["code"] == "VALIDATION_ERROR"

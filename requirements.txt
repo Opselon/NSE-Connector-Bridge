@@ -1,0 +1,17 @@
+# NSE MT5 Bridge — pinned runtime + build dependencies.
+# Installed with:  pip install -r requirements.txt
+# MetaTrader5 ships Windows-only wheels, so it is installed on Windows
+# only (sys_platform marker); the Linux CI job never needs it.
+fastapi==0.163.2
+uvicorn[standard]==0.54.0
+pydantic==2.14.3
+pydantic-settings==2.16.3
+websockets==17.4
+httpx==0.28.1
+cryptography==50.0.2
+loguru==0.8.0
+numpy==2.5.5
+pywebview==6.2.1
+keyring==25.7.0; sys_platform == "win32"
+MetaTrader5==5.0.6231; sys_platform == "win32"
+pyinstaller==6.22.3

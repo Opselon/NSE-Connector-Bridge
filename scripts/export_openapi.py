@@ -7,18 +7,19 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from nse_bridge.api.app import create_app  # noqa: E402
-from nse_bridge.config import BridgeSettings  # noqa: E402
-from nse_bridge.engine.common import BridgeContext  # noqa: E402
-from nse_bridge.mt5.driver import Mt5Driver  # noqa: E402
+from nse_bridge.api.app import create_app
+from nse_bridge.config import BridgeSettings
+from nse_bridge.engine.common import BridgeContext
+from nse_bridge.mt5.driver import Mt5Driver
 
 
 def export(out: Path) -> None:
-    settings = BridgeSettings(log_dir=str(Path(tempdir := __import__("tempfile").mkdtemp())))
+    settings = BridgeSettings(log_dir=tempfile.mkdtemp())
     driver = Mt5Driver(settings)  # never connects — schema generation only
     ctx = BridgeContext(settings=settings, driver=driver)
     ctx.get_or_create_device_id()

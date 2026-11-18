@@ -1,14 +1,41 @@
+# NSE MT5 Bridge — test, build, release.
+#
+# Jobs:
+#   test-linux    ruff + format + mypy + security + unit + mock-integration
+#                 tests (Linux).
+#   build-windows same gates on Windows (proves Windows imports work) +
+#                 PyInstaller exe build. The real-MT5 e2e suite is NEVER
+#                 run here: GitHub-hosted runners have no MT5 terminal,
+#                 and a required-MT5 test fails loudly without one
+#                 (tests/conftest.py). E2E is manual, Windows-with-MT5-only
+#                 (see docs/RELEASE.md).
+#   release       tags only (v*): exe + SHA-256 + release manifest +
+#                 release notes. Stable vs prerelease by tag name:
+#                 v1.2.3 = stable, v1.2.3-rc.1 = prerelease.
+#
+# Spec §20 gates (all mandatory, all fast — no Wine in PR checks):
+#   lint    `ruff check .` (whole repo) + `ruff format --check .`
+#   types   `mypy nse_bridge` (pydantic plugin; see pyproject.toml)
+#   sec     `bandit -r nse_bridge` + `pip-audit` (both requirement files)
+#   tests   unit + mock-integration, with a junit XML artifact uploaded
+#           on failure so the failing test names are visible without
+#           log access (A1: the Windows test step failed at 3f0950c
+#           with logs unreachable — 403 — and no per-test record).
 name: Build Windows exe
 
 on:
   push:
-    branches: [main]
+    branches: [main, "refactor/**"]
     tags: ["v*"]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: windows-latest
+  # Linux gate: lint + types + security + unit + mock-integration tests
+  # run FIRST; the Windows build waits on them.
+  test-linux:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -21,10 +48,150 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install MetaTrader5 numpy fastapi "uvicorn[standard]" pydantic-settings websockets loguru pywebview pyinstaller
+          pip install -r requirements-dev.txt
+
+      - name: Lint (whole repo)
+        run: ruff check .
+
+      - name: Format check
+        run: ruff format --check .
+
+      - name: Static analysis (mypy)
+        # The --platform win32 pass type-checks Windows-only branches
+        # (e.g. DevFallbackSecretStore refusing Windows) that Linux
+        # mypy treats as unreachable: without it a Windows-only type
+        # error passes test-linux and fails build-windows (seen at
+        # 1d1d213/a95ca31: "Cannot determine type of _path").
+        run: |
+          python -m mypy nse_bridge
+          python -m mypy nse_bridge --platform win32
+
+      - name: Security checks (bandit + pip-audit)
+        # Bandit skips (Low severity, reviewed individually):
+        #   B101 asserts are the codebase's invariant pattern and the
+        #     bridge never runs under `python -O`;
+        #   B110 try/except-pass sites are documented best-effort
+        #     fallbacks (diagnostics probes, shutdown hooks);
+        #   B311 `random` is reconnect/enrolment backoff jitter only —
+        #     secrets use the `secrets` module, never `random`;
+        #   B404 importing `subprocess` is not a finding — the one call
+        #     site (updater restart-installer launch) carries a
+        #     `# nosec B603` note and uses a list argv, no shell.
+        # pip-audit needs network access to the OSV database; it audits
+        # both requirement files (dev includes runtime via -r).
+        run: |
+          python -m bandit -r nse_bridge --skip B101,B110,B311,B404 -q
+          python -m pip_audit -r requirements.txt -r requirements-dev.txt
+
+      - name: Version files are fresh
+        run: python scripts/write_version_info.py --check
+
+      - name: OpenAPI schema matches the registry
+        run: |
+          python scripts/export_openapi.py /tmp/openapi-check.json
+          diff docs/openapi.json /tmp/openapi-check.json
+
+      - name: Run unit + mock-integration tests
+        # -rf prints the failing test names in the log; the junit XML
+        # is uploaded on failure (next step) so the failing tests are
+        # identifiable even when job logs are unreachable.
+        run: python -m pytest tests/unit tests/integration -q --junitxml=test-results.xml -rf
+
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-linux
+          path: test-results.xml
+          if-no-files-found: warn
+
+      - name: Annotate failing tests (readable without log access)
+        # Job logs and artifacts need GitHub auth to download; the
+        # junit XML alone does not name the failing tests to a reader
+        # without it. This posts each failure as a check-run
+        # annotation, readable unauthenticated via the Checks API.
+        # The script never fails the build (see scripts/).
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/annotate_test_failures.py --xml test-results.xml --job test-linux
+
+      - name: Marker labelling is complete
+        # Covered by tests/unit/test_test_honesty.py inside the suite
+        # above; this explicit marker count makes the split visible.
+        run: |
+          python -m pytest tests/unit -q --collect-only -m unit 2>&1 | tail -1
+          python -m pytest tests/integration -q --collect-only -m mock_integration 2>&1 | tail -1
+
+  build-windows:
+    needs: test-linux
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        # requirements-dev.txt includes -r requirements.txt plus the
+        # test/lint tools (pytest, ruff, mypy, bandit, pip-audit) this
+        # job runs below.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint (whole repo)
+        run: ruff check .
+
+      - name: Format check
+        run: ruff format --check .
+
+      - name: Static analysis (mypy)
+        run: python -m mypy nse_bridge
+
+      - name: Security checks (bandit + pip-audit)
+        # Same skips as test-linux (see the comment there).
+        run: |
+          python -m bandit -r nse_bridge --skip B101,B110,B311,B404 -q
+          python -m pip_audit -r requirements.txt -r requirements-dev.txt
+
+      # Same suites as Linux — proves the Windows imports work
+      # (MetaTrader5 is importable here; the driver import is lazy, so
+      # collection succeeds even without a terminal). The real-MT5 e2e
+      # suite is deliberately NOT run: no MT5 terminal on this runner.
+      - name: Run unit + mock-integration tests on Windows
+        # -rf + junit XML: the Windows test step failed at 3f0950c with
+        # no per-test record and unreachable logs; the uploaded XML
+        # names the failing tests on the next failure.
+        run: python -m pytest tests/unit tests/integration -q --junitxml=test-results.xml -rf
+
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-windows
+          path: test-results.xml
+          if-no-files-found: warn
+
+      - name: Annotate failing tests (readable without log access)
+        # Same as test-linux (see the comment there): the junit XML
+        # names the failing tests only to a reader with auth, so post
+        # them as check-run annotations, readable unauthenticated.
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/annotate_test_failures.py --xml test-results.xml --job build-windows
 
       - name: Build single-file exe
         run: pyinstaller bridge.spec --noconfirm --clean
+
+      - name: Smoke-check the frozen exe
+        # --help exits before any server/GUI starts; proves the frozen
+        # entry point (incl. the --diagnostic flag) parses.
+        run: dist/NSE-MT5-Bridge.exe --help
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -33,8 +200,44 @@ jobs:
           path: dist/NSE-MT5-Bridge.exe
           if-no-files-found: error
 
-      - name: Attach exe to release
-        if: startsWith(github.ref, 'refs/tags/v')
+  # Release: tags only. The exe is checksummed + manifested here, and
+  # all three files (exe, .sha256, manifest) are attached to the
+  # GitHub release. No release is ever cut from an untested build:
+  # this job needs build-windows, which needs test-linux.
+  release:
+    needs: build-windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Download exe artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: NSE-MT5-Bridge-windows
+          path: dist
+
+      - name: Checksum + release manifest
+        run: |
+          python scripts/write_release_manifest.py dist/NSE-MT5-Bridge.exe --tag ${{ github.ref_name }}
+          type dist/NSE-MT5-Bridge.exe.sha256
+          type dist/release-manifest.json
+
+      - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/NSE-MT5-Bridge.exe
+          files: |
+            dist/NSE-MT5-Bridge.exe
+            dist/NSE-MT5-Bridge.exe.sha256
+            dist/release-manifest.json
+          # v1.2.3-rc.1 (or any tag containing '-') is a prerelease;
+          # v1.2.3 is stable. The two are never mixed in one release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true

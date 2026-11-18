@@ -6,12 +6,14 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from ..errors import BridgeError, ErrorCode
-from ..mt5.types import build_position_model, f as _f
+from ..errors import BridgeError
+from ..mt5.types import build_position_model
+from ..mt5.types import f as _f
 from .common import BridgeContext
 from .registry import command
 from .trading import (
     close_position,
+    close_position_by,
     fetch_position,
     fetch_positions,
     modify_position_sltp,
@@ -21,7 +23,10 @@ from .trading import (
 class PositionsRequest(BaseModel):
     symbol: str | None = Field(None, description="Filter by symbol")
     magic_filter: str = Field(
-        "all", pattern="^(all|bot)$", description="all = every position (dashboard); bot = our magic only"
+        "all",
+        pattern="^(all|bot)$",
+        description="all = every position (dashboard); bot = our magic only "
+        "(matches nothing while no bridge magic is configured)",
     )
 
 
@@ -79,10 +84,23 @@ class ClosePositionRequest(BaseModel):
     volume: float | None = Field(None, gt=0.0, description="Partial close volume; None = full close")
 
 
+class CloseByRequest(BaseModel):
+    ticket: int = Field(..., gt=0, description="Position ticket to close")
+    ticket_by: int = Field(
+        ...,
+        gt=0,
+        description="Opposite position ticket to close against (same symbol, opposite type)",
+    )
+
+
 class CloseAllRequest(BaseModel):
     symbol: str | None = None
-    magic: int | None = Field(None, ge=0, description="Only close positions carrying this magic "
-    "(RECOMMENDED: pass the bridge magic so the user's manual positions are untouched)")
+    magic: int | None = Field(
+        None,
+        ge=0,
+        description="Only close positions carrying this magic "
+        "(RECOMMENDED: pass the bridge magic so the user's manual positions are untouched)",
+    )
 
 
 class CloseAllResponse(BaseModel):
@@ -107,8 +125,14 @@ def get_trading_open_positions(ctx: BridgeContext, params: PositionsRequest | No
     positions = []
     floating = 0.0
     for row in raw:
-        if p.magic_filter == "bot" and int(_f(row, "magic", -1)) != int(ctx.settings.magic):
-            continue
+        if p.magic_filter == "bot":
+            # "bot" = positions carrying the configured bridge magic.
+            # With no magic configured there is no bridge identity, so
+            # the filter matches nothing (never the manual magic-0
+            # positions, and never every position).
+            bridge_magic = ctx.settings.magic
+            if bridge_magic is None or int(_f(row, "magic", -1)) != int(bridge_magic):
+                continue
         model = build_position_model(row, ctx.settings.broker_utc_offset_minutes)
         floating += float(_f(row, "profit", 0.0) or 0.0)
         positions.append(model.model_dump())
@@ -201,7 +225,6 @@ def get_position_risk(ctx: BridgeContext, params: TicketRequest) -> dict[str, An
     volume = float(_f(raw, "volume", 0.0) or 0.0)
     entry = float(_f(raw, "price_open", 0.0) or 0.0)
     sl = float(_f(raw, "sl", 0.0) or 0.0)
-    spec = None
     point = None
     ctx.driver.ensure_connected()
 
@@ -214,6 +237,7 @@ def get_position_risk(ctx: BridgeContext, params: TicketRequest) -> dict[str, An
     risk_amount = None
     note = None
     if sl > 0 and entry > 0:
+
         def calc_job(mt5: Any):
             return mt5.order_calc_profit(pos_type, symbol, volume, entry, sl)
 
@@ -265,6 +289,25 @@ def trade_close_single_position(ctx: BridgeContext, params: ClosePositionRequest
 
 
 @command(
+    "trade_close_position_by",
+    number=91,
+    category="positions",
+    title="Close Position By (Close-By)",
+    description="Close two opposite positions against each other (TRADE_ACTION_CLOSE_BY, spec §6). "
+    "Hedging accounts only (margin_mode 1); on netting accounts close-by is impossible — close "
+    "the position and open an opposing deal instead. The smaller-volume position closes entirely; "
+    "the larger remains open with the volume difference (both close when volumes are equal). "
+    "The resulting state is verified against live broker truth before the result is reported. "
+    "Added by the complete-infrastructure spec (C2); the registry grew 90 → 91 commands.",
+    request_model=CloseByRequest,
+    response_model=object,
+    mutates=True,
+)
+def trade_close_position_by(ctx: BridgeContext, params: CloseByRequest) -> dict[str, Any]:
+    return close_position_by(ctx, params.ticket, params.ticket_by)
+
+
+@command(
     "trade_close_all_positions",
     number=54,
     category="positions",
@@ -278,10 +321,7 @@ def trade_close_all_positions(ctx: BridgeContext, params: CloseAllRequest | None
     symbol = params.symbol.strip() if (params and params.symbol) else None
     raw = fetch_positions(ctx, symbol)
     magic_filter = params.magic if params else None
-    targets = [
-        row for row in raw
-        if magic_filter is None or int(_f(row, "magic", -1)) == int(magic_filter)
-    ]
+    targets = [row for row in raw if magic_filter is None or int(_f(row, "magic", -1)) == int(magic_filter)]
     closed, failed = 0, 0
     failures: list[dict[str, Any]] = []
     for row in targets:
