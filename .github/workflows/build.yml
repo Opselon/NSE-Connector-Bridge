@@ -105,6 +105,17 @@ jobs:
           path: test-results.xml
           if-no-files-found: warn
 
+      - name: Annotate failing tests (readable without log access)
+        # Job logs and artifacts need GitHub auth to download; the
+        # junit XML alone does not name the failing tests to a reader
+        # without it. This posts each failure as a check-run
+        # annotation, readable unauthenticated via the Checks API.
+        # The script never fails the build (see scripts/).
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/annotate_test_failures.py --xml test-results.xml --job test-linux
+
       - name: Marker labelling is complete
         # Covered by tests/unit/test_test_honesty.py inside the suite
         # above; this explicit marker count makes the split visible.
@@ -164,6 +175,15 @@ jobs:
           name: test-results-windows
           path: test-results.xml
           if-no-files-found: warn
+
+      - name: Annotate failing tests (readable without log access)
+        # Same as test-linux (see the comment there): the junit XML
+        # names the failing tests only to a reader with auth, so post
+        # them as check-run annotations, readable unauthenticated.
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/annotate_test_failures.py --xml test-results.xml --job build-windows
 
       - name: Build single-file exe
         run: pyinstaller bridge.spec --noconfirm --clean
