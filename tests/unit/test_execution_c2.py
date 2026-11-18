@@ -901,7 +901,9 @@ def test_executor_partial_close_reports_partially_completed(monkeypatch, tmp_pat
         entitlements=Entitlements(position_manager=True, auto_trade=True),
         clock=lambda: now,
     )
-    executor = CommandExecutor(context, validator, results_queue=BoundedPendingQueue(32, "test/results"))
+    executor = CommandExecutor(
+        context, validator, results_queue=BoundedPendingQueue(32, "test/results"), clock=lambda: now
+    )
     issued = now - timedelta(minutes=1)
     frame = {
         "type": "command",

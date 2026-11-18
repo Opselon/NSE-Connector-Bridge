@@ -214,11 +214,13 @@ class CommandState(str, Enum):
 
 #: Legal lifecycle transitions (clarification #2 + spec §7). Terminal states
 #: (COMPLETED / PARTIALLY_COMPLETED / FAILED / UNKNOWN / EXPIRED) have no
-#: outgoing edges.
+#: outgoing edges. AUTHORIZED → EXPIRED is legal: the dispatch re-check
+#: (§6.2/§6.6) may expire a command that expired while queued — without
+#: this edge the re-check raises instead of ending the command EXPIRED.
 LEGAL_TRANSITIONS: dict[CommandState, frozenset[CommandState]] = {
     CommandState.RECEIVED: frozenset({CommandState.VALIDATED, CommandState.FAILED, CommandState.EXPIRED}),
     CommandState.VALIDATED: frozenset({CommandState.AUTHORIZED, CommandState.FAILED}),
-    CommandState.AUTHORIZED: frozenset({CommandState.DISPATCHED, CommandState.FAILED}),
+    CommandState.AUTHORIZED: frozenset({CommandState.DISPATCHED, CommandState.FAILED, CommandState.EXPIRED}),
     CommandState.DISPATCHED: frozenset({CommandState.EXECUTING, CommandState.FAILED, CommandState.EXPIRED}),
     CommandState.EXECUTING: frozenset(
         {CommandState.COMPLETED, CommandState.PARTIALLY_COMPLETED, CommandState.FAILED, CommandState.UNKNOWN}
@@ -570,11 +572,18 @@ class CommandExecutor:
         results_queue: BoundedPendingQueue[dict[str, Any]] | None = None,
         user_id: str | None = None,
         telemetry: Any | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.ctx = ctx
         self.validator = validator
         self.results_queue = results_queue
         self.user_id = user_id
+        #: Clock for the dispatch expiry re-check (submit): injectable
+        #: for tests (frozen clock), real wall clock in production.
+        #: Mirrors CommandValidator's own clock (same default) — the
+        #: re-check must agree with the validator, or a frame the
+        #: validator accepted as fresh expires at dispatch.
+        self._clock = clock or (lambda: datetime.now(UTC))
         # TelemetryEmitter (ARCHITECTURE-CONTRACT §8), optional: when
         # absent the executor still works, it just emits nothing.
         self.telemetry = telemetry if telemetry is not None else getattr(ctx, "telemetry", None)
@@ -724,8 +733,10 @@ class CommandExecutor:
         execution.transition(CommandState.VALIDATED)
         execution.transition(CommandState.AUTHORIZED)
         # Re-check expiry at dispatch: a command that expired while
-        # queued must be EXPIRED, never executed (§6.2/§6.6).
-        if (normalize_utc(envelope.expires_at, 0) or started) <= datetime.now(UTC):
+        # queued must be EXPIRED, never executed (§6.2/§6.6). Uses the
+        # injected clock (same frozen clock the validator uses in
+        # tests), not the wall clock, so validation and dispatch agree.
+        if (normalize_utc(envelope.expires_at, 0) or started) <= self._clock():
             result = rejection_result(
                 device_id=self.validator.device_id,
                 command_id=envelope.command_id,
