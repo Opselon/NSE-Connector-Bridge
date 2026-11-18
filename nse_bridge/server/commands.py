@@ -547,14 +547,57 @@ class CommandExecutor:
         *,
         results_queue: BoundedPendingQueue[dict[str, Any]] | None = None,
         user_id: str | None = None,
+        telemetry: Any | None = None,
     ) -> None:
         self.ctx = ctx
         self.validator = validator
         self.results_queue = results_queue
         self.user_id = user_id
+        # TelemetryEmitter (ARCHITECTURE-CONTRACT §8), optional: when
+        # absent the executor still works, it just emits nothing.
+        self.telemetry = telemetry if telemetry is not None else getattr(ctx, "telemetry", None)
 
     # ------------------------------------------------------------------
     def execute(self, frame: Any) -> tuple[CommandExecution, dict[str, Any]]:
+        """Execute one command, then report its terminal state as one
+        structured telemetry event (INFO for lifecycle, WARN for
+        UNKNOWN/failed — INFO is never queued for delivery, §8)."""
+        execution, result = self._execute_inner(frame)
+        telemetry = self.telemetry
+        if telemetry is not None:
+            error = result.get("error") if isinstance(result, dict) else None
+            error_code = error.get("code") if isinstance(error, dict) else None
+            state = execution.state
+            if state is CommandState.COMPLETED:
+                telemetry.info(
+                    "command.completed", component="server.commands",
+                    command_id=execution.command_id,
+                    details={"status": result.get("status")},
+                )
+            elif state is CommandState.UNKNOWN:
+                telemetry.warn(
+                    "command.unknown", component="server.commands",
+                    command_id=execution.command_id, error_code="TRADE_UNVERIFIED",
+                    details={
+                        "status": result.get("status"),
+                        "recovery": "reconcile MT5 state before any retry; never blind-retry",
+                    },
+                )
+            elif state is CommandState.EXPIRED:
+                telemetry.info(
+                    "command.expired", component="server.commands",
+                    command_id=execution.command_id, error_code="Expired",
+                    details={"status": result.get("status")},
+                )
+            elif state is CommandState.FAILED:
+                telemetry.warn(
+                    "command.failed", component="server.commands",
+                    command_id=execution.command_id, error_code=error_code,
+                    details={"status": result.get("status")},
+                )
+        return execution, result
+
+    def _execute_inner(self, frame: Any) -> tuple[CommandExecution, dict[str, Any]]:
         started = datetime.now(UTC)
         command_id = frame.get("command_id") if isinstance(frame, dict) else None
         command_id = str(command_id) if command_id else new_uuid7_str()

@@ -131,6 +131,22 @@ def create_app(ctx: BridgeContext) -> FastAPI:
     async def lifespan(app: FastAPI):
         bus = EventBus()
         app.state.bus = bus
+        # Reliability (§8): structured telemetry + self-healing matrix.
+        # Created first so every component below can read them off the
+        # context. The diagnostics sink stays inert (NullDiagnosticsSink
+        # semantics — no endpoint exists in CONTRACT v1 §4.2) until a
+        # future contract version defines one.
+        from ..reliability import SelfHealingRegistry, TelemetryEmitter
+
+        telemetry = TelemetryEmitter(
+            ctx.get_or_create_device_id(),
+            diagnostic_mode=ctx.settings.diagnostic_mode,
+        )
+        ctx.telemetry = telemetry
+        app.state.telemetry = telemetry
+        self_healing = SelfHealingRegistry(telemetry=telemetry)
+        ctx.self_healing = self_healing
+        app.state.self_healing = self_healing
         # CONTRACT v1 §3: REST client + sync engine (the ONLY sync
         # channel). The server channel reuses them; the pollers enqueue
         # account/positions batches into the engine.
@@ -149,7 +165,7 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         # register-device runs in a BACKGROUND task — app start never
         # blocks on the Platform, and the local GUI + MT5 keep working
         # while the Platform is down. The WS channel gates on it.
-        enrolment = EnrolmentManager(ctx, rest_client)
+        enrolment = EnrolmentManager(ctx, rest_client, telemetry=telemetry)
         rest_client.enrolment = enrolment
         ctx.enrolment = enrolment
         app.state.enrolment = enrolment
@@ -197,6 +213,9 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         ctx.rest_client = None
         ctx.sync_engine = None
         ctx.enrolment = None
+        # Reliability state stays attached to the context (it is cheap
+        # diagnostics state, not a live connection), so a summary read
+        # after shutdown still reports the last known state.
         logger.info("[APP] realtime streaming stopped")
 
     app = FastAPI(

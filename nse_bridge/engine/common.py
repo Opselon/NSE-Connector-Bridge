@@ -172,6 +172,8 @@ class BridgeContext:
     rest_client: Any = None  # RestClient (CONTRACT v1 §3), wired at app startup
     sync_engine: Any = None  # SyncEngine (CONTRACT v1 §3.3), wired at app startup
     enrolment: Any = None  # EnrolmentManager (CONTRACT v1 §3.1/§3.2), wired at app startup
+    telemetry: Any = None  # TelemetryEmitter (ARCHITECTURE-CONTRACT §8), wired at app startup
+    self_healing: Any = None  # SelfHealingRegistry (§8), wired at app startup
     # Last validate-key snapshot (CONTRACT v1 §3.1), stored by the GUI
     # refresh action (POST /api/v1/account/validate-key) from the Phase 2
     # REST client. Server-resolved only (user_id, subscription,

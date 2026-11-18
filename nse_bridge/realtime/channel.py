@@ -64,6 +64,8 @@ from starlette.concurrency import run_in_threadpool
 
 from ..config import validate_server_url
 from ..engine.common import BridgeContext
+from ..reliability import DurableResultQueue, DurableResultStore
+from ..reliability.self_healing import HealingContext, Scenario
 from ..server.chart import (
     CHART_REQUEST_TIMEOUT_S,
     ChartError,
@@ -216,9 +218,17 @@ class ServerChannel:
         self._ws: Any = None
         self.dead_after_s = dead_after_s
         self._outbound = _OutboundQueue()
-        self._pending_results: BoundedPendingQueue[dict[str, Any]] = BoundedPendingQueue(
-            32, "channel/results"
+        # Pending results are DURABLE (§6.5 + reliability phase): an
+        # in-memory-only queue loses acknowledged results on a Bridge
+        # restart mid-operation. The store file is created lazily on
+        # the first persisted result; construction only reads it.
+        self._durable_store = DurableResultStore(
+            ctx.settings.data_dir / "pending_results.jsonl"
         )
+        self._pending_results: BoundedPendingQueue[dict[str, Any]] = DurableResultQueue(
+            32, "channel/results", self._durable_store
+        )
+        self._record_restart_recovery()
         self._last_server_frame_at: float = 0.0
         self._last_login: str | None = None
         self._rest = rest_client
@@ -247,6 +257,25 @@ class ServerChannel:
 
     def _device_id(self) -> str:
         return self.ctx.get_or_create_device_id()
+
+    def _telemetry(self):  # TelemetryEmitter | None (ARCHITECTURE-CONTRACT §8)
+        return getattr(self.ctx, "telemetry", None)
+
+    def _healing(self):  # SelfHealingRegistry | None (§8)
+        return getattr(self.ctx, "self_healing", None)
+
+    def _record_restart_recovery(self) -> None:
+        """Bridge restart mid-operation (§8): persisted
+        unacknowledged results were re-queued from the durable store
+        at construction — record it in the self-healing matrix so the
+        diagnostics summary shows the recovery."""
+        healing = self._healing()
+        if healing is None or len(self._pending_results) == 0:
+            return
+        healing.handle(
+            Scenario.BRIDGE_RESTART_MID_OPERATION,
+            HealingContext(persisted_results=len(self._pending_results)),
+        )
 
     def _bound_account_id(self) -> str | None:
         login = self.ctx.driver.connection_state_dict().get("login")
@@ -285,6 +314,7 @@ class ServerChannel:
                 self.ctx, validator,
                 results_queue=self._pending_results,
                 user_id=rest.user_id,
+                telemetry=getattr(self.ctx, "telemetry", None),
             )
 
     def start(self) -> None:
@@ -426,6 +456,12 @@ class ServerChannel:
                     state["last_connected_at"] = time.time()
                     state["last_error"] = None
                     logger.info("[CHANNEL] connected to {}", url)
+                    telemetry = self._telemetry()
+                    if telemetry is not None:
+                        telemetry.info(
+                            "channel.connected", component="realtime.channel",
+                            details={"reconnect": attempt > 0, "attempt": attempt},
+                        )
                     got_frame = await self._session(ws)
                     # Backoff resets on a SUCCESSFUL session (§5.4): a
                     # session that exchanged at least one frame counts.
@@ -438,6 +474,19 @@ class ServerChannel:
                 state["reconnects"] = int(state.get("reconnects", 0)) + 1
                 state["last_error"] = type(exc).__name__
                 logger.warning("[CHANNEL] disconnected: {} — reconnecting", type(exc).__name__)
+                telemetry = self._telemetry()
+                if telemetry is not None:
+                    telemetry.warn(
+                        "channel.disconnected", component="realtime.channel",
+                        error_code=type(exc).__name__,
+                        details={"reconnects": state["reconnects"]},
+                    )
+                healing = self._healing()
+                if healing is not None:
+                    healing.handle(
+                        Scenario.WS_DROP,
+                        HealingContext(ws_connected=False, ws_was_connected=True),
+                    )
                 attempt += 1
             finally:
                 self._ws = None
@@ -521,6 +570,19 @@ class ServerChannel:
                     "[CHANNEL] no server frame for {:.0f}s — session dead (§5.3), reconnecting",
                     self.dead_after_s,
                 )
+                telemetry = self._telemetry()
+                if telemetry is not None:
+                    telemetry.warn(
+                        "channel.session_dead", component="realtime.channel",
+                        error_code="heartbeat_timeout",
+                        details={"dead_after_s": self.dead_after_s},
+                    )
+                healing = self._healing()
+                if healing is not None:
+                    healing.handle(
+                        Scenario.WS_DROP,
+                        HealingContext(ws_connected=False, ws_was_connected=True),
+                    )
                 try:
                     await ws.close(code=1000, reason="heartbeat timeout")
                 except Exception as exc:  # noqa: BLE001 — close failure still ends the session

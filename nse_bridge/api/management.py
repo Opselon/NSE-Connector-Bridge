@@ -846,6 +846,32 @@ async def diagnostics_summary(request: Request) -> dict[str, Any]:
         "pending_batches": sync_engine.pending_count() if sync_engine is not None else None,
         "checkpoint": sync_engine.checkpoint.iso if sync_engine is not None else None,
     }
+    # Reliability (§8): telemetry queue state + per-scenario
+    # self-healing state. Data only — the GUI screens render it.
+    telemetry = getattr(ctx, "telemetry", None)
+    telemetry_summary = (
+        telemetry.summary()
+        if telemetry is not None
+        else {"device_id": None, "diagnostic_mode": False, "sink_attached": False,
+              "sink_inert": True, "emitted": 0, "info_local_only": 0,
+              "debug_dropped": 0, "queue": {"queued": 0}}
+    )
+    self_healing = getattr(ctx, "self_healing", None)
+    if self_healing is not None:
+        self_healing_summary = self_healing.summary()
+    else:
+        # No registry wired (e.g. a bare context in tests): report all
+        # 15 scenarios as never-observed, never claim a recovery.
+        from ..reliability.self_healing import SCENARIOS
+
+        self_healing_summary = {
+            scenario.value: {
+                "scenario": scenario.value, "status": "ok", "occurrences": 0,
+                "last_occurrence": None, "last_action": None,
+                "last_error_code": None, "detail": None,
+            }
+            for scenario in SCENARIOS
+        }
     state = ctx.driver.connection_state_dict()
     return {
         "ok": True,
@@ -859,6 +885,8 @@ async def diagnostics_summary(request: Request) -> dict[str, Any]:
             "websocket": channel,
             "enrolment": ctx.enrolment_status(),
             "sync": sync,
+            "telemetry": telemetry_summary,
+            "self_healing": self_healing_summary,
             "last_errors": ctx.logs.tail(20, "ERROR"),
             "driver_last_error": state.get("last_error"),
             "diagnostic": diagnostic,

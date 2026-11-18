@@ -131,12 +131,15 @@ class EnrolmentManager:
         retry_base_s: float = ENROLMENT_BACKOFF_INITIAL_S,
         retry_cap_s: float = ENROLMENT_BACKOFF_CAP_S,
         jitter: bool = True,
+        telemetry: Any | None = None,
     ) -> None:
         self._ctx = ctx
         self._rest = rest_client
         self._retry_base_s = retry_base_s
         self._retry_cap_s = retry_cap_s
         self._jitter = jitter
+        # TelemetryEmitter (ARCHITECTURE-CONTRACT §8), optional.
+        self.telemetry = telemetry if telemetry is not None else getattr(ctx, "telemetry", None)
         self._status = EnrolmentStatus(configured=self.is_configured)
         self._transient_failures = 0
         self.backoff_delays: list[float] = []
@@ -181,6 +184,7 @@ class EnrolmentManager:
         last_error: str | None = None,
         last_error_message: str | None = None,
     ) -> None:
+        previous = self._status.state
         self._status.state = state
         self._status.configured = self.is_configured
         if last_error is not None or state in (
@@ -191,6 +195,26 @@ class EnrolmentManager:
             # A fresh attempt / success / unconfigured clears the old error.
             self._status.last_error = last_error
             self._status.last_error_message = last_error_message
+        # Structured telemetry on state changes only (INFO is local-only,
+        # WARN/ERROR are queued — §8). No event spam for repeated sets.
+        if previous != state and self.telemetry is not None:
+            if state == EnrolmentState.REGISTERED:
+                self.telemetry.info(
+                    "enrolment.registered", component="server.enrolment",
+                    details={"attempts": self._status.attempts},
+                )
+            elif state == EnrolmentState.FAILED_AUTH:
+                self.telemetry.error(
+                    "enrolment.failed_auth", component="server.enrolment",
+                    error_code=last_error,
+                    details={"terminal": True, "retry": False},
+                )
+            elif state == EnrolmentState.FAILED_TRANSIENT:
+                self.telemetry.warn(
+                    "enrolment.failed_transient", component="server.enrolment",
+                    error_code=last_error,
+                    details={"attempts": self._status.attempts},
+                )
 
     async def _wait_or_stop(self, stop: asyncio.Event, delay: float) -> None:
         """Wait ``delay`` seconds or until ``stop`` is set."""

@@ -330,6 +330,17 @@ class SyncEngine:
                         "[SYNC] batch {} (kind {}) failed: {} — keeping {} queued",
                         batch["batch_id"], batch["kind"], exc.code.value, self.pending_count(),
                     )
+                    telemetry = getattr(self.ctx, "telemetry", None) if self.ctx is not None else None
+                    if telemetry is not None:
+                        telemetry.warn(
+                            "sync.batch_failed", component="server.sync",
+                            error_code=exc.code.value,
+                            details={
+                                "batch_id": batch["batch_id"],
+                                "kind": batch["kind"],
+                                "pending": self.pending_count(),
+                            },
+                        )
                     # Re-queue the failed batch AND every batch after
                     # it, in original order (they were already popped).
                     self._requeue_in_order(batches[index:])

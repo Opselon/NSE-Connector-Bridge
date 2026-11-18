@@ -199,6 +199,10 @@ class BridgeSettings(BaseSettings):
 
     # --- logging --------------------------------------------------------
     log_level: str = "INFO"
+    # Local diagnostic mode: DEBUG telemetry events are emitted only
+    # when this is on (default off, ARCHITECTURE-CONTRACT §8).
+    # Env: NSE_BRIDGE_DIAGNOSTIC_MODE=1.
+    diagnostic_mode: bool = False
     log_dir: str = ""  # default <data_dir>/logs
 
     # --- gui ------------------------------------------------------------
@@ -291,6 +295,7 @@ def persist_settings(settings: BridgeSettings) -> None:
         "mt5_login",
         "mt5_server",
         "log_level",
+        "diagnostic_mode",
         "gui_mode",
         "broker_utc_offset_minutes",
     ):
