@@ -131,11 +131,7 @@ def count_items(kind: str, items: dict[str, Any]) -> int:
     """
     if not isinstance(items, dict):
         return 0
-    lists = [
-        items[key]
-        for key in ("positions", "orders", "deals")
-        if isinstance(items.get(key), list)
-    ]
+    lists = [items[key] for key in ("positions", "orders", "deals") if isinstance(items.get(key), list)]
     if lists:
         return sum(len(value) for value in lists)
     return 1  # e.g. the single account snapshot
@@ -321,19 +317,24 @@ class SyncEngine:
                     if ack.batch_id and ack.batch_id != batch["batch_id"]:
                         logger.warning(
                             "[SYNC] ack batch_id {} does not match sent {}",
-                            ack.batch_id, batch["batch_id"],
+                            ack.batch_id,
+                            batch["batch_id"],
                         )
                     sent += 1
                 except ServerError as exc:
                     failed += 1
                     logger.warning(
                         "[SYNC] batch {} (kind {}) failed: {} — keeping {} queued",
-                        batch["batch_id"], batch["kind"], exc.code.value, self.pending_count(),
+                        batch["batch_id"],
+                        batch["kind"],
+                        exc.code.value,
+                        self.pending_count(),
                     )
                     telemetry = getattr(self.ctx, "telemetry", None) if self.ctx is not None else None
                     if telemetry is not None:
                         telemetry.warn(
-                            "sync.batch_failed", component="server.sync",
+                            "sync.batch_failed",
+                            component="server.sync",
                             error_code=exc.code.value,
                             details={
                                 "batch_id": batch["batch_id"],
@@ -464,7 +465,8 @@ class SyncEngine:
         logger.warning(
             "[SYNC] account switch: discarded {} queued history batches + {} snapshots; "
             "checkpoint reset to epoch for a fresh backfill (§7.3)",
-            len(dropped), dropped_snapshots,
+            len(dropped),
+            dropped_snapshots,
         )
 
     # ------------------------------------------------------------------
@@ -482,9 +484,7 @@ class SyncEngine:
         rule applies to timestamps INSIDE the payload, which stay
         verbatim broker values where present).
         """
-        trade_mode = {0: "demo", 1: "contest", 2: "live"}.get(
-            getattr(acc, "trade_mode", 0) or 0, "demo"
-        )
+        trade_mode = {0: "demo", 1: "contest", 2: "live"}.get(getattr(acc, "trade_mode", 0) or 0, "demo")
         account = {
             "login": str(acc.login),
             "server": acc.server,
@@ -516,9 +516,7 @@ class SyncEngine:
         return self.account_items(acc, state)
 
     @staticmethod
-    def positions_items(
-        positions: list[dict[str, Any]], orders: list[dict[str, Any]]
-    ) -> dict[str, Any]:
+    def positions_items(positions: list[dict[str, Any]], orders: list[dict[str, Any]]) -> dict[str, Any]:
         """Map local position/order models to §3.3 positions items:
         ``{positions: [...], orders: [...]}`` (open positions + pending
         orders, live field names)."""
@@ -540,9 +538,7 @@ class SyncEngine:
             [build_order_model(r, offset).model_dump() for r in orders],
         )
 
-    async def _default_history_orders(
-        self, from_dt: datetime, to_dt: datetime
-    ) -> dict[str, Any]:
+    async def _default_history_orders(self, from_dt: datetime, to_dt: datetime) -> dict[str, Any]:
         from starlette.concurrency import run_in_threadpool
 
         from ..engine.orders import _history_deals, _history_orders
@@ -551,17 +547,17 @@ class SyncEngine:
 
         assert self.ctx is not None
         offset = self.ctx.settings.broker_utc_offset_minutes
+        ctx = self.ctx
 
         def job() -> dict[str, Any]:
             # Broker-time range: the MT5 API takes datetimes in the
             # broker timebase; convert from UTC with the broker offset.
             from datetime import timedelta as _td
 
-
             broker_from = from_dt + _td(minutes=offset)
             broker_to = to_dt + _td(minutes=offset)
-            raw_orders = _history_orders(self.ctx, broker_from, broker_to, None)
-            raw_deals = _history_deals(self.ctx, broker_from, broker_to, None)
+            raw_orders = _history_orders(ctx, broker_from, broker_to, None)
+            raw_deals = _history_deals(ctx, broker_from, broker_to, None)
             orders: list[dict[str, Any]] = []
             seen_orders: set[Any] = set()
             for raw in raw_orders:
@@ -586,9 +582,7 @@ class SyncEngine:
 
         return await run_in_threadpool(job)
 
-    async def _default_history_positions(
-        self, from_dt: datetime, to_dt: datetime
-    ) -> dict[str, Any]:
+    async def _default_history_positions(self, from_dt: datetime, to_dt: datetime) -> dict[str, Any]:
         from starlette.concurrency import run_in_threadpool
 
         from ..engine.orders import HistoryRequest, get_trading_history_positions
@@ -622,7 +616,7 @@ def _history_pages(kind: str, items: dict[str, Any], page_size: int) -> list[dic
         pages: list[dict[str, Any]] = []
         for key in ("orders", "deals"):
             for chunk in chunk_items(list(items.get(key, [])), page_size):
-                page = {"orders": [], "deals": []}
+                page: dict[str, Any] = {"orders": [], "deals": []}
                 page[key] = chunk
                 pages.append(page)
         return pages

@@ -49,8 +49,7 @@ def ctx():
         )
     if not summary.get("ok"):
         pytest.fail(
-            "MT5 terminal unavailable — required-MT5 test cannot run: "
-            f"{summary.get('error')}",
+            f"MT5 terminal unavailable — required-MT5 test cannot run: {summary.get('error')}",
             pytrace=False,
         )
     yield context

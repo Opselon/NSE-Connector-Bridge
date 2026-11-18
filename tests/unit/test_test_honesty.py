@@ -20,6 +20,7 @@ undo them:
 from __future__ import annotations
 
 import ast
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -58,11 +59,7 @@ def _module_labels(tree: ast.Module) -> set[str]:
         # pytestmark = [pytest.mark.a, pytest.mark.b]
         if isinstance(value, ast.List):
             for elt in value.elts:
-                if (
-                    isinstance(elt, ast.Attribute)
-                    and isinstance(elt.value, ast.Attribute)
-                    and elt.value.attr == "mark"
-                ):
+                if isinstance(elt, ast.Attribute) and isinstance(elt.value, ast.Attribute) and elt.value.attr == "mark":
                     labels.add(elt.attr)
     return labels
 
@@ -150,17 +147,45 @@ def test_required_mt5_test_fails_loudly_without_a_terminal(tmp_path):
     actually answers (a Windows dev machine), the e2e test genuinely
     passes and this proof is not applicable — skip instead of failing."""
     target = "tests/e2e/test_cat1_connection.py::test_02_get_bridge_status"
-    proc = subprocess.run(
-        [
-            sys.executable, "-m", "pytest", target,
-            "-q", "-p", "no:cacheprovider", "--no-header",
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=180,
-        check=False,  # the return code IS the assertion under test
-    )
+    # Windows hardening (A1): the nested run imports the real
+    # MetaTrader5 package and calls mt5.initialize() in the driver
+    # worker thread — the least Windows-proven path in this suite.
+    # PYTHONUTF8=1 keeps the child's output decodable regardless of
+    # the Windows console code page, errors="replace" keeps a stray
+    # undecodable byte from erroring this test opaquely, and a
+    # TimeoutExpired becomes a named failure (with partial output)
+    # instead of an unexplained ERROR, so the next Windows failure
+    # names its cause.
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                target,
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                "--no-header",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env={**os.environ, "PYTHONUTF8": "1"},
+            timeout=180,
+            check=False,  # the return code IS the assertion under test
+        )
+    except subprocess.TimeoutExpired as exc:
+        # text=True: stdout/stderr are str (or None) here.
+        partial = (exc.stdout or "") + (exc.stderr or "")
+        pytest.fail(
+            "nested e2e run timed out after 180s without finishing — "
+            "on Windows the prime suspect is mt5.initialize() blocking "
+            "the driver worker thread (or a slow cold start on the "
+            "runner); see the junit artifact for the run. Partial output:\n"
+            f"{partial[-2000:]}"
+        )
     out = proc.stdout + proc.stderr
     if proc.returncode == 0:
         pytest.skip("a live MT5 terminal answered — loud-failure proof not applicable here")

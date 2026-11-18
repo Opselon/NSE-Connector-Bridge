@@ -63,7 +63,9 @@ try:
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 except ImportError:  # pragma: no cover — cryptography is a pinned dependency
-    Ed25519PublicKey = None  # type: ignore[assignment]
+    # None fallback when cryptography is absent (mypy: the names are
+    # types in the success branch, hence the ignore codes).
+    Ed25519PublicKey = None  # type: ignore[assignment, misc]
     InvalidSignature = Exception  # type: ignore[assignment, misc]
 
 __all__ = [
@@ -178,9 +180,7 @@ def load_update_public_key(settings: BridgeSettings) -> Any | None:
     try:
         return Ed25519PublicKey.from_public_bytes(raw)
     except ValueError as exc:
-        raise UpdateError(
-            ERR_INVALID_PUBLIC_KEY, "configured update public key is not a valid Ed25519 key"
-        ) from exc
+        raise UpdateError(ERR_INVALID_PUBLIC_KEY, "configured update public key is not a valid Ed25519 key") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -219,15 +219,12 @@ def verify_artifact(data: bytes, release: ReleaseInfo, public_key: Any) -> None:
     if public_key is None:
         raise UpdateError(
             ERR_NO_PUBLIC_KEY,
-            "signature unverifiable — no update public key configured "
-            "(set NSE_BRIDGE_UPDATE_PUBLIC_KEY)",
+            "signature unverifiable — no update public key configured (set NSE_BRIDGE_UPDATE_PUBLIC_KEY)",
         )
     try:
         signature = base64.b64decode(release.signature, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise UpdateError(
-            ERR_SIGNATURE_INVALID, "release signature is not valid base64"
-        ) from exc
+        raise UpdateError(ERR_SIGNATURE_INVALID, "release signature is not valid base64") from exc
     try:
         public_key.verify(signature, data)
     except InvalidSignature as exc:
@@ -352,7 +349,7 @@ class Updater:
         settings: BridgeSettings,
         *,
         rest_client_getter: Any = None,
-        download_transport: httpx.BaseTransport | None = None,
+        download_transport: httpx.AsyncBaseTransport | None = None,
         staging_dir: Path | None = None,
     ) -> None:
         self.settings = settings
@@ -581,9 +578,7 @@ class Updater:
             self._set_error(exc)
             return self.status()
         except Exception as exc:  # noqa: BLE001 — transport failure is a download failure
-            self._set_error(
-                UpdateError(ERR_DOWNLOAD_FAILED, f"Download failed: {redact_text(str(exc))[:300]}")
-            )
+            self._set_error(UpdateError(ERR_DOWNLOAD_FAILED, f"Download failed: {redact_text(str(exc))[:300]}"))
             return self.status()
         try:
             verify_artifact(data, rel, public_key)
@@ -594,8 +589,7 @@ class Updater:
         self._state = "staged"
         self._error = None
         self._detail = (
-            f"Version {rel.version} downloaded and verified (SHA-256 + Ed25519) — "
-            "it will install on restart."
+            f"Version {rel.version} downloaded and verified (SHA-256 + Ed25519) — it will install on restart."
         )
         logger.info("[UPDATER] staged verified release {} ({} bytes)", rel.version, len(data))
         return self.status()
@@ -605,16 +599,17 @@ class Updater:
         cap = size_bytes if size_bytes is not None else MAX_DOWNLOAD_BYTES
         chunks: list[bytes] = []
         received = 0
-        async with httpx.AsyncClient(
-            transport=self._download_transport,
-            trust_env=False,
-            follow_redirects=True,
-            timeout=httpx.Timeout(120.0),
-        ) as client, client.stream("GET", url) as resp:
+        async with (
+            httpx.AsyncClient(
+                transport=self._download_transport,
+                trust_env=False,
+                follow_redirects=True,
+                timeout=httpx.Timeout(120.0),
+            ) as client,
+            client.stream("GET", url) as resp,
+        ):
             if resp.status_code != 200:
-                raise UpdateError(
-                    ERR_DOWNLOAD_FAILED, f"download URL answered HTTP {resp.status_code}"
-                )
+                raise UpdateError(ERR_DOWNLOAD_FAILED, f"download URL answered HTTP {resp.status_code}")
             async for chunk in resp.aiter_bytes(chunk_size=65536):
                 received += len(chunk)
                 if received > cap:
@@ -696,12 +691,18 @@ class Updater:
         script = self.write_apply_script()
         staged_state = self._staged if self._staged.path else (self._load_staged_state() or _StagedInfo())
         cmd = [
-            sys.executable, str(script),
-            "--staged", str(staged),
-            "--target", target,
-            "--parent-pid", str(os.getpid()),
-            "--sha256", staged_state.sha256 or "",
-            "--restart-cmd", target,
+            sys.executable,
+            str(script),
+            "--staged",
+            str(staged),
+            "--target",
+            target,
+            "--parent-pid",
+            str(os.getpid()),
+            "--sha256",
+            staged_state.sha256 or "",
+            "--restart-cmd",
+            target,
         ]
         kwargs: dict[str, Any] = {
             "stdout": subprocess.DEVNULL,
@@ -711,7 +712,10 @@ class Updater:
         if sys.platform == "win32":
             kwargs["creationflags"] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         try:
-            subprocess.Popen(cmd, **kwargs)
+            # No shell: argv is a list of our own values (this
+            # interpreter + our staged apply script + paths/flags),
+            # never untrusted input. This is the designed restart-installer launch.
+            subprocess.Popen(cmd, **kwargs)  # nosec B603
         except OSError as exc:
             return {"launched": False, "reason": "launch_failed", "detail": str(exc)}
         logger.info("[UPDATER] restart installer launched for staged {}", staged_state.version)

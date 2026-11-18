@@ -85,12 +85,9 @@ def validate_server_url(url: str, *, allow_insecure: bool = False) -> None:
         if allow_insecure or host in ("127.0.0.1", "::1", "localhost"):
             return
         raise ValueError(
-            f"server_url {url!r} uses ws:// outside a loopback/test endpoint — "
-            "production server URLs must use wss://"
+            f"server_url {url!r} uses ws:// outside a loopback/test endpoint — production server URLs must use wss://"
         )
-    raise ValueError(
-        f"server_url {url!r} must use wss:// (TLS is mandatory for server URLs)"
-    )
+    raise ValueError(f"server_url {url!r} must use wss:// (TLS is mandatory for server URLs)")
 
 
 def validate_server_base_url(url: str, *, environment: str = "production") -> None:
@@ -109,9 +106,7 @@ def validate_server_base_url(url: str, *, environment: str = "production") -> No
 
 
 class BridgeSettings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_prefix="NSE_BRIDGE_", env_file=".env", extra="ignore"
-    )
+    model_config = SettingsConfigDict(env_prefix="NSE_BRIDGE_", env_file=".env", extra="ignore")
 
     # --- server -------------------------------------------------------
     app_name: str = "NSE MT5 Bridge"
@@ -226,9 +221,9 @@ class BridgeSettings(BaseSettings):
             return self.server_url
         base = self.server_base_url.rstrip("/")
         if base.startswith("https://"):
-            base = "wss://" + base[len("https://"):]
+            base = "wss://" + base[len("https://") :]
         elif base.startswith("http://"):
-            base = "ws://" + base[len("http://"):]
+            base = "ws://" + base[len("http://") :]
         return base + PRODUCTION_SERVER_WS_PATH
 
 
@@ -300,6 +295,4 @@ def persist_settings(settings: BridgeSettings) -> None:
         "broker_utc_offset_minutes",
     ):
         payload[key] = getattr(settings, key)
-    settings.config_file.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    settings.config_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

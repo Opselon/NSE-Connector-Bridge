@@ -114,7 +114,7 @@ def build_endpoint(spec: CommandSpec, ctx: BridgeContext):
 
     else:
 
-        async def endpoint(request: Request, body: dict | None = Body(None)):  # noqa: B008 — FastAPI Body() default is the documented pattern
+        async def endpoint(request: Request, body: dict | None = Body(None)):  # type: ignore[misc] # noqa: B008 — FastAPI Body() default is the documented pattern; conditional variant of the typed endpoint above
             result = await run_in_threadpool(spec.handler, ctx, body)
             return {"ok": True, "data": result}
 
@@ -265,9 +265,7 @@ def create_app(ctx: BridgeContext) -> FastAPI:
                 presented = request.cookies.get(LOCAL_API_KEY_COOKIE) or ""
             expected = ctx.settings.local_api_key or ""
             if not expected or not hmac.compare_digest(presented, expected):
-                err = BridgeError(
-                    ErrorCode.UNAUTHORIZED, "Missing or invalid X-API-Key header", http_status=401
-                )
+                err = BridgeError(ErrorCode.UNAUTHORIZED, "Missing or invalid X-API-Key header", http_status=401)
                 return _error_response(err, request_id)
         try:
             response = await call_next(request)
@@ -283,8 +281,11 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         if path.startswith("/api/"):
             logger.info(
                 "[API] {} {} -> {} ({:.1f}ms) rid={}",
-                request.method, path, response.status_code,
-                (time.perf_counter() - t0) * 1000.0, request_id,
+                request.method,
+                path,
+                response.status_code,
+                (time.perf_counter() - t0) * 1000.0,
+                request_id,
             )
         return response
 
@@ -396,7 +397,9 @@ def create_app(ctx: BridgeContext) -> FastAPI:
     # --- dynamic per-command endpoints ------------------------------------
     for spec in sorted(REGISTRY, key=lambda c: c.number):
         rm = spec.response_model
-        response_model = Envelope[rm] if (rm and rm is not object) else None
+        # rm is a runtime value, not a static type: Envelope[rm] is
+        # correct at runtime; mypy cannot express a variable type arg.
+        response_model = Envelope[rm] if (rm and rm is not object) else None  # type: ignore[valid-type]
         app.add_api_route(
             f"/api/v1/{spec.name}",
             build_endpoint(spec, ctx),

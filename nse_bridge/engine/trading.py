@@ -37,14 +37,16 @@ def order_send_checked(ctx: BridgeContext, request: dict[str, Any], op: str) -> 
         ctx.trade_metrics.record(op, "unknown", ms, None, {"symbol": request.get("symbol")})
         raise BridgeError(
             ErrorCode.TRADE_UNVERIFIED,
-            "order_send returned no result — broker state unverified. "
-            "Reconcile (positions/orders) before retrying.",
+            "order_send returned no result — broker state unverified. Reconcile (positions/orders) before retrying.",
             details={"op": op, "symbol": request.get("symbol")},
         )
     retcode = int(_f(raw, "retcode", 0))
     outcome = "done" if retcode == TRADE_RETCODE_DONE else "rejected"
     ctx.trade_metrics.record(
-        op, outcome, ms, retcode,
+        op,
+        outcome,
+        ms,
+        retcode,
         {"symbol": request.get("symbol"), "order": int(_f(raw, "order", 0) or 0)},
     )
     return raw
@@ -190,7 +192,9 @@ def market_order(
         # ambiguous fill recovery: verify against broker truth before failing
         recovered = _recover_ambiguous(ctx, symbol, side, mgc_for_match)
         if recovered is not None:
-            ctx.trade_metrics.record("order_send", "done", ms_probe, TRADE_RETCODE_DONE, {"symbol": symbol, "recovered": True})
+            ctx.trade_metrics.record(
+                "order_send", "done", ms_probe, TRADE_RETCODE_DONE, {"symbol": symbol, "recovered": True}
+            )
             return _execution_payload(recovered, symbol, recovered=True)
         raise BridgeError(
             ErrorCode.TRADE_UNVERIFIED,
@@ -204,7 +208,8 @@ def market_order(
         if recovered is not None:
             logger.warning(
                 "[ORDER_WRITE] retcode={} but live position found (ticket={}) — ambiguous fill treated as success",
-                retcode, int(_f(recovered, "ticket", 0)),
+                retcode,
+                int(_f(recovered, "ticket", 0)),
             )
             ctx.trade_metrics.record("order_send", "done", ms_probe, retcode, {"symbol": symbol, "recovered": True})
             return _execution_payload(recovered, symbol, recovered=True)
@@ -250,13 +255,15 @@ def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) 
         resolve_filling_mode(ctx, symbol)
 
         def job(mt5: Any, symbol=symbol, ticket=ticket, sl=sl, tp=tp):
-            return mt5.order_send({
-                "action": mt5.TRADE_ACTION_SLTP,
-                "position": int(ticket),
-                "symbol": symbol,
-                "sl": float(sl),
-                "tp": float(tp),
-            })
+            return mt5.order_send(
+                {
+                    "action": mt5.TRADE_ACTION_SLTP,
+                    "position": int(ticket),
+                    "symbol": symbol,
+                    "sl": float(sl),
+                    "tp": float(tp),
+                }
+            )
 
         last = ctx.driver.run(job, op="order_send_sltp", context={"ticket": ticket, "sl": sl, "tp": tp})
         if last is None:
@@ -304,9 +311,7 @@ def modify_pending_order_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: fl
     # Deferred import: orders.py imports this module at top level.
     from .orders import ModifyPendingRequest, trade_modify_pending_order
 
-    return trade_modify_pending_order(
-        ctx, ModifyPendingRequest(ticket=ticket, sl=sl, tp=tp)
-    )
+    return trade_modify_pending_order(ctx, ModifyPendingRequest(ticket=ticket, sl=sl, tp=tp))
 
 
 def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None) -> dict[str, Any]:
@@ -347,18 +352,20 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
         ):
             close_type = mt5.ORDER_TYPE_SELL if pos_type == 0 else mt5.ORDER_TYPE_BUY
             price = float(tick.bid) if pos_type == 0 else float(tick.ask)
-            return mt5.order_send({
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": symbol,
-                "volume": close_volume,
-                "type": close_type,
-                "position": int(ticket),
-                "price": price,
-                "magic": int(_f(pos_raw, "magic", 0) or 0),
-                "comment": "NSE_CLOSE",
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": filling,
-            })
+            return mt5.order_send(
+                {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": symbol,
+                    "volume": close_volume,
+                    "type": close_type,
+                    "position": int(ticket),
+                    "price": price,
+                    "magic": int(_f(pos_raw, "magic", 0) or 0),
+                    "comment": "NSE_CLOSE",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": filling,
+                }
+            )
 
         last = ctx.driver.run(job, op="order_send_close", context={"ticket": ticket, "volume": close_volume})
         if last is None:
@@ -378,7 +385,8 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
             except BridgeError:
                 logger.info(
                     "[CLOSE] ticket={} no longer open after ambiguous retcode={} — treated as closed",
-                    ticket, retcode,
+                    ticket,
+                    retcode,
                 )
                 ctx.trade_metrics.record("close_position", "done", 0.0, retcode, {"ticket": ticket, "recovered": True})
                 return {

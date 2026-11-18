@@ -167,9 +167,7 @@ def get_chart_history(ctx: BridgeContext, params: ChartHistoryRequest) -> dict[s
             return mt5.copy_rates_range(symbol, tf, from_dt, datetime.now(UTC))
         return mt5.copy_rates_from_pos(symbol, tf, 0, params.count)
 
-    raw = ctx.driver.run(
-        job, op="copy_rates", context={"symbol": symbol, "timeframe": tf_name, "count": params.count}
-    )
+    raw = ctx.driver.run(job, op="copy_rates", context={"symbol": symbol, "timeframe": tf_name, "count": params.count})
     if raw is None or len(raw) == 0:
         raise BridgeError(
             ErrorCode.MT5_CALL_FAILED,
@@ -258,7 +256,11 @@ def get_chart_current_timeframe(ctx: BridgeContext, params: None) -> dict[str, A
 )
 def get_chart_available_timeframes(ctx: BridgeContext, params: None) -> dict[str, Any]:
     def job(mt5: Any):
-        return {name: int(getattr(mt5, f"TIMEFRAME_{name}")) for name in TIMEFRAME_NAMES if hasattr(mt5, f"TIMEFRAME_{name}")}
+        return {
+            name: int(getattr(mt5, f"TIMEFRAME_{name}"))
+            for name in TIMEFRAME_NAMES
+            if hasattr(mt5, f"TIMEFRAME_{name}")
+        }
 
     values = ctx.driver.run(job, op="timeframes_enum")
     return {"timeframes": list(values.keys()), "enum_values": values}

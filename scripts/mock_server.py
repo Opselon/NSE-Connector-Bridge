@@ -145,7 +145,7 @@ def make_rest_handler(state: MockServerState):
             auth = self.headers.get("Authorization", "")
             if not auth.startswith("Bearer "):
                 return None
-            token = auth[len("Bearer "):].strip()
+            token = auth[len("Bearer ") :].strip()
             if token in ("bad-token", "revoked-token"):
                 return token
             if token != state.token:
@@ -173,53 +173,80 @@ def make_rest_handler(state: MockServerState):
             body = self._read_json()
             path = self.path.split("?")[0]
             if path == "/api/v1/connector/validate-key":
-                self._send(200, {
-                    "valid": True,
-                    "user_id": SERVER_USER_ID,
-                    "subscription": {"active": True, "plan": "pro",
-                                     "expires_at": "2099-01-01T00:00:00Z"},
-                    "entitlements": {
-                        "history_sync": True, "ai_coach": True,
-                        "position_manager": True, "auto_trade": True,
-                        "max_devices": 3, "max_accounts": 2,
+                self._send(
+                    200,
+                    {
+                        "valid": True,
+                        "user_id": SERVER_USER_ID,
+                        "subscription": {"active": True, "plan": "pro", "expires_at": "2099-01-01T00:00:00Z"},
+                        "entitlements": {
+                            "history_sync": True,
+                            "ai_coach": True,
+                            "position_manager": True,
+                            "auto_trade": True,
+                            "max_devices": 3,
+                            "max_accounts": 2,
+                        },
                     },
-                })
+                )
             elif path == "/api/v1/connector/register-device":
-                self._send(200, {
-                    "registered": True,
-                    "session_expires_at": (datetime.now(UTC) + timedelta(hours=24)).isoformat().replace("+00:00", "Z"),
-                })
+                self._send(
+                    200,
+                    {
+                        "registered": True,
+                        "session_expires_at": (datetime.now(UTC) + timedelta(hours=24))
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                    },
+                )
             elif path == "/api/v1/connector/sync/batch":
                 if state.fail_next_batch:
                     state.fail_next_batch = False
-                    self._send(200, {
-                        "accepted": False,
-                        "batch_id": body.get("batch_id"),
-                        "error": {"code": "validation_failed", "message": "injected test failure"},
-                    })
+                    self._send(
+                        200,
+                        {
+                            "accepted": False,
+                            "batch_id": body.get("batch_id"),
+                            "error": {"code": "validation_failed", "message": "injected test failure"},
+                        },
+                    )
                     return
                 if body.get("kind") not in BATCH_KINDS or not isinstance(body.get("items"), dict):
-                    self._send(200, {
-                        "accepted": False,
-                        "batch_id": body.get("batch_id"),
-                        "error": {"code": "validation_failed",
-                                  "message": f"invalid batch kind {body.get('kind')!r}"},
-                    })
+                    self._send(
+                        200,
+                        {
+                            "accepted": False,
+                            "batch_id": body.get("batch_id"),
+                            "error": {
+                                "code": "validation_failed",
+                                "message": f"invalid batch kind {body.get('kind')!r}",
+                            },
+                        },
+                    )
                     return
                 state.record_batch(body)
                 self._send(200, {"accepted": True, "batch_id": body.get("batch_id")})
             elif path == "/api/v1/connector/heartbeat":
                 with state._lock:
                     state.rest_heartbeats_received += 1
-                self._send(200, {
-                    "ok": True, "server_time": _now_iso(),
-                    "pending_commands": state.pending_commands,
-                })
+                self._send(
+                    200,
+                    {
+                        "ok": True,
+                        "server_time": _now_iso(),
+                        "pending_commands": state.pending_commands,
+                    },
+                )
             elif path == "/api/v1/connector/session/refresh":
-                self._send(200, {
-                    "refreshed": True,
-                    "session_expires_at": (datetime.now(UTC) + timedelta(hours=24)).isoformat().replace("+00:00", "Z"),
-                })
+                self._send(
+                    200,
+                    {
+                        "refreshed": True,
+                        "session_expires_at": (datetime.now(UTC) + timedelta(hours=24))
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                    },
+                )
             elif path == "/api/v1/connector/session/revoke":
                 self._send(200, {"revoked": True})
             elif path == "/api/v1/connector/manifest":
@@ -233,15 +260,18 @@ def make_rest_handler(state: MockServerState):
                 return
             path = self.path.split("?")[0]
             if path == "/api/v1/connector/releases/latest":
-                self._send(200, {
-                    "version": "0.2.0",
-                    "download_url": "https://example.invalid/nse-bridge-0.2.0.exe",
-                    "sha256": "0" * 64,
-                    "size_bytes": 12345678,
-                    "min_connector_version": "0.1.0",
-                    "signature": None,
-                    "released_at": "2026-11-18T00:00:00Z",
-                })
+                self._send(
+                    200,
+                    {
+                        "version": "0.2.0",
+                        "download_url": "https://example.invalid/nse-bridge-0.2.0.exe",
+                        "sha256": "0" * 64,
+                        "size_bytes": 12345678,
+                        "min_connector_version": "0.1.0",
+                        "signature": None,
+                        "released_at": "2026-11-18T00:00:00Z",
+                    },
+                )
             else:
                 self._error(404, "not_found", f"no such endpoint: {path}")
 
@@ -256,9 +286,12 @@ def _canned_candles(symbol: str, timeframe: str) -> list[dict[str, Any]]:
     return [
         {
             "time": (base + timedelta(minutes=15 * i)).isoformat().replace("+00:00", ""),
-            "open": 1.10226 + i * 0.0001, "high": 1.10248 + i * 0.0001,
-            "low": 1.10201 + i * 0.0001, "close": 1.10248 + i * 0.0001,
-            "tick_volume": 438 + i, "spread": 1,
+            "open": 1.10226 + i * 0.0001,
+            "high": 1.10248 + i * 0.0001,
+            "low": 1.10201 + i * 0.0001,
+            "close": 1.10248 + i * 0.0001,
+            "tick_volume": 438 + i,
+            "spread": 1,
         }
         for i in range(2)
     ]
@@ -331,39 +364,76 @@ async def _answer_chart_request(ws: Any, msg: dict[str, Any]) -> None:
     request_id = msg.get("request_id")
     count = msg.get("count", 100)
     if symbol == "UNKNOWN":
-        await ws.send(json.dumps({
-            "type": "chart.data", "request_id": request_id, "subscription_id": None,
-            "symbol": symbol, "timeframe": timeframe, "candles": [],
-            "broker_time": _now_iso(), "received_at": _now_iso(),
-            "complete": False, "status": "error",
-            "error_code": "symbol_not_found",
-            "error_message": f"symbol {symbol!r} does not exist on this broker/terminal",
-        }))
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "chart.data",
+                    "request_id": request_id,
+                    "subscription_id": None,
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "candles": [],
+                    "broker_time": _now_iso(),
+                    "received_at": _now_iso(),
+                    "complete": False,
+                    "status": "error",
+                    "error_code": "symbol_not_found",
+                    "error_message": f"symbol {symbol!r} does not exist on this broker/terminal",
+                }
+            )
+        )
         return
     if timeframe not in CHART_TIMEFRAMES:
-        await ws.send(json.dumps({
-            "type": "chart.data", "request_id": request_id, "subscription_id": None,
-            "symbol": symbol, "timeframe": timeframe, "candles": [],
-            "broker_time": _now_iso(), "received_at": _now_iso(),
-            "complete": False, "status": "error",
-            "error_code": "unsupported_timeframe",
-            "error_message": f"timeframe {timeframe!r} is outside M1..MN1",
-        }))
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "chart.data",
+                    "request_id": request_id,
+                    "subscription_id": None,
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "candles": [],
+                    "broker_time": _now_iso(),
+                    "received_at": _now_iso(),
+                    "complete": False,
+                    "status": "error",
+                    "error_code": "unsupported_timeframe",
+                    "error_message": f"timeframe {timeframe!r} is outside M1..MN1",
+                }
+            )
+        )
         return
     candles = _canned_candles(symbol, timeframe)[: max(1, min(int(count), 1000))]
-    await ws.send(json.dumps({
-        "type": "chart.data", "request_id": request_id, "subscription_id": None,
-        "symbol": symbol, "timeframe": timeframe, "candles": candles,
-        "broker_time": candles[-1]["time"], "received_at": _now_iso(),
-        "complete": True, "status": "ok",
-    }))
+    await ws.send(
+        json.dumps(
+            {
+                "type": "chart.data",
+                "request_id": request_id,
+                "subscription_id": None,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "candles": candles,
+                "broker_time": candles[-1]["time"],
+                "received_at": _now_iso(),
+                "complete": True,
+                "status": "ok",
+            }
+        )
+    )
     if msg.get("include_ticks"):
-        await ws.send(json.dumps({
-            "type": "chart.tick", "subscription_id": None, "request_id": request_id,
-            "symbol": symbol,
-            "ticks": [{"time_ms": "2026-11-16T19:53:00.034", "bid": 1.10042, "ask": 1.10043}],
-            "broker_time": candles[-1]["time"], "received_at": _now_iso(),
-        }))
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "chart.tick",
+                    "subscription_id": None,
+                    "request_id": request_id,
+                    "symbol": symbol,
+                    "ticks": [{"time_ms": "2026-11-16T19:53:00.034", "bid": 1.10042, "ask": 1.10043}],
+                    "broker_time": candles[-1]["time"],
+                    "received_at": _now_iso(),
+                }
+            )
+        )
 
 
 async def _answer_chart_subscribe(ws: Any, state: MockServerState, msg: dict[str, Any]) -> None:
@@ -372,23 +442,43 @@ async def _answer_chart_subscribe(ws: Any, state: MockServerState, msg: dict[str
     timeframe = str(msg.get("timeframe") or "")
     with state._lock:
         if len(state.subscriptions) >= 20:
-            await ws.send(json.dumps({
-                "type": "chart.data", "request_id": None, "subscription_id": subscription_id,
-                "symbol": symbol, "timeframe": timeframe, "candles": [],
-                "broker_time": _now_iso(), "received_at": _now_iso(),
-                "complete": False, "status": "error",
-                "error_code": "subscription_limit",
-                "error_message": "more than 20 concurrent subscriptions on this device",
-            }))
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "chart.data",
+                        "request_id": None,
+                        "subscription_id": subscription_id,
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "candles": [],
+                        "broker_time": _now_iso(),
+                        "received_at": _now_iso(),
+                        "complete": False,
+                        "status": "error",
+                        "error_code": "subscription_limit",
+                        "error_message": "more than 20 concurrent subscriptions on this device",
+                    }
+                )
+            )
             return
         state.subscriptions[subscription_id] = msg
     candles = _canned_candles(symbol, timeframe)
-    await ws.send(json.dumps({
-        "type": "chart.data", "request_id": None, "subscription_id": subscription_id,
-        "symbol": symbol, "timeframe": timeframe, "candles": candles,
-        "broker_time": candles[-1]["time"], "received_at": _now_iso(),
-        "complete": True, "status": "ok",
-    }))
+    await ws.send(
+        json.dumps(
+            {
+                "type": "chart.data",
+                "request_id": None,
+                "subscription_id": subscription_id,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "candles": candles,
+                "broker_time": candles[-1]["time"],
+                "received_at": _now_iso(),
+                "complete": True,
+                "status": "ok",
+            }
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -408,9 +498,7 @@ class MockServer:
     ) -> None:
         self.host = host
         self.state = MockServerState(token=token, send_demo_command=send_demo_command)
-        self._rest_httpd = ThreadingHTTPServer(
-            (host, rest_port), make_rest_handler(self.state)
-        )
+        self._rest_httpd = ThreadingHTTPServer((host, rest_port), make_rest_handler(self.state))
         self._rest_thread: threading.Thread | None = None
         self._ws_port = ws_port
         self._ws_loop: asyncio.AbstractEventLoop | None = None
@@ -434,21 +522,15 @@ class MockServer:
         return f"ws://{self.host}:{self._ws_port}/api/v1/connector/ws"
 
     def start(self) -> MockServer:
-        self._rest_thread = threading.Thread(
-            target=self._rest_httpd.serve_forever, name="mock-rest", daemon=True
-        )
+        self._rest_thread = threading.Thread(target=self._rest_httpd.serve_forever, name="mock-rest", daemon=True)
         self._rest_thread.start()
 
         async def _serve() -> None:
-            self._ws_server = await websockets.serve(
-                lambda ws: _ws_handler(ws, self.state), self.host, self._ws_port
-            )
+            self._ws_server = await websockets.serve(lambda ws: _ws_handler(ws, self.state), self.host, self._ws_port)
             self._ws_port = self._ws_server.sockets[0].getsockname()[1]
 
         self._ws_loop = asyncio.new_event_loop()
-        self._ws_thread = threading.Thread(
-            target=self._run_ws_loop, name="mock-ws", daemon=True
-        )
+        self._ws_thread = threading.Thread(target=self._run_ws_loop, name="mock-ws", daemon=True)
         self._ws_thread.start()
         fut = asyncio.run_coroutine_threadsafe(_serve(), self._ws_loop)
         fut.result(timeout=10)

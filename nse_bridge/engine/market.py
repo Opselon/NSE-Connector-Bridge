@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from ..errors import BridgeError, ErrorCode
 from ..mt5.types import MarketBookEntryModel
-from .common import BridgeContext, datetime_now_iso
+from .common import BridgeContext
 from .registry import command
 from .symbols import _fresh_tick, _symbol_param
 
@@ -171,7 +171,7 @@ def get_market_last_price(ctx: BridgeContext, params: dict[str, Any] | None) -> 
 def get_market_depth(ctx: BridgeContext, params: dict[str, Any] | None) -> dict[str, Any]:
     symbol = _symbol_param(params)
     ctx.driver.ensure_connected()
-    from ..mt5.types import DEAL_ENTRY_LABELS, ORDER_TYPE_LABELS
+    from ..mt5.types import ORDER_TYPE_LABELS
 
     def job(mt5: Any):
         if not mt5.market_book_add(symbol):
@@ -229,9 +229,7 @@ def get_market_spread_history(ctx: BridgeContext, params: dict[str, Any] | None)
     def job(mt5: Any):
         return mt5.copy_ticks_range(symbol, from_dt, to_dt, mt5.COPY_TICKS_ALL)
 
-    raw = ctx.driver.run(
-        job, op="copy_ticks_range", context={"symbol": symbol, "minutes": minutes}
-    )
+    raw = ctx.driver.run(job, op="copy_ticks_range", context={"symbol": symbol, "minutes": minutes})
     if raw is None:
         raise BridgeError(
             ErrorCode.MT5_CALL_FAILED,

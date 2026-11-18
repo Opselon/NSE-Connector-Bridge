@@ -210,7 +210,7 @@ def _file_version_windows(path: str) -> str | None:
         import ctypes
         from ctypes import wintypes
 
-        version = ctypes.WinDLL("version", use_last_error=True)
+        version = ctypes.WinDLL("version", use_last_error=True)  # type: ignore[attr-defined] # Windows-only API
         size = version.GetFileVersionInfoSizeW(path, None)
         if not size:
             return None
@@ -246,30 +246,30 @@ def _pe_file_version(path: str) -> str | None:
         if len(data) < 0x40 or data[:2] != b"MZ":
             return None
         e_lfanew = int.from_bytes(data[0x3C:0x40], "little")
-        if data[e_lfanew:e_lfanew + 4] != b"PE\0\0":
+        if data[e_lfanew : e_lfanew + 4] != b"PE\0\0":
             return None
         coff = e_lfanew + 4
-        num_sections = int.from_bytes(data[coff + 2:coff + 4], "little")
-        opt_size = int.from_bytes(data[coff + 16:coff + 18], "little")
+        num_sections = int.from_bytes(data[coff + 2 : coff + 4], "little")
+        opt_size = int.from_bytes(data[coff + 16 : coff + 18], "little")
         opt = coff + 20
-        magic = int.from_bytes(data[opt:opt + 2], "little")
+        magic = int.from_bytes(data[opt : opt + 2], "little")
         if magic == 0x10B:  # PE32
             dd_base = opt + 96
         elif magic == 0x20B:  # PE32+
             dd_base = opt + 112
         else:
             return None
-        rsrc_rva = int.from_bytes(data[dd_base + 16:dd_base + 20], "little")
-        rsrc_size = int.from_bytes(data[dd_base + 20:dd_base + 24], "little")
+        rsrc_rva = int.from_bytes(data[dd_base + 16 : dd_base + 20], "little")
+        rsrc_size = int.from_bytes(data[dd_base + 20 : dd_base + 24], "little")
         if not rsrc_rva or not rsrc_size:
             return None
         sections: list[tuple[int, int, int]] = []
         sec_base = opt + opt_size
         for i in range(num_sections):
             off = sec_base + i * 40
-            va = int.from_bytes(data[off + 12:off + 16], "little")
-            raw_size = int.from_bytes(data[off + 16:off + 20], "little")
-            raw_ptr = int.from_bytes(data[off + 20:off + 24], "little")
+            va = int.from_bytes(data[off + 12 : off + 16], "little")
+            raw_size = int.from_bytes(data[off + 16 : off + 20], "little")
+            raw_ptr = int.from_bytes(data[off + 20 : off + 24], "little")
             sections.append((va, raw_size, raw_ptr))
 
         def rva_to_off(rva: int) -> int | None:
@@ -281,15 +281,15 @@ def _pe_file_version(path: str) -> str | None:
         def read_dir(off: int) -> list[tuple[int, int, bool]]:
             if off + 16 > len(data):
                 return []
-            named = int.from_bytes(data[off + 12:off + 14], "little")
-            ids = int.from_bytes(data[off + 14:off + 16], "little")
+            named = int.from_bytes(data[off + 12 : off + 14], "little")
+            ids = int.from_bytes(data[off + 14 : off + 16], "little")
             entries = []
             for i in range(named + ids):
                 eoff = off + 16 + i * 8
                 if eoff + 8 > len(data):
                     break
-                name = int.from_bytes(data[eoff:eoff + 4], "little")
-                target = int.from_bytes(data[eoff + 4:eoff + 8], "little")
+                name = int.from_bytes(data[eoff : eoff + 4], "little")
+                target = int.from_bytes(data[eoff + 4 : eoff + 8], "little")
                 entries.append((name, target & 0x7FFFFFFF, bool(target & 0x80000000)))
             return entries
 
@@ -308,7 +308,7 @@ def _pe_file_version(path: str) -> str | None:
                 entry_off = rva_to_off(target)
                 if entry_off is None or entry_off + 8 > len(data):
                     continue
-                data_rva = int.from_bytes(data[entry_off:entry_off + 4], "little")
+                data_rva = int.from_bytes(data[entry_off : entry_off + 4], "little")
                 return rva_to_off(data_rva)
             return None
 
@@ -324,14 +324,14 @@ def _pe_file_version(path: str) -> str | None:
         blob_off = resolve_data(name_off)
         if blob_off is None or blob_off + 58 > len(data):
             return None
-        key = data[blob_off + 6:blob_off + 38].decode("utf-16-le", errors="ignore")
+        key = data[blob_off + 6 : blob_off + 38].decode("utf-16-le", errors="ignore")
         if "VS_VERSION_INFO" not in key:
             return None
         # VS_FIXEDFILEINFO follows the key, DWORD-aligned relative to
         # the start of the VS_VERSION_INFO structure.
         val_off = blob_off + 6 + 32
         val_off += (4 - ((val_off - blob_off) % 4)) % 4
-        fixed = data[val_off:val_off + 52]
+        fixed = data[val_off : val_off + 52]
         if len(fixed) < 52:
             return None
         if int.from_bytes(fixed[0:4], "little") != 0xFEEF04BD:
@@ -457,7 +457,11 @@ def discover_terminals(
 
 
 CONNECTION_STATES = (
-    "DISCONNECTED", "CONNECTING", "CONNECTED", "TERMINAL_ERROR", "AUTH_ERROR",
+    "DISCONNECTED",
+    "CONNECTING",
+    "CONNECTED",
+    "TERMINAL_ERROR",
+    "AUTH_ERROR",
 )
 
 
@@ -473,7 +477,9 @@ class CallDiagnostic:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "ts": self.ts, "op": self.op, "ok": self.ok,
+            "ts": self.ts,
+            "op": self.op,
+            "ok": self.ok,
             "duration_ms": round(self.duration_ms, 3),
             "mt5_error_code": self.mt5_error_code,
             "mt5_error_message": self.mt5_error_message,
@@ -560,15 +566,14 @@ class Mt5Driver:
         timeout: float = 60.0,
     ) -> Any:
         """Execute job(mt5) on the worker thread; record diagnostics + metrics."""
-        name = op or getattr(job, "__name__", "unnamed_job")
+        name: str = op or str(getattr(job, "__name__", "unnamed_job"))
         fut: Future = Future()
         self._jobs.put((job, fut))
         t0 = time.perf_counter()
         try:
             result = fut.result(timeout=timeout)
         except Exception as exc:
-            self._record(name, False, (time.perf_counter() - t0) * 1000.0,
-                         context=context, error=str(exc))
+            self._record(name, False, (time.perf_counter() - t0) * 1000.0, context=context, error=str(exc))
             raise
         duration_ms = (time.perf_counter() - t0) * 1000.0
         self._record(name, True, duration_ms, context=context)
@@ -598,11 +603,14 @@ class Mt5Driver:
                 )
             )
             if len(self._ring) > self._ring_max:
-                del self._ring[:-self._ring_max]
+                del self._ring[: -self._ring_max]
         if not ok:
             logger.warning(
                 "[MT5_CALL] op={} ok=False duration_ms={:.1f} error={} context={}",
-                op, duration_ms, error, context or {},
+                op,
+                duration_ms,
+                error,
+                context or {},
             )
 
     def _last_error_code(self) -> Any:
@@ -638,7 +646,8 @@ class Mt5Driver:
             raise BridgeError(
                 ErrorCode.NOT_CONNECTED,
                 f"MT5 adapter is not connected (state={self._state}"
-                + (f": {self._state_detail}" if self._state_detail else "") + ")",
+                + (f": {self._state_detail}" if self._state_detail else "")
+                + ")",
             )
 
     def connection_state_dict(self) -> dict[str, Any]:
@@ -667,7 +676,9 @@ class Mt5Driver:
     def connect(self) -> dict[str, Any]:
         """Resilient connect (runs on the worker thread). Returns a summary."""
         s = self.settings
-        summary = self.run(self._connect_job, op="initialize", timeout=max(60.0, s.mt5_timeout_ms / 1000.0 * s.mt5_retries + 30))
+        summary = self.run(
+            self._connect_job, op="initialize", timeout=max(60.0, s.mt5_timeout_ms / 1000.0 * s.mt5_retries + 30)
+        )
         return summary
 
     def _connect_job(self, mt5: Any) -> dict[str, Any]:
@@ -692,7 +703,10 @@ class Mt5Driver:
                 backoff_ms = 250 * attempt
                 logger.warning(
                     "[MT5_CONNECT] event=RETRY attempt={}/{} retcode={} backoff_ms={}",
-                    attempt, s.mt5_retries, last_err, backoff_ms,
+                    attempt,
+                    s.mt5_retries,
+                    last_err,
+                    backoff_ms,
                 )
                 self._set_state("CONNECTING", f"retry {attempt}/{s.mt5_retries} (retcode {last_err})")
                 time.sleep(backoff_ms / 1000.0)
@@ -764,7 +778,8 @@ class Mt5Driver:
         self._detect_broker_offset(mt5)
         logger.info(
             "Successfully connected to MT5 terminal process (pkg={} terminal={}).",
-            pkg_ver, term_ver,
+            pkg_ver,
+            term_ver,
         )
         return {
             "ok": True,
@@ -804,7 +819,8 @@ class Mt5Driver:
             if offset != self.settings.broker_utc_offset_minutes:
                 logger.info(
                     "[MT5] broker UTC offset detected: {} minutes (config had {})",
-                    offset, self.settings.broker_utc_offset_minutes,
+                    offset,
+                    self.settings.broker_utc_offset_minutes,
                 )
                 self.settings.broker_utc_offset_minutes = offset
         except Exception as exc:  # noqa: BLE001

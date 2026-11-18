@@ -145,9 +145,7 @@ def parse_task(frame: Any) -> TaskEnvelope:
         params=params,
         issued_at=str(frame["issued_at"]),
         expires_at=str(frame["expires_at"]),
-        idempotency_key=str(frame["idempotency_key"])
-        if frame.get("idempotency_key") is not None
-        else None,
+        idempotency_key=str(frame["idempotency_key"]) if frame.get("idempotency_key") is not None else None,
         resource_limits=limits,
         device_id=str(frame["device_id"]) if frame.get("device_id") is not None else None,
         account_id=str(frame["account_id"]) if frame.get("account_id") is not None else None,
@@ -167,10 +165,7 @@ class TaskExecution:
 
     def transition(self, new_state: TaskState) -> None:
         if new_state not in LEGAL_TRANSITIONS[self.state]:
-            raise ValueError(
-                f"illegal task transition {self.state.value} → {new_state.value} "
-                f"for task {self.task_id}"
-            )
+            raise ValueError(f"illegal task transition {self.state.value} → {new_state.value} for task {self.task_id}")
         self.state = new_state
         self.history.append((new_state.value, datetime.now(UTC).isoformat()))
 

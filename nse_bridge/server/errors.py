@@ -93,10 +93,7 @@ class ServerError(Exception):
         return self.code in FATAL_AUTH_CODES
 
     def __repr__(self) -> str:  # pragma: no cover — debugging aid
-        return (
-            f"ServerError(code={self.code.value!r}, http_status={self.http_status}, "
-            f"retryable={self.retryable})"
-        )
+        return f"ServerError(code={self.code.value!r}, http_status={self.http_status}, retryable={self.retryable})"
 
 
 def _extract_code(payload: Any) -> str | None:
@@ -121,9 +118,7 @@ def _extract_message(payload: Any) -> str | None:
     return None
 
 
-def parse_error_response(
-    http_status: int, payload: Any, *, retry_after_s: float | None = None
-) -> ServerError:
+def parse_error_response(http_status: int, payload: Any, *, retry_after_s: float | None = None) -> ServerError:
     """Build the :class:`ServerError` for an HTTP error response (§3.6)."""
     raw_code = _extract_code(payload)
     message = _extract_message(payload) or f"server returned HTTP {http_status}"
@@ -161,8 +156,7 @@ def parse_error_response(
         if code not in _KNOWN_AUTH_CODES:
             return ServerError(
                 ServerErrorCode.MALFORMED_RESPONSE,
-                f"malformed error response (code {raw_code!r} is not a "
-                f"{http_status} code)",
+                f"malformed error response (code {raw_code!r} is not a {http_status} code)",
                 http_status=http_status,
             )
         return ServerError(code, message, http_status=http_status)

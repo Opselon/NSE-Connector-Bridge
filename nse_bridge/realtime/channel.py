@@ -93,8 +93,9 @@ BACKOFF_FACTOR = 2.0  # §5.4: doubling
 JITTER_MAX_S = 0.1  # §5.4: jitter of subsec_nanos % 100 ms
 
 
-def backoff_delay(attempt: int, *, initial_s: float = BACKOFF_INITIAL_S,
-                  cap_s: float = BACKOFF_CAP_S, factor: float = BACKOFF_FACTOR) -> float:
+def backoff_delay(
+    attempt: int, *, initial_s: float = BACKOFF_INITIAL_S, cap_s: float = BACKOFF_CAP_S, factor: float = BACKOFF_FACTOR
+) -> float:
     """§5.4 reconnect backoff: initial, doubling, capped at 30 s.
 
     ``attempt`` counts consecutive failed sessions (0 = first retry).
@@ -152,8 +153,7 @@ class _OutboundQueue:
             if not self._charts.empty():
                 dropped = self._charts.get_nowait()
                 logger.warning(
-                    "[CHANNEL] outbound full — dropped oldest chart frame "
-                    "(symbol={}) for a newer one",
+                    "[CHANNEL] outbound full — dropped oldest chart frame (symbol={}) for a newer one",
                     dropped.get("symbol"),
                 )
                 self._charts.put_nowait(frame)
@@ -184,9 +184,7 @@ class _OutboundQueue:
         get_result = asyncio.create_task(self._results.get())
         get_chart = asyncio.create_task(self._charts.get())
         try:
-            done, _ = await asyncio.wait(
-                {get_result, get_chart}, return_when=asyncio.FIRST_COMPLETED
-            )
+            done, _ = await asyncio.wait({get_result, get_chart}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             for task in (get_result, get_chart):
                 if not task.done():
@@ -222,9 +220,7 @@ class ServerChannel:
         # in-memory-only queue loses acknowledged results on a Bridge
         # restart mid-operation. The store file is created lazily on
         # the first persisted result; construction only reads it.
-        self._durable_store = DurableResultStore(
-            ctx.settings.data_dir / "pending_results.jsonl"
-        )
+        self._durable_store = DurableResultStore(ctx.settings.data_dir / "pending_results.jsonl")
         self._pending_results: BoundedPendingQueue[dict[str, Any]] = DurableResultQueue(
             32, "channel/results", self._durable_store
         )
@@ -311,7 +307,8 @@ class ServerChannel:
                 entitlements=lambda: rest.entitlements,
             )
             self._executor = CommandExecutor(
-                self.ctx, validator,
+                self.ctx,
+                validator,
                 results_queue=self._pending_results,
                 user_id=rest.user_id,
                 telemetry=getattr(self.ctx, "telemetry", None),
@@ -342,9 +339,7 @@ class ServerChannel:
         """Start the REST heartbeat loop (§3.4), if not already running."""
         if self._rest_heartbeat_task is not None and not self._rest_heartbeat_task.done():
             return
-        self._rest_heartbeat_task = asyncio.create_task(
-            self._rest_heartbeat_loop(), name="nse-rest-heartbeat"
-        )
+        self._rest_heartbeat_task = asyncio.create_task(self._rest_heartbeat_loop(), name="nse-rest-heartbeat")
 
     async def _rest_heartbeat_loop(self) -> None:
         """REST heartbeat (§3.4) as the keep-alive when the WS is down.
@@ -366,10 +361,7 @@ class ServerChannel:
                 pass
             if self._stop.is_set():
                 return
-            if (
-                self._enrolment is not None
-                and self._enrolment.to_dict()["state"] in ("not_configured", "failed_auth")
-            ):
+            if self._enrolment is not None and self._enrolment.to_dict()["state"] in ("not_configured", "failed_auth"):
                 continue
             rest = self._rest
             if rest is None or not self.ctx.settings.server_token:
@@ -429,9 +421,8 @@ class ServerChannel:
                     state = self.ctx.server_channel_state
                     state["connected"] = False
                     status = self._enrolment.to_dict()
-                    state["last_error"] = (
-                        f"enrolment {status['state']}"
-                        + (f": {status['last_error']}" if status.get("last_error") else "")
+                    state["last_error"] = f"enrolment {status['state']}" + (
+                        f": {status['last_error']}" if status.get("last_error") else ""
                     )
                     logger.error("[CHANNEL] not connecting — {}", state["last_error"])
                     return
@@ -459,7 +450,8 @@ class ServerChannel:
                     telemetry = self._telemetry()
                     if telemetry is not None:
                         telemetry.info(
-                            "channel.connected", component="realtime.channel",
+                            "channel.connected",
+                            component="realtime.channel",
                             details={"reconnect": attempt > 0, "attempt": attempt},
                         )
                     got_frame = await self._session(ws)
@@ -477,7 +469,8 @@ class ServerChannel:
                 telemetry = self._telemetry()
                 if telemetry is not None:
                     telemetry.warn(
-                        "channel.disconnected", component="realtime.channel",
+                        "channel.disconnected",
+                        component="realtime.channel",
                         error_code=type(exc).__name__,
                         details={"reconnects": state["reconnects"]},
                     )
@@ -533,8 +526,10 @@ class ServerChannel:
             )
             got_frame = getattr(receiver, "_got_frame", False)
             for task in done:
-                if task is receiver and task.exception() is not None:
-                    raise task.exception()
+                if task is receiver:
+                    exc = task.exception()
+                    if exc is not None:
+                        raise exc
         finally:
             for task in (receiver, heartbeat, sender, chart_poll):
                 task.cancel()
@@ -557,7 +552,9 @@ class ServerChannel:
                 await self._handle_server_message(raw)
         finally:
             # Stash the flag on the task for _session to read.
-            asyncio.current_task()._got_frame = got_frame  # type: ignore[attr-defined]
+            current = asyncio.current_task()
+            if current is not None:
+                current._got_frame = got_frame  # type: ignore[attr-defined]
 
     async def _heartbeat_loop(self, ws: Any) -> None:
         """Send the 15 s app heartbeat (§5.3); detect a dead session
@@ -573,7 +570,8 @@ class ServerChannel:
                 telemetry = self._telemetry()
                 if telemetry is not None:
                     telemetry.warn(
-                        "channel.session_dead", component="realtime.channel",
+                        "channel.session_dead",
+                        component="realtime.channel",
                         error_code="heartbeat_timeout",
                         details={"dead_after_s": self.dead_after_s},
                     )
@@ -640,12 +638,20 @@ class ServerChannel:
         try:
             candles = await run_in_threadpool(
                 self._chart._fetch_with_prerequisite,
-                sub.symbol, sub.timeframe, 100, None, None,
+                sub.symbol,
+                sub.timeframe,
+                100,
+                None,
+                None,
             )
         except ChartError as exc:
             frame = build_chart_error_frame(
-                request_id=None, subscription_id=sub.subscription_id, symbol=sub.symbol,
-                timeframe=sub.timeframe, code=exc.code, message=exc.message,
+                request_id=None,
+                subscription_id=sub.subscription_id,
+                symbol=sub.symbol,
+                timeframe=sub.timeframe,
+                code=exc.code,
+                message=exc.message,
             )
             self._enqueue_chart(frame)
             return
@@ -655,15 +661,21 @@ class ServerChannel:
         if not self._chart.rate_limiter.allow():
             self._enqueue_chart(
                 build_chart_error_frame(
-                    request_id=None, subscription_id=sub.subscription_id, symbol=sub.symbol,
-                    timeframe=sub.timeframe, code="rate_limited",
+                    request_id=None,
+                    subscription_id=sub.subscription_id,
+                    symbol=sub.symbol,
+                    timeframe=sub.timeframe,
+                    code="rate_limited",
                     message="chart frame budget (60/min) exceeded (§17.1.3)",
                 )
             )
             return
         data = build_chart_data_frame(
-            request_id=None, subscription_id=sub.subscription_id, symbol=sub.symbol,
-            timeframe=sub.timeframe, candles=delta,
+            request_id=None,
+            subscription_id=sub.subscription_id,
+            symbol=sub.symbol,
+            timeframe=sub.timeframe,
+            candles=delta,
             broker_time=delta[-1]["time"],
         )
         self._enqueue_chart(data)
@@ -675,8 +687,10 @@ class ServerChannel:
             if ticks and self._chart.rate_limiter.allow():
                 self._enqueue_chart(
                     build_chart_tick_frame(
-                        subscription_id=sub.subscription_id, request_id=None,
-                        symbol=sub.symbol, ticks=ticks,
+                        subscription_id=sub.subscription_id,
+                        request_id=None,
+                        symbol=sub.symbol,
+                        ticks=ticks,
                         broker_time=ticks[-1]["time_ms"],
                     )
                 )
@@ -735,13 +749,19 @@ class ServerChannel:
                 timeout=CHART_REQUEST_TIMEOUT_S,
             )
         except TimeoutError:
-            logger.warning("[CHANNEL] chart.request {} timed out after {}s (§17.1.3)",
-                           msg.get("request_id"), CHART_REQUEST_TIMEOUT_S)
+            logger.warning(
+                "[CHANNEL] chart.request {} timed out after {}s (§17.1.3)",
+                msg.get("request_id"),
+                CHART_REQUEST_TIMEOUT_S,
+            )
             frames = [
                 build_chart_error_frame(
-                    request_id=msg.get("request_id"), subscription_id=None,
-                    symbol=str(msg.get("symbol") or ""), timeframe=str(msg.get("timeframe") or ""),
-                    code="chart_timeout", message="MT5 chart call exceeded the 30 s timeout",
+                    request_id=msg.get("request_id"),
+                    subscription_id=None,
+                    symbol=str(msg.get("symbol") or ""),
+                    timeframe=str(msg.get("timeframe") or ""),
+                    code="chart_timeout",
+                    message="MT5 chart call exceeded the 30 s timeout",
                 )
             ]
         for frame in frames:

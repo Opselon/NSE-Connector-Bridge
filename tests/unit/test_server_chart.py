@@ -29,7 +29,10 @@ def _candles(n=3):
     return [
         {
             "time": f"2026-11-16T00:{15 * i:02d}:00",
-            "open": 1.10, "high": 1.11, "low": 1.09, "close": 1.105,
+            "open": 1.10,
+            "high": 1.11,
+            "low": 1.09,
+            "close": 1.105,
             "tick_volume": 100 + i,
         }
         for i in range(n)
@@ -92,10 +95,15 @@ def test_chart_timeframes_m1_to_mn1():
 def test_handle_request_returns_contract_chart_data():
     service = _service()
     request_id = new_uuid7_str()
-    frames = service.handle_request({
-        "type": "chart.request", "request_id": request_id,
-        "symbol": "EURUSD", "timeframe": "M15", "count": 3,
-    })
+    frames = service.handle_request(
+        {
+            "type": "chart.request",
+            "request_id": request_id,
+            "symbol": "EURUSD",
+            "timeframe": "M15",
+            "count": 3,
+        }
+    )
     assert len(frames) == 1
     frame = frames[0]
     assert frame["type"] == "chart.data"
@@ -112,8 +120,7 @@ def test_handle_request_returns_contract_chart_data():
 def test_handle_request_duplicate_id_answered_from_cache():
     service = _service()
     request_id = new_uuid7_str()
-    frame = {"type": "chart.request", "request_id": request_id,
-             "symbol": "EURUSD", "timeframe": "M15", "count": 3}
+    frame = {"type": "chart.request", "request_id": request_id, "symbol": "EURUSD", "timeframe": "M15", "count": 3}
     service.handle_request(frame)
     service.handle_request(frame)
     assert service._calls["candles"] == 1  # never a second MT5 call (§17.1.3)
@@ -122,10 +129,15 @@ def test_handle_request_duplicate_id_answered_from_cache():
 @pytest.mark.unit
 def test_handle_request_unknown_symbol_error_frame():
     service = _service()
-    frames = service.handle_request({
-        "type": "chart.request", "request_id": new_uuid7_str(),
-        "symbol": "UNKNOWN", "timeframe": "M15", "count": 3,
-    })
+    frames = service.handle_request(
+        {
+            "type": "chart.request",
+            "request_id": new_uuid7_str(),
+            "symbol": "UNKNOWN",
+            "timeframe": "M15",
+            "count": 3,
+        }
+    )
     assert frames[0]["status"] == "error"
     assert frames[0]["error_code"] == "symbol_not_found"
     assert frames[0]["complete"] is False
@@ -134,10 +146,16 @@ def test_handle_request_unknown_symbol_error_frame():
 @pytest.mark.unit
 def test_handle_request_with_ticks_returns_tick_frame():
     service = _service()
-    frames = service.handle_request({
-        "type": "chart.request", "request_id": new_uuid7_str(),
-        "symbol": "EURUSD", "timeframe": "M15", "count": 3, "include_ticks": True,
-    })
+    frames = service.handle_request(
+        {
+            "type": "chart.request",
+            "request_id": new_uuid7_str(),
+            "symbol": "EURUSD",
+            "timeframe": "M15",
+            "count": 3,
+            "include_ticks": True,
+        }
+    )
     assert len(frames) == 2
     assert frames[1]["type"] == "chart.tick"
     assert frames[1]["ticks"][0]["bid"] == 1.10042
@@ -147,14 +165,25 @@ def test_handle_request_with_ticks_returns_tick_frame():
 def test_subscribe_limit_20_then_subscription_limit_error():
     service = _service()
     for _ in range(CHART_MAX_SUBSCRIPTIONS):
-        assert service.handle_subscribe({
-            "type": "chart.subscribe", "subscription_id": new_uuid7_str(),
-            "symbol": "EURUSD", "timeframe": "M15",
-        }) is None
-    error = service.handle_subscribe({
-        "type": "chart.subscribe", "subscription_id": new_uuid7_str(),
-        "symbol": "EURUSD", "timeframe": "M15",
-    })
+        assert (
+            service.handle_subscribe(
+                {
+                    "type": "chart.subscribe",
+                    "subscription_id": new_uuid7_str(),
+                    "symbol": "EURUSD",
+                    "timeframe": "M15",
+                }
+            )
+            is None
+        )
+    error = service.handle_subscribe(
+        {
+            "type": "chart.subscribe",
+            "subscription_id": new_uuid7_str(),
+            "symbol": "EURUSD",
+            "timeframe": "M15",
+        }
+    )
     assert error is not None
     assert error["error_code"] == "subscription_limit"
 
@@ -162,18 +191,32 @@ def test_subscribe_limit_20_then_subscription_limit_error():
 @pytest.mark.unit
 def test_subscribe_poll_interval_clamped_5_to_3600_default_15():
     service = _service()
-    service.handle_subscribe({
-        "type": "chart.subscribe", "subscription_id": "s-low",
-        "symbol": "EURUSD", "timeframe": "M15", "poll_interval_s": 1,
-    })
-    service.handle_subscribe({
-        "type": "chart.subscribe", "subscription_id": "s-high",
-        "symbol": "EURUSD", "timeframe": "M15", "poll_interval_s": 9999,
-    })
-    service.handle_subscribe({
-        "type": "chart.subscribe", "subscription_id": "s-default",
-        "symbol": "EURUSD", "timeframe": "M15",
-    })
+    service.handle_subscribe(
+        {
+            "type": "chart.subscribe",
+            "subscription_id": "s-low",
+            "symbol": "EURUSD",
+            "timeframe": "M15",
+            "poll_interval_s": 1,
+        }
+    )
+    service.handle_subscribe(
+        {
+            "type": "chart.subscribe",
+            "subscription_id": "s-high",
+            "symbol": "EURUSD",
+            "timeframe": "M15",
+            "poll_interval_s": 9999,
+        }
+    )
+    service.handle_subscribe(
+        {
+            "type": "chart.subscribe",
+            "subscription_id": "s-default",
+            "symbol": "EURUSD",
+            "timeframe": "M15",
+        }
+    )
     subs = service._subscriptions
     assert subs["s-low"].poll_interval_s == 5
     assert subs["s-high"].poll_interval_s == 3600
@@ -190,10 +233,14 @@ def test_unsubscribe_unknown_id_is_noop():
 @pytest.mark.unit
 def test_build_delta_only_new_and_forming_candles():
     service = _service()
-    service.handle_subscribe({
-        "type": "chart.subscribe", "subscription_id": "s1",
-        "symbol": "EURUSD", "timeframe": "M15",
-    })
+    service.handle_subscribe(
+        {
+            "type": "chart.subscribe",
+            "subscription_id": "s1",
+            "symbol": "EURUSD",
+            "timeframe": "M15",
+        }
+    )
     sub = service._subscriptions["s1"]
     first = service.build_delta(sub, _candles(3))
     assert len(first) == 3
@@ -202,10 +249,16 @@ def test_build_delta_only_new_and_forming_candles():
     assert len(again) == 1
     assert again[0]["time"] == "2026-11-16T00:30:00"
     # A new candle arrives: it plus the forming one are sent.
-    extended = _candles(3) + [{
-        "time": "2026-11-16T00:45:00", "open": 1.10, "high": 1.11,
-        "low": 1.09, "close": 1.105, "tick_volume": 103,
-    }]
+    extended = _candles(3) + [
+        {
+            "time": "2026-11-16T00:45:00",
+            "open": 1.10,
+            "high": 1.11,
+            "low": 1.09,
+            "close": 1.105,
+            "tick_volume": 103,
+        }
+    ]
     third = service.build_delta(sub, extended)
     assert [c["time"] for c in third] == ["2026-11-16T00:30:00", "2026-11-16T00:45:00"]
 
@@ -222,8 +275,12 @@ def test_rate_limiter_60_per_minute():
 @pytest.mark.unit
 def test_chart_error_frame_shape():
     frame = build_chart_error_frame(
-        request_id="r1", subscription_id=None, symbol="EURUSD", timeframe="M15",
-        code="market_closed", message="market closed",
+        request_id="r1",
+        subscription_id=None,
+        symbol="EURUSD",
+        timeframe="M15",
+        code="market_closed",
+        message="market closed",
     )
     assert frame["status"] == "error"
     assert frame["error_code"] == "market_closed"
@@ -240,13 +297,19 @@ def test_retry_uses_a_new_request_id():
 @pytest.mark.unit
 def test_chart_data_frame_builder_shape():
     frame = build_chart_data_frame(
-        request_id="r1", subscription_id=None, symbol="EURUSD", timeframe="M15",
-        candles=_candles(1), broker_time="2026-11-16T00:00:00",
+        request_id="r1",
+        subscription_id=None,
+        symbol="EURUSD",
+        timeframe="M15",
+        candles=_candles(1),
+        broker_time="2026-11-16T00:00:00",
     )
     assert frame["type"] == "chart.data"
     assert frame["candles"][0]["tick_volume"] == 100
     tick = build_chart_tick_frame(
-        subscription_id="s1", request_id=None, symbol="EURUSD",
+        subscription_id="s1",
+        request_id=None,
+        symbol="EURUSD",
         ticks=[{"time_ms": "2026-11-16T19:53:00.034", "bid": 1.1, "ask": 1.11}],
         broker_time="2026-11-16T19:53:00.034",
     )

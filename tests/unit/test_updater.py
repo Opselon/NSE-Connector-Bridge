@@ -59,9 +59,7 @@ def _make_keypair():
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
     priv = Ed25519PrivateKey.generate()
-    pub_b64 = base64.b64encode(
-        priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    ).decode()
+    pub_b64 = base64.b64encode(priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
     return priv, pub_b64
 
 
@@ -76,8 +74,7 @@ def _public_key(pub_b64):
     return Ed25519PublicKey.from_public_bytes(base64.b64decode(pub_b64))
 
 
-def _release(priv, data, *, version="1.2.0", min_version="1.0.0",
-             signature=True, sha=True, size=None):
+def _release(priv, data, *, version="1.2.0", min_version="1.0.0", signature=True, sha=True, size=None):
     return ReleaseInfo(
         version=version,
         download_url="https://example.invalid/bridge-1.2.0.exe",
@@ -177,9 +174,7 @@ def test_verify_artifact_missing_sha_refuses(keypair):
 def test_verify_artifact_size_mismatch_refuses(keypair):
     priv, pub_b64 = keypair
     with pytest.raises(UpdateError) as excinfo:
-        verify_artifact(
-            ARTIFACT, _release(priv, ARTIFACT, size=len(ARTIFACT) + 1), _public_key(pub_b64)
-        )
+        verify_artifact(ARTIFACT, _release(priv, ARTIFACT, size=len(ARTIFACT) + 1), _public_key(pub_b64))
     assert excinfo.value.code == "SIZE_MISMATCH"
 
 
@@ -216,9 +211,7 @@ async def test_check_reports_update_available(settings, keypair):
 
 async def test_check_up_to_date(settings, keypair):
     priv, _ = keypair
-    updater = _updater(
-        settings, FakeRestClient(release=_release(priv, ARTIFACT, version=BRIDGE_VERSION))
-    )
+    updater = _updater(settings, FakeRestClient(release=_release(priv, ARTIFACT, version=BRIDGE_VERSION)))
     status = await updater.check()
     assert status["state"] == "up_to_date"
     assert status["update_available"] is False
@@ -248,11 +241,7 @@ async def test_check_not_configured_without_token(settings, keypair):
 async def test_check_failed_on_server_error(settings):
     updater = _updater(
         settings,
-        FakeRestClient(
-            release_error=ServerError(
-                ServerErrorCode.SERVER_UNAVAILABLE, "server down", http_status=503
-            )
-        ),
+        FakeRestClient(release_error=ServerError(ServerErrorCode.SERVER_UNAVAILABLE, "server down", http_status=503)),
     )
     status = await updater.check()
     assert status["state"] == "error"
@@ -315,9 +304,7 @@ async def test_download_refuses_bad_sha(settings, keypair):
     priv, _ = keypair
     bad = _release(priv, ARTIFACT)
     bad.sha256 = "00" * 32
-    updater = _updater(
-        settings, FakeRestClient(release=bad), transport=_transport_for(ARTIFACT)
-    )
+    updater = _updater(settings, FakeRestClient(release=bad), transport=_transport_for(ARTIFACT))
     status = await updater.download()
     assert status["error"]["code"] == "SHA256_MISMATCH"
     assert _staged_files(settings) == []
@@ -344,9 +331,7 @@ async def test_download_refuses_min_version_without_downloading(settings, keypai
 
     updater = _updater(
         settings,
-        FakeRestClient(
-            release=_release(priv, ARTIFACT, version="1.2.0", min_version="9.9.9")
-        ),
+        FakeRestClient(release=_release(priv, ARTIFACT, version="1.2.0", min_version="9.9.9")),
         transport=httpx.MockTransport(handler),
     )
     status = await updater.download()
@@ -388,10 +373,22 @@ def test_apply_script_replaces_dummy_target(settings, keypair, tmp_path):
     script = updater.write_apply_script()
     assert APPLY_SCRIPT_TEMPLATE in script.read_text()
     result = subprocess.run(
-        [sys.executable, str(script), "--staged", str(staged), "--target", str(target),
-         "--parent-pid", str(proc.pid),
-         "--sha256", hashlib.sha256(ARTIFACT).hexdigest()],
-        capture_output=True, text=True, timeout=60, check=False,
+        [
+            sys.executable,
+            str(script),
+            "--staged",
+            str(staged),
+            "--target",
+            str(target),
+            "--parent-pid",
+            str(proc.pid),
+            "--sha256",
+            hashlib.sha256(ARTIFACT).hexdigest(),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     assert target.read_bytes() == ARTIFACT
@@ -414,9 +411,22 @@ def test_apply_script_refuses_wrong_sha(settings, keypair, tmp_path):
     proc.wait()
     script = updater.write_apply_script()
     result = subprocess.run(
-        [sys.executable, str(script), "--staged", str(staged), "--target", str(target),
-         "--parent-pid", str(proc.pid), "--sha256", "00" * 32],
-        capture_output=True, text=True, timeout=60, check=False,
+        [
+            sys.executable,
+            str(script),
+            "--staged",
+            str(staged),
+            "--target",
+            str(target),
+            "--parent-pid",
+            str(proc.pid),
+            "--sha256",
+            "00" * 32,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
     )
     assert result.returncode != 0
     assert target.read_bytes() == b"old-bytes"  # untouched
@@ -442,13 +452,17 @@ def test_status_reports_persisted_staged_update(settings, keypair):
     staging.mkdir(parents=True)
     staged = staging / "nse-bridge-1.2.0.exe"
     staged.write_bytes(ARTIFACT)
-    (staging / "update-state.json").write_text(json.dumps({
-        "version": "1.2.0",
-        "staged_path": str(staged),
-        "sha256": hashlib.sha256(ARTIFACT).hexdigest(),
-        "size_bytes": len(ARTIFACT),
-        "signature_verified": True,
-    }))
+    (staging / "update-state.json").write_text(
+        json.dumps(
+            {
+                "version": "1.2.0",
+                "staged_path": str(staged),
+                "sha256": hashlib.sha256(ARTIFACT).hexdigest(),
+                "size_bytes": len(ARTIFACT),
+                "signature_verified": True,
+            }
+        )
+    )
     updater = Updater(settings, rest_client_getter=lambda: None)
     status = updater.status()
     assert status["state"] == "staged"
@@ -462,9 +476,7 @@ def test_status_reports_persisted_staged_update(settings, keypair):
 @pytest.fixture
 def client(tmp_path, keypair):
     _, pub_b64 = keypair
-    settings = BridgeSettings(
-        _env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs")
-    )
+    settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
     settings.update_public_key = pub_b64
     settings.server_token = "sk-test-secret-abcdef123456"
     driver = Mt5Driver(settings)
@@ -483,9 +495,7 @@ def _wire_updater(client, keypair, *, transport):
     http, ctx, app, settings = client
     priv, _ = keypair
     ctx.rest_client = FakeRestClient(release=_release(priv, ARTIFACT))
-    app.state.updater = Updater(
-        settings, rest_client_getter=lambda: ctx.rest_client, download_transport=transport
-    )
+    app.state.updater = Updater(settings, rest_client_getter=lambda: ctx.rest_client, download_transport=transport)
     return http, ctx, settings
 
 

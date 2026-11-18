@@ -8,9 +8,9 @@
   wheel are Windows-only). Linux builds/runs the pure-Python parts
   (tests, mock server, OpenAPI export) but cannot run MT5 tests.
 - Pinned dependencies: `requirements.txt` (runtime + build) and
-  `requirements-dev.txt` (adds pytest, pytest-asyncio, ruff).
-  `pyproject.toml` carries the same pins as the `[project]`
-  dependencies.
+  `requirements-dev.txt` (adds pytest, pytest-asyncio, ruff, mypy,
+  bandit, pip-audit). `pyproject.toml` carries the same pins as the
+  `[project]` dependencies.
 
 ## 2. Local development
 
@@ -19,7 +19,11 @@ py -3.13 -m venv .venv
 .venv/Scripts/python -m pip install -r requirements-dev.txt
 
 # Lint + tests (the CI Linux gate, runnable on Linux too)
-ruff check tests/ scripts/
+ruff check .
+ruff format --check .
+python -m mypy nse_bridge
+python -m bandit -r nse_bridge --skip B101,B110,B311,B404 -q
+python -m pip_audit -r requirements.txt -r requirements-dev.txt
 python -m pytest tests/unit tests/integration -q
 
 # Run the bridge (dev)
@@ -117,8 +121,8 @@ Three jobs, chained: `test-linux` → `build-windows` → `release`
 
 | Job | Runs | Steps |
 |---|---|---|
-| `test-linux` | ubuntu-latest | `ruff check tests/ scripts/` · `write_version_info.py --check` · OpenAPI freshness (`export_openapi.py` + `diff`) · `pytest tests/unit tests/integration -q` · marker-count visibility |
-| `build-windows` | windows-latest | same lint + same unit/mock-integration suites on Windows (proves Windows imports work) · `pyinstaller bridge.spec` · `dist/NSE-MT5-Bridge.exe --help` smoke check · upload artifact |
+| `test-linux` | ubuntu-latest | `ruff check .` · `ruff format --check .` · `mypy nse_bridge` · `bandit` + `pip-audit` · `write_version_info.py --check` · OpenAPI freshness (`export_openapi.py` + `diff`) · `pytest tests/unit tests/integration -q --junitxml=test-results.xml -rf` (junit uploaded on failure) · marker-count visibility |
+| `build-windows` | windows-latest | same lint + types + security + same unit/mock-integration suites on Windows (proves Windows imports work; junit uploaded on failure) · `pyinstaller bridge.spec` · `dist/NSE-MT5-Bridge.exe --help` smoke check · upload artifact |
 | `release` | windows-latest, tags `v*` only | download exe · `write_release_manifest.py` (SHA-256 + manifest) · attach exe + `.sha256` + manifest to the GitHub release (`prerelease` iff the tag contains `-`, generated notes) |
 
 The real-MT5 e2e suite is NEVER run in CI: GitHub-hosted runners
@@ -134,11 +138,22 @@ manual dispatch.
 - **ARM64 unsupported** (see docs/COMPATIBILITY.md): x64 only; no
   ARM64 build is published, and the unsupported path must produce a
   clear message, not a broken binary.
-- **`ruff check .` is not the gate yet:** 15 pre-existing findings
-  remain in `nse_bridge/engine`, `nse_bridge/mt5`,
-  `nse_bridge/timeutil`, `nse_bridge/main.py` (see docs/RELEASE.md).
-  The gate lints `tests/ scripts/`, which is clean. Cleaning the
-  remaining 15 is tracked follow-up work, not a Phase 6 change.
+- **Lint / format / types / security are whole-repo gates now (A1,
+  spec §20):** `ruff check .` (the 15 pre-existing findings are
+  fixed, not waived), `ruff format --check .`, `mypy nse_bridge`
+  (pydantic plugin; see `pyproject.toml`), `bandit -r nse_bridge`
+  and `pip-audit` on both requirement files. Bandit skips four
+  Low-severity rules only (`B101,B110,B311,B404`), each reviewed and
+  documented in `.github/workflows/build.yml`.
+- **Windows CI test failure (3f0950c) is still undiagnosed** — the
+  `build-windows` test step failed with job logs unreachable (403),
+  and no Linux simulation reproduced it. A1 hardened the most
+  Windows-fragile test path (the nested-pytest honesty proof:
+  UTF-8 child output, `TimeoutExpired` becomes a named failure) and
+  made the next failure identifiable: both test steps now emit
+  `--junitxml=test-results.xml -rf` and upload the XML on failure,
+  so the failing test names are visible without log access. The root
+  cause still needs a green-or-red Windows run with the artifact.
 - **The frozen exe itself is only proven by Windows CI.** This Linux
   VM cannot run PyInstaller against the Windows-only dependency set
   (MetaTrader5 wheel, pywebview backends); `bridge.spec` validity on

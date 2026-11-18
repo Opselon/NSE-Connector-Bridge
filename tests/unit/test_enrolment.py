@@ -69,21 +69,32 @@ def _manager(handler, **overrides):
 
 
 def _ok_validate(request: httpx.Request) -> httpx.Response:
-    return httpx.Response(200, json={
-        "valid": True,
-        "user_id": "user-1",
-        "subscription": {"active": True, "plan": "pro"},
-        "entitlements": {
-            "history_sync": True, "ai_coach": False, "position_manager": True,
-            "auto_trade": True, "max_devices": 3, "max_accounts": 2,
+    return httpx.Response(
+        200,
+        json={
+            "valid": True,
+            "user_id": "user-1",
+            "subscription": {"active": True, "plan": "pro"},
+            "entitlements": {
+                "history_sync": True,
+                "ai_coach": False,
+                "position_manager": True,
+                "auto_trade": True,
+                "max_devices": 3,
+                "max_accounts": 2,
+            },
         },
-    })
+    )
 
 
 def _ok_register(request: httpx.Request) -> httpx.Response:
-    return httpx.Response(200, json={
-        "registered": True, "session_expires_at": "2099-01-01T00:00:00Z",
-    })
+    return httpx.Response(
+        200,
+        json={
+            "registered": True,
+            "session_expires_at": "2099-01-01T00:00:00Z",
+        },
+    )
 
 
 @pytest.mark.unit
@@ -368,7 +379,8 @@ async def test_channel_does_not_open_ws_before_registered(monkeypatch):
     settings = _settings()
     ctx = _ctx(settings)
     channel = ServerChannel(
-        ctx, EventBus(),
+        ctx,
+        EventBus(),
         enrolment=_BlockingEnrolment(),
     )
     channel.start()
@@ -400,7 +412,8 @@ async def test_channel_stays_down_on_failed_auth(monkeypatch):
     settings = _settings()
     ctx = _ctx(settings)
     channel = ServerChannel(
-        ctx, EventBus(),
+        ctx,
+        EventBus(),
         enrolment=_FailingEnrolment(),
     )
     channel.start()

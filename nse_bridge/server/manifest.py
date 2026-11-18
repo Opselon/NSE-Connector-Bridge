@@ -80,7 +80,5 @@ def build_manifest(device_id: str, *, driver: Mt5Driver | None = None) -> dict[s
         "device_id": device_id,
         "manifest_hash": manifest_hash(),
         "action_count": len(commands),
-        "actions": [
-            {"name": c.name, "number": c.number, "category": c.category} for c in commands
-        ],
+        "actions": [{"name": c.name, "number": c.number, "category": c.category} for c in commands],
     }

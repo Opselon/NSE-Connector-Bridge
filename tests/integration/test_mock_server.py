@@ -53,11 +53,15 @@ async def test_rest_round_trip_against_mock(mock_server):
         assert registered.registered is True
         assert registered.session_expires_at is not None
 
-        ack = await rest.send_batch({
-            "batch_id": new_uuid7_str(), "kind": "account",
-            "items": {"account": {"login": "12345678901"}, "terminal": {}},
-            "count": 1, "produced_at": "2026-11-18T00:00:00Z",
-        })
+        ack = await rest.send_batch(
+            {
+                "batch_id": new_uuid7_str(),
+                "kind": "account",
+                "items": {"account": {"login": "12345678901"}, "terminal": {}},
+                "count": 1,
+                "produced_at": "2026-11-18T00:00:00Z",
+            }
+        )
         assert ack.accepted is True
         assert len(mock_server.state.batches) == 1
         assert mock_server.state.batches[0]["kind"] == "account"
@@ -74,9 +78,13 @@ async def test_rest_round_trip_against_mock(mock_server):
         assert release.version == "0.2.0"
         assert release.sha256 == "0" * 64
 
-        manifest_ack = await rest.send_manifest({
-            "device_id": "dev-1", "manifest_hash": "abc123", "action_count": 90,
-        })
+        manifest_ack = await rest.send_manifest(
+            {
+                "device_id": "dev-1",
+                "manifest_hash": "abc123",
+                "action_count": 90,
+            }
+        )
         assert manifest_ack["accepted"] is True
         assert mock_server.state.manifests[0]["manifest_hash"] == "abc123"
 
@@ -122,7 +130,8 @@ async def test_ws_channel_demo_command_rejected_wrong_account(mock_server):
         return {"positions": []}
 
     engine = SyncEngine(
-        rest, ctx,
+        rest,
+        ctx,
         account_snapshot=account_snapshot,
         positions_snapshot=positions_snapshot,
         history_orders=history_orders,
@@ -130,16 +139,18 @@ async def test_ws_channel_demo_command_rejected_wrong_account(mock_server):
     )
     chart = ChartService(fetch_candles=lambda *a: [], fetch_ticks=lambda *a: [])
     channel = ServerChannel(
-        ctx, EventBus(), rest_client=rest, sync_engine=engine, chart_service=chart,
+        ctx,
+        EventBus(),
+        rest_client=rest,
+        sync_engine=engine,
+        chart_service=chart,
         dead_after_s=45.0,
     )
     channel.start()
     try:
         # The demo command id is fixed in the mock server.
         demo_id = "01900000-0000-7000-8000-000000000001"
-        result = await asyncio.to_thread(
-            mock_server.state.wait_for_result, demo_id, timeout=10.0
-        )
+        result = await asyncio.to_thread(mock_server.state.wait_for_result, demo_id, timeout=10.0)
         assert result is not None, "mock never received the demo command result"
         assert result["correlation_id"] == demo_id
         assert result["status"] == "rejected"
@@ -186,11 +197,18 @@ async def test_mock_chart_request_subscribe_round_trip(mock_server):
             await asyncio.wait_for(ws.recv(), timeout=5)
 
         request_id = new_uuid7_str()
-        await ws.send(json.dumps({
-            "type": "chart.request", "request_id": request_id,
-            "symbol": "EURUSD", "timeframe": "M15", "count": 2,
-            "include_ticks": True,
-        }))
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "chart.request",
+                    "request_id": request_id,
+                    "symbol": "EURUSD",
+                    "timeframe": "M15",
+                    "count": 2,
+                    "include_ticks": True,
+                }
+            )
+        )
         data = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
         assert data["type"] == "chart.data"
         assert data["request_id"] == request_id
@@ -203,26 +221,47 @@ async def test_mock_chart_request_subscribe_round_trip(mock_server):
 
         # Unknown symbol → symbol_not_found error frame (§17.1.4).
         bad_id = new_uuid7_str()
-        await ws.send(json.dumps({
-            "type": "chart.request", "request_id": bad_id,
-            "symbol": "UNKNOWN", "timeframe": "M15", "count": 2,
-        }))
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "chart.request",
+                    "request_id": bad_id,
+                    "symbol": "UNKNOWN",
+                    "timeframe": "M15",
+                    "count": 2,
+                }
+            )
+        )
         error = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
         assert error["status"] == "error"
         assert error["error_code"] == "symbol_not_found"
 
         # 20 subscriptions succeed; the 21st is refused (§17.1.1).
         for i in range(20):
-            await ws.send(json.dumps({
-                "type": "chart.subscribe", "subscription_id": new_uuid7_str(),
-                "symbol": "EURUSD", "timeframe": "M15", "poll_interval_s": 15,
-            }))
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "chart.subscribe",
+                        "subscription_id": new_uuid7_str(),
+                        "symbol": "EURUSD",
+                        "timeframe": "M15",
+                        "poll_interval_s": 15,
+                    }
+                )
+            )
             frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             assert frame["status"] == "ok", f"subscription {i} failed: {frame}"
-        await ws.send(json.dumps({
-            "type": "chart.subscribe", "subscription_id": new_uuid7_str(),
-            "symbol": "EURUSD", "timeframe": "M15", "poll_interval_s": 15,
-        }))
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "chart.subscribe",
+                    "subscription_id": new_uuid7_str(),
+                    "symbol": "EURUSD",
+                    "timeframe": "M15",
+                    "poll_interval_s": 15,
+                }
+            )
+        )
         refused = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
         assert refused["error_code"] == "subscription_limit"
 

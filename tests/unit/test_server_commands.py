@@ -178,7 +178,12 @@ def test_lifecycle_legal_chain_and_illegal_transition():
     ex.transition(CommandState.EXECUTING)
     ex.transition(CommandState.COMPLETED)
     assert [s for s, _ in ex.history] == [
-        "RECEIVED", "VALIDATED", "AUTHORIZED", "DISPATCHED", "EXECUTING", "COMPLETED",
+        "RECEIVED",
+        "VALIDATED",
+        "AUTHORIZED",
+        "DISPATCHED",
+        "EXECUTING",
+        "COMPLETED",
     ]
     with pytest.raises(ValueError):
         ex.transition(CommandState.EXECUTING)  # terminal: no outgoing edges
@@ -189,9 +194,13 @@ def test_action_result_envelope_shape():
     started = NOW
     completed = NOW + timedelta(milliseconds=42)
     result = build_action_result(
-        device_id=DEVICE, command_id="cmd-1", account_id=ACCOUNT,
-        status="executed", source_tool="trade_close_single_position",
-        started_at=started, completed_at=completed,
+        device_id=DEVICE,
+        command_id="cmd-1",
+        account_id=ACCOUNT,
+        status="executed",
+        source_tool="trade_close_single_position",
+        started_at=started,
+        completed_at=completed,
         payload={"status": "done", "ticket": 9000001},
     )
     assert result["protocol_version"] == "1.0"
@@ -209,8 +218,11 @@ def test_action_result_envelope_shape():
 @pytest.mark.unit
 def test_rejection_result_shape():
     result = rejection_result(
-        device_id=DEVICE, command_id="cmd-2", account_id=ACCOUNT,
-        reason=RejectionReason.EXPIRED, operation_type="close_position",
+        device_id=DEVICE,
+        command_id="cmd-2",
+        account_id=ACCOUNT,
+        reason=RejectionReason.EXPIRED,
+        operation_type="close_position",
     )
     assert result["status"] == "rejected"
     assert result["error"]["code"] == "Expired"
@@ -266,9 +278,7 @@ def test_executor_modify_sltp_fills_missing_values_from_position(monkeypatch):
     monkeypatch.setattr("nse_bridge.engine.trading.fetch_position", fake_fetch_position)
     monkeypatch.setattr("nse_bridge.engine.trading.modify_position_sltp", fake_modify)
     executor = CommandExecutor(ctx, _validator())
-    execution, result = executor.execute(
-        _frame(operation={"type": "modify_sl_tp", "ticket": "9000001", "sl": 1.0750})
-    )
+    execution, result = executor.execute(_frame(operation={"type": "modify_sl_tp", "ticket": "9000001", "sl": 1.0750}))
     assert execution.state is CommandState.COMPLETED
     assert result["status"] == "executed"
     assert seen == {"ticket": 9000001, "sl": 1.075, "tp": 1.09}  # tp preserved from position

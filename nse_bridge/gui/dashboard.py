@@ -43,7 +43,5 @@ def register_dashboard(app) -> None:  # type: ignore[no-untyped-def]
         ctx = getattr(request.app.state, "ctx", None)
         key = getattr(getattr(ctx, "settings", None), "local_api_key", "") or ""
         if key:
-            response.set_cookie(
-                LOCAL_API_KEY_COOKIE, key, httponly=True, samesite="strict", path="/api/v1"
-            )
+            response.set_cookie(LOCAL_API_KEY_COOKIE, key, httponly=True, samesite="strict", path="/api/v1")
         return response

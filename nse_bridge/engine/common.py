@@ -181,8 +181,12 @@ class BridgeContext:
     validate_key_result: dict[str, Any] | None = None
     server_channel_state: dict[str, Any] = field(
         default_factory=lambda: {
-            "enabled": False, "connected": False, "url": "", "last_connected_at": None,
-            "reconnects": 0, "last_error": None,
+            "enabled": False,
+            "connected": False,
+            "url": "",
+            "last_connected_at": None,
+            "reconnects": 0,
+            "last_error": None,
         }
     )
 

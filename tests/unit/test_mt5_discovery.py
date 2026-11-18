@@ -60,10 +60,19 @@ def _build_versioned_pe(version=(5, 0, 4750, 0)):
     key = "VS_VERSION_INFO\0".encode("utf-16-le")
     fixed = struct.pack(
         "<13I",
-        0xFEEF04BD, 0x00010000,
+        0xFEEF04BD,
+        0x00010000,
         (version[0] << 16) | version[1],
         (version[2] << 16) | version[3],
-        0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     )
     blob = struct.pack("<HHH", 92, 52, 0) + key + b"\x00\x00" + fixed
     assert len(blob) == 92
@@ -71,8 +80,7 @@ def _build_versioned_pe(version=(5, 0, 4750, 0)):
     def rsrc_dir(entries):
         hdr = struct.pack("<IIHHHH", 0, 0, 0, 0, 0, len(entries))
         body = b"".join(
-            struct.pack("<II", name, (0x80000000 | target) if is_dir else target)
-            for name, target, is_dir in entries
+            struct.pack("<II", name, (0x80000000 | target) if is_dir else target) for name, target, is_dir in entries
         )
         return hdr + body
 
@@ -176,13 +184,9 @@ def test_discover_terminals_multiple_sources(settings, tmp_path, monkeypatch):
     custom_a = _fake_terminal(tmp_path / "custom-a" / "terminal64.exe")
     custom_b = _fake_terminal(tmp_path / "custom-b" / "terminal.exe")
     reg_term = _fake_terminal(tmp_path / "reg" / "terminal64.exe")
-    fake_reg = _FakeWinreg(
-        {(1, _app_paths_subkey("terminal64.exe")): str(reg_term)}
-    )
+    fake_reg = _FakeWinreg({(1, _app_paths_subkey("terminal64.exe")): str(reg_term)})
     settings.mt5_custom_terminal_dirs = f"{tmp_path / 'custom-a'},{tmp_path / 'custom-b'}"
-    found = discover_terminals(
-        settings, running_paths=[str(custom_b)], winreg_module=fake_reg
-    )
+    found = discover_terminals(settings, running_paths=[str(custom_b)], winreg_module=fake_reg)
     by_path = {t.path: t for t in found}
     assert set(by_path) == {str(env_term), str(custom_a), str(custom_b), str(reg_term)}
     assert by_path[str(env_term)].source == "env"
@@ -203,9 +207,7 @@ def test_discover_terminals_portable_subdir(settings, tmp_path):
 
 def test_discover_terminals_dedupes_same_path(settings, tmp_path):
     term = _fake_terminal(tmp_path / "dup" / "terminal64.exe")
-    found = discover_terminals(
-        settings, extra_dirs=[str(tmp_path / "dup"), str(tmp_path / "dup")]
-    )
+    found = discover_terminals(settings, extra_dirs=[str(tmp_path / "dup"), str(tmp_path / "dup")])
     assert [t.path for t in found] == [str(term)]
 
 
@@ -238,9 +240,7 @@ def test_discover_terminals_version_from_pe(settings, tmp_path):
 
 
 def test_discover_terminals_ignores_missing_custom_dirs(settings, tmp_path):
-    found = discover_terminals(
-        settings, extra_dirs=[str(tmp_path / "does-not-exist")]
-    )
+    found = discover_terminals(settings, extra_dirs=[str(tmp_path / "does-not-exist")])
     assert found == []
 
 
@@ -249,9 +249,7 @@ def test_discover_terminals_ignores_missing_custom_dirs(settings, tmp_path):
 # ---------------------------------------------------------------------------
 @pytest.fixture
 def client(tmp_path):
-    settings = BridgeSettings(
-        _env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs")
-    )
+    settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
     driver = Mt5Driver(settings)
     ctx = BridgeContext(settings=settings, driver=driver)
     app = create_app(ctx)

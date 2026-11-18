@@ -160,9 +160,7 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def validate_chart_request(
-    symbol: str, timeframe: str, count: int
-) -> tuple[str, str, int]:
+def validate_chart_request(symbol: str, timeframe: str, count: int) -> tuple[str, str, int]:
     """Validate a one-shot/subscription chart request (§17.1.1).
 
     Returns the normalized ``(symbol, timeframe, count)``. Raises
@@ -193,7 +191,8 @@ def validate_chart_request(
     if count < 1 or count > CHART_MAX_COUNT:
         logger.warning(
             "[CHART] count {} clamped to 1..{} (§17.1.3 batching limit)",
-            count, CHART_MAX_COUNT,
+            count,
+            CHART_MAX_COUNT,
         )
         count = max(1, min(CHART_MAX_COUNT, count))
     return symbol, timeframe, count
@@ -349,30 +348,37 @@ class ChartService:
             logger.debug("[CHART] duplicate chart.request {} — answering from cache", request_id)
             return [dict(self._request_cache[request_id])]
         try:
-            symbol, timeframe, count = validate_chart_request(
-                symbol, timeframe, frame.get("count", CHART_MAX_COUNT)
-            )
+            symbol, timeframe, count = validate_chart_request(symbol, timeframe, frame.get("count", CHART_MAX_COUNT))
         except ChartError as exc:
             return [
                 build_chart_error_frame(
-                    request_id=request_id, subscription_id=None, symbol=symbol,
-                    timeframe=timeframe, code=exc.code, message=exc.message,
+                    request_id=request_id,
+                    subscription_id=None,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    code=exc.code,
+                    message=exc.message,
                 )
             ]
         try:
-            candles = self._fetch_with_prerequisite(
-                symbol, timeframe, count, frame.get("from"), frame.get("to")
-            )
+            candles = self._fetch_with_prerequisite(symbol, timeframe, count, frame.get("from"), frame.get("to"))
         except ChartError as exc:
             return [
                 build_chart_error_frame(
-                    request_id=request_id, subscription_id=None, symbol=symbol,
-                    timeframe=timeframe, code=exc.code, message=exc.message,
+                    request_id=request_id,
+                    subscription_id=None,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    code=exc.code,
+                    message=exc.message,
                 )
             ]
         data = build_chart_data_frame(
-            request_id=request_id, subscription_id=None, symbol=symbol,
-            timeframe=timeframe, candles=candles,
+            request_id=request_id,
+            subscription_id=None,
+            symbol=symbol,
+            timeframe=timeframe,
+            candles=candles,
             broker_time=candles[-1]["time"] if candles else _utc_now_iso(),
         )
         if len(self._request_cache) >= 100:  # bounded idempotency cache
@@ -385,14 +391,21 @@ class ChartService:
             except ChartError as exc:
                 return [
                     build_chart_error_frame(
-                        request_id=request_id, subscription_id=None, symbol=symbol,
-                        timeframe=timeframe, code=exc.code, message=exc.message,
+                        request_id=request_id,
+                        subscription_id=None,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        code=exc.code,
+                        message=exc.message,
                     )
                 ]
             frames.append(
                 build_chart_tick_frame(
-                    subscription_id=None, request_id=request_id, symbol=symbol,
-                    ticks=ticks, broker_time=ticks[-1]["time_ms"] if ticks else _utc_now_iso(),
+                    subscription_id=None,
+                    request_id=request_id,
+                    symbol=symbol,
+                    ticks=ticks,
+                    broker_time=ticks[-1]["time_ms"] if ticks else _utc_now_iso(),
                 )
             )
         return frames
@@ -431,13 +444,20 @@ class ChartService:
             symbol, timeframe, _ = validate_chart_request(symbol, timeframe, 1)
         except ChartError as exc:
             return build_chart_error_frame(
-                request_id=None, subscription_id=subscription_id, symbol=symbol,
-                timeframe=timeframe, code=exc.code, message=exc.message,
+                request_id=None,
+                subscription_id=subscription_id,
+                symbol=symbol,
+                timeframe=timeframe,
+                code=exc.code,
+                message=exc.message,
             )
         if len(self._subscriptions) >= CHART_MAX_SUBSCRIPTIONS:
             return build_chart_error_frame(
-                request_id=None, subscription_id=subscription_id, symbol=symbol,
-                timeframe=timeframe, code=ChartErrorCode.SUBSCRIPTION_LIMIT,
+                request_id=None,
+                subscription_id=subscription_id,
+                symbol=symbol,
+                timeframe=timeframe,
+                code=ChartErrorCode.SUBSCRIPTION_LIMIT,
                 message=f"more than {CHART_MAX_SUBSCRIPTIONS} concurrent subscriptions on this device",
             )
         poll = frame.get("poll_interval_s", CHART_POLL_DEFAULT_S)
@@ -447,8 +467,11 @@ class ChartService:
             poll = CHART_POLL_DEFAULT_S
         poll = max(CHART_POLL_MIN_S, min(CHART_POLL_MAX_S, poll))
         self._subscriptions[subscription_id] = ChartSubscription(
-            subscription_id=subscription_id, symbol=symbol, timeframe=timeframe,
-            poll_interval_s=poll, include_ticks=bool(frame.get("include_ticks", False)),
+            subscription_id=subscription_id,
+            symbol=symbol,
+            timeframe=timeframe,
+            poll_interval_s=poll,
+            include_ticks=bool(frame.get("include_ticks", False)),
             next_poll_at=self.clock(),
         )
         logger.info("[CHART] subscribed {} {} every {}s (id {})", symbol, timeframe, poll, subscription_id[:8])
@@ -476,9 +499,7 @@ class ChartService:
             sub.next_poll_at = now + sub.poll_interval_s
         return due
 
-    def build_delta(
-        self, sub: ChartSubscription, candles: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    def build_delta(self, sub: ChartSubscription, candles: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Delta-only candles for a subscription poll (§17.1.1).
 
         Only new/changed candles are sent; the last candle is re-sent
@@ -543,14 +564,14 @@ def bind_mt5_fetchers(ctx: Any) -> tuple[Callable, Callable, Callable]:
                 retryable=True,
             )
 
-    def fetch_candles(
-        symbol: str, timeframe: str, count: int, from_: Any, to: Any
-    ) -> list[dict[str, Any]]:
+    def fetch_candles(symbol: str, timeframe: str, count: int, from_: Any, to: Any) -> list[dict[str, Any]]:
         try:
             result = get_chart_history(
                 ctx,
                 ChartHistoryRequest(
-                    symbol=symbol, timeframe=timeframe, count=count,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    count=count,
                     from_utc=str(from_) if from_ is not None else None,
                 ),
             )
@@ -575,14 +596,13 @@ def bind_mt5_fetchers(ctx: Any) -> tuple[Callable, Callable, Callable]:
             candles.append(candle)
         return candles
 
-    def fetch_ticks(
-        symbol: str, count: int, from_: Any, to: Any
-    ) -> list[dict[str, Any]]:
+    def fetch_ticks(symbol: str, count: int, from_: Any, to: Any) -> list[dict[str, Any]]:
         try:
             result = get_chart_ticks_history(
                 ctx,
                 TicksHistoryRequest(
-                    symbol=symbol, count=count,
+                    symbol=symbol,
+                    count=count,
                     from_utc=str(from_) if from_ is not None else None,
                     to_utc=str(to) if to is not None else None,
                 ),

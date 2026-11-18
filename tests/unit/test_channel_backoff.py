@@ -98,9 +98,9 @@ async def test_channel_ignores_unknown_server_frames():
     channel = ServerChannel(ctx, EventBus())
     # Unknown frames are silently ignored, never fatal (§5.2).
     await channel._handle_server_message('{"type": "bogus", "x": 1}')
-    await channel._handle_server_message('not json at all')
+    await channel._handle_server_message("not json at all")
     await channel._handle_server_message('{"type": "command_result", "id": "1"}')
-    await channel._handle_server_message('[1, 2, 3]')
+    await channel._handle_server_message("[1, 2, 3]")
 
 
 @pytest.mark.unit

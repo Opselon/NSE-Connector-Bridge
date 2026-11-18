@@ -225,8 +225,7 @@ class DiagnosticQueue:
                 self._keys.discard(entry.dedup_key)
                 self.expired += 1
                 logger.warning(
-                    "[TELEMETRY] diagnostic event expired undelivered: "
-                    "event_type={} error_code={}",
+                    "[TELEMETRY] diagnostic event expired undelivered: event_type={} error_code={}",
                     entry.event.event_type,
                     entry.event.error_code,
                 )
@@ -297,16 +296,13 @@ class DiagnosticQueue:
                     self._keys.discard(entry.dedup_key)
                     self.failed += 1
                     logger.warning(
-                        "[TELEMETRY] diagnostic event abandoned after {} attempts: "
-                        "event_type={} error_code={}",
+                        "[TELEMETRY] diagnostic event abandoned after {} attempts: event_type={} error_code={}",
                         entry.attempts,
                         entry.event.event_type,
                         entry.event.error_code,
                     )
                     continue
-                backoff = min(
-                    self.backoff_base_s * (2 ** (entry.attempts - 1)), self.backoff_cap_s
-                )
+                backoff = min(self.backoff_base_s * (2 ** (entry.attempts - 1)), self.backoff_cap_s)
                 entry.next_attempt_at = now + backoff
                 remaining.append(entry)
             self._items = remaining
@@ -395,10 +391,7 @@ class TelemetryEmitter:
         self.emitted += 1
         # Local structured log always (redaction filter applies again
         # on the sink side; double-redaction is harmless).
-        log_message = (
-            f"[TELEMETRY] {event_type} severity={severity} "
-            f"component={component} error_code={error_code}"
-        )
+        log_message = f"[TELEMETRY] {event_type} severity={severity} component={component} error_code={error_code}"
         if severity == ERROR:
             logger.error(log_message)
         elif severity == WARN:
@@ -445,8 +438,7 @@ class TelemetryEmitter:
         return {
             "device_id": self.device_id,
             "diagnostic_mode": self.diagnostic_mode,
-            "sink_attached": self.sink is not None
-            and not isinstance(self.sink, NullDiagnosticsSink),
+            "sink_attached": self.sink is not None and not isinstance(self.sink, NullDiagnosticsSink),
             "sink_inert": self.sink is None or isinstance(self.sink, NullDiagnosticsSink),
             "emitted": self.emitted,
             "info_local_only": self.info_local_only,

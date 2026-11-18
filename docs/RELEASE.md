@@ -10,7 +10,9 @@
    ```
 3. Run the Linux gate locally (or wait for CI on the PR):
    ```bash
-   ruff check tests/ scripts/
+   ruff check .
+   ruff format --check .
+   python -m mypy nse_bridge
    python -m pytest tests/unit tests/integration -q
    ```
 4. Merge only after explicit user approval (branch protection /
@@ -66,7 +68,7 @@ aspirational — it states what was actually executed.
 | Telemetry 9-field shape | **PROVEN** | `tests/unit/test_telemetry.py` (`test_event_has_exactly_the_nine_contract_fields`) |
 | Updater fail-closed | **PROVEN** | `tests/unit/test_updater.py` (no key / null signature / bad SHA / bad signature / min-version — all refuse, nothing staged) |
 | Self-healing: all 15 scenarios | **PROVEN (unit)** | `tests/unit/test_self_healing.py` — one test per scenario minimum; registration is the `Scenario` enum + `_handle_*` dispatch (see docs/ARCHITECTURE.md §6) |
-| Ruff (gated scope) | **PROVEN** | `ruff check tests/ scripts/` → all checks passed |
+| Lint / format / types / security (spec §20) | **PROVEN** | `ruff check .` + `ruff format --check .` + `mypy nse_bridge` + `bandit` + `pip-audit` → all exit 0 (A1; the 15 pre-existing ruff findings are fixed, mypy 87→0 with real fixes, bandit skips 4 reviewed Low rules only) |
 | `--diagnostic` flag | **PROVEN (parses)** | `python -m nse_bridge --help` shows it; `tests/unit/test_diagnostic_flag.py` |
 | OpenAPI re-export | **PROVEN** | `scripts/export_openapi.py docs/openapi.json` → 104 paths (was 101 — the committed file was stale; the re-export adds the updater endpoints); export is deterministic (`diff` clean) |
 | Version files | **PROVEN** | `scripts/write_version_info.py --check` clean |
@@ -83,7 +85,11 @@ Run after committing, from the committed tree:
 
 - `python -m pytest tests/unit tests/integration -q` → **exit 0,
   311 passed** (299 `unit` + 12 `mock_integration`), 17.85 s.
-- `ruff check tests/ scripts/` → **exit 0**, all checks passed.
+- `ruff check .` + `ruff format --check .` → **exit 0**.
+- `python -m mypy nse_bridge` → **exit 0** (55 files, no issues).
+- `python -m bandit -r nse_bridge --skip B101,B110,B311,B404 -q` →
+  **exit 0**; `python -m pip_audit -r requirements.txt
+  -r requirements-dev.txt` → **exit 0**, no known vulnerabilities.
 - `python -m pytest tests/e2e -q` on Linux → **104 errors at fixture
   setup** (expected: no MT5 here), 0 passed, 0 skipped.
 - `python -m pytest tests/e2e --collect-only -m real_mt5 -q` → 104
@@ -107,23 +113,26 @@ Run after committing, from the committed tree:
    market open + published minimum `connector_version` still owed.
    Until then the op is rejected as `UnsupportedOperation`.
 5. **ARM64 unsupported.** x64 only; see docs/COMPATIBILITY.md.
-6. **15 pre-existing ruff findings** outside the gated scope
-   (`ruff check .`, ruff 0.17.5): 5× BLE001 blind `except Exception`
-   (`engine/diagnostics.py` ×2, `main.py` ×1, `mt5/types.py` ×2),
-   3× F401 unused imports (`engine/market.py` ×2,
-   `engine/registry.py` ×1), 1× F841 unused local
-   (`engine/risk.py`), 1× FURB162 (`timeutil.py`), 1× I001
-   (`engine/__init__.py`), 1× PIE794 duplicate class field
-   (`mt5/types.py`), 1× RUF022 unsorted `__all__`
-   (`mt5/__init__.py`), 1× S110 try-except-pass (`mt5/types.py`),
-   1× UP035 (`engine/registry.py`). Pre-existing in other phases'
-   code; Phase 6 removed 9 findings (conftest swallow, export
-   script, e2e dead assignments, import sorting in tests). Cleaning
-   the remaining 15 is tracked follow-up work — not a Phase 6 change,
-   and not a reason to widen the lint gate before it is clean.
+6. **15 pre-existing ruff findings — FIXED (A1).** The whole-repo
+   gate `ruff check .` passes (ruff 0.17.5): unused imports removed
+   (`engine/market.py`, `engine/registry.py`), dead local removed
+   (`engine/risk.py`), duplicate `SymbolInfoModel.session_deals`
+   field removed (`mt5/types.py`), `datetime.fromisoformat` "Z"
+   handling simplified (`timeutil.py`, Python ≥3.11 parses "Z"),
+   import/`__all__` sorting fixed, and the five intentional
+   broad-`except` sites documented with `# noqa: BLE001` reasons
+   (diagnostics probes, boot thread, MT5 field accessor). The
+   import order in `engine/__init__.py` was verified not to change
+   `docs/openapi.json` (re-export diff is empty).
 7. **Windows CI not yet executed** on this branch; the frozen exe has
-   never been built from this ref. First green `build-windows` run
-   is required before any tag.
+   never been built from this ref. The `build-windows` test step
+   failed at head `3f0950c` with the cause undiagnosed (job logs
+   return 403 from this environment; no Linux simulation reproduced
+   it). A1 made the next failure identifiable — both test steps emit
+   `--junitxml=test-results.xml -rf` and upload the XML on failure —
+   and hardened the nested-pytest honesty proof (UTF-8 child output,
+   `TimeoutExpired` becomes a named failure). First green
+   `build-windows` run is required before any tag.
 8. **Live Platform unverified** (see §3). No release should be
    announced as "verified against the live Platform" until the
    Platform side deploys the contract (PR #107) and a live

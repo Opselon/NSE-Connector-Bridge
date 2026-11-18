@@ -55,9 +55,7 @@ class TaskWorker:
         self.validator = validator
         self.kinds = kinds or validator.kinds
         self.device_id = device_id
-        self._executor = ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="nse-task-worker"
-        )
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="nse-task-worker")
         self._queue: queue.Queue[TaskEnvelope] = queue.Queue(maxsize=max_queue)
         self._pending: dict[str, TaskExecution] = {}
         self._lock = threading.Lock()
@@ -70,9 +68,7 @@ class TaskWorker:
             if self._running:
                 return
             self._running = True
-            self._thread = threading.Thread(
-                target=self._drain, name="nse-task-drain", daemon=True
-            )
+            self._thread = threading.Thread(target=self._drain, name="nse-task-drain", daemon=True)
             self._thread.start()
 
     def stop(self) -> None:
@@ -97,12 +93,8 @@ class TaskWorker:
             task_id = frame.get("task_id") if isinstance(frame, dict) else None
             task_id = str(task_id) if task_id else "unknown"
             execution = TaskExecution(task_id=task_id)
-            execution.transition(
-                TaskState.EXPIRED if reason is TaskRejection.EXPIRED else TaskState.FAILED
-            )
-            result = rejection_task_result(
-                task_id=task_id, reason=reason, started_at=started, device_id=self.device_id
-            )
+            execution.transition(TaskState.EXPIRED if reason is TaskRejection.EXPIRED else TaskState.FAILED)
+            result = rejection_task_result(task_id=task_id, reason=reason, started_at=started, device_id=self.device_id)
             execution.result = result
             return execution, result
         envelope = outcome.envelope
@@ -117,8 +109,11 @@ class TaskWorker:
             logger.warning("[TASK] task queue full — rejecting {}", envelope.task_id)
             execution.transition(TaskState.FAILED)
             result = build_task_result(
-                task_id=envelope.task_id, status="failed", started_at=started,
-                completed_at=datetime.now(UTC), device_id=self.device_id,
+                task_id=envelope.task_id,
+                status="failed",
+                started_at=started,
+                completed_at=datetime.now(UTC),
+                device_id=self.device_id,
                 error={
                     "code": "TaskQueueFull",
                     "category": "Execution",
@@ -148,8 +143,10 @@ class TaskWorker:
         handler = self.kinds.get(envelope.kind)
         if handler is None:  # defence in depth — validation already rejected this
             result = rejection_task_result(
-                task_id=envelope.task_id, reason=TaskRejection.UNKNOWN_KIND,
-                started_at=started, device_id=self.device_id,
+                task_id=envelope.task_id,
+                reason=TaskRejection.UNKNOWN_KIND,
+                started_at=started,
+                device_id=self.device_id,
             )
             if execution is not None:
                 execution.transition(TaskState.FAILED)
@@ -162,36 +159,37 @@ class TaskWorker:
             if not isinstance(output, dict):
                 raise TypeError("task handler must return a dict")
         except FutureTimeoutError:
-            result = self._failed(envelope, started, "TaskTimeout",
-                                  f"task exceeded its timeout_s={timeout}")
+            result = self._failed(envelope, started, "TaskTimeout", f"task exceeded its timeout_s={timeout}")
             self._settle(execution, TaskState.FAILED, result)
             return result
         except Exception as exc:  # noqa: BLE001 — a failing task is failed, never a crash
-            result = self._failed(envelope, started, "TaskFailed",
-                                  f"task handler raised {type(exc).__name__}")
+            result = self._failed(envelope, started, "TaskFailed", f"task handler raised {type(exc).__name__}")
             self._settle(execution, TaskState.FAILED, result)
             return result
         result = build_task_result(
-            task_id=envelope.task_id, status="completed", started_at=started,
-            completed_at=datetime.now(UTC), result=output, device_id=self.device_id,
+            task_id=envelope.task_id,
+            status="completed",
+            started_at=started,
+            completed_at=datetime.now(UTC),
+            result=output,
+            device_id=self.device_id,
         )
         self._settle(execution, TaskState.COMPLETED, result)
         return result
 
     # ------------------------------------------------------------------
-    def _failed(
-        self, envelope: TaskEnvelope, started: datetime, code: str, cause: str
-    ) -> dict[str, Any]:
+    def _failed(self, envelope: TaskEnvelope, started: datetime, code: str, cause: str) -> dict[str, Any]:
         return build_task_result(
-            task_id=envelope.task_id, status="failed", started_at=started,
-            completed_at=datetime.now(UTC), device_id=self.device_id,
+            task_id=envelope.task_id,
+            status="failed",
+            started_at=started,
+            completed_at=datetime.now(UTC),
+            device_id=self.device_id,
             error={"code": code, "category": "Execution", "cause": cause, "retry_safe": False},
         )
 
     @staticmethod
-    def _settle(
-        execution: TaskExecution | None, state: TaskState, result: dict[str, Any]
-    ) -> None:
+    def _settle(execution: TaskExecution | None, state: TaskState, result: dict[str, Any]) -> None:
         if execution is not None:
             execution.transition(state)
             execution.result = result

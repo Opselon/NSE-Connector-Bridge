@@ -28,12 +28,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default=None, help="bind host (default 127.0.0.1)")
     parser.add_argument("--port", type=int, default=None, help="bind port (default 8788)")
     parser.add_argument(
-        "--gui", choices=["auto", "webview", "browser", "none"], default=None,
+        "--gui",
+        choices=["auto", "webview", "browser", "none"],
+        default=None,
         help="GUI mode (default: auto — native window, browser fallback)",
     )
     parser.add_argument("--no-connect", action="store_true", help="skip auto MT5 connect at boot")
     parser.add_argument(
-        "--diagnostic", action="store_true",
+        "--diagnostic",
+        action="store_true",
         help="diagnostic console mode: enable DEBUG telemetry events "
         "(ARCHITECTURE-CONTRACT §8) and DEBUG logging; on a frozen "
         "Windows build (console=False exe) also allocates a console "
@@ -108,9 +111,7 @@ def main(argv=None) -> None:
     if not args.no_connect:
         threading.Thread(target=_auto_connect, args=(driver,), daemon=True, name="mt5-boot").start()
 
-    config = uvicorn.Config(
-        app, host=settings.host, port=settings.port, log_config=None, access_log=False
-    )
+    config = uvicorn.Config(app, host=settings.host, port=settings.port, log_config=None, access_log=False)
     server = uvicorn.Server(config)
     server_thread = threading.Thread(target=server.run, daemon=True, name="uvicorn")
     server_thread.start()
@@ -130,7 +131,10 @@ def main(argv=None) -> None:
         "║  Swagger   : {}/docs                             ║\n"
         "║  Device ID : {}                  ║\n"
         "╚══════════════════════════════════════════════════╝",
-        BRIDGE_VERSION, base_url, base_url, device_id,
+        BRIDGE_VERSION,
+        base_url,
+        base_url,
+        device_id,
     )
 
     mode = settings.gui_mode
@@ -163,7 +167,7 @@ def _auto_connect(driver: Mt5Driver) -> None:
             logger.info("[BOOT] MT5 auto-connect OK (terminal={})", summary.get("terminal_version"))
         else:
             logger.error("[BOOT] MT5 auto-connect FAILED: {}", summary.get("error"))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — the boot thread must never crash the process; log and continue
         logger.error("[BOOT] MT5 auto-connect crashed: {}", exc)
 
 

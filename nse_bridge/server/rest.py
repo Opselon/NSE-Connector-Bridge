@@ -166,7 +166,7 @@ class RestClient:
         device_id: str,
         *,
         api_key: str | None = None,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
         max_retries: int = 3,
         retry_base_s: float = 0.5,
         sleep: Callable[[float], Awaitable[None]] | None = None,
@@ -269,9 +269,7 @@ class RestClient:
         last_error: ServerError | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                response = await client.request(
-                    method, path, json=json_body, headers=self._headers()
-                )
+                response = await client.request(method, path, json=json_body, headers=self._headers())
             except httpx.TransportError as exc:
                 last_error = ServerError(
                     ServerErrorCode.TRANSPORT_ERROR,
@@ -310,7 +308,10 @@ class RestClient:
                     delay = err.retry_after_s if err.retry_after_s is not None else self.retry_base_s * (2**attempt)
                     logger.warning(
                         "[REST] {} on {} (attempt {}) — backing off {:.1f}s",
-                        response.status_code, path, attempt, delay,
+                        response.status_code,
+                        path,
+                        attempt,
+                        delay,
                     )
                     await self._sleep(delay)
                     continue
@@ -335,16 +336,15 @@ class RestClient:
         payload = await self._request("POST", PATH_VALIDATE_KEY, body, allow_reauth=False)
         if not isinstance(payload, dict):
             raise ServerError(ServerErrorCode.MALFORMED_RESPONSE, "validate-key returned a non-object response")
+        subscription = payload.get("subscription")
         result = ValidateKeyResult(
             valid=bool(payload.get("valid", False)),
             user_id=payload.get("user_id") if isinstance(payload.get("user_id"), str) else None,
-            subscription=payload.get("subscription") if isinstance(payload.get("subscription"), dict) else {},
+            subscription=subscription if isinstance(subscription, dict) else {},
             entitlements=Entitlements.from_dict(payload.get("entitlements")),
         )
         if not result.valid:
-            raise ServerError(
-                ServerErrorCode.KEY_INVALID, "server reported the API key as invalid", http_status=200
-            )
+            raise ServerError(ServerErrorCode.KEY_INVALID, "server reported the API key as invalid", http_status=200)
         self.user_id = result.user_id
         self.entitlements = result.entitlements
         self.subscription = result.subscription
@@ -384,9 +384,7 @@ class RestClient:
             error = payload.get("error")
             code = error.get("code") if isinstance(error, dict) else None
             raise ServerError(
-                ServerErrorCode.MALFORMED_RESPONSE
-                if not isinstance(code, str)
-                else _code_or_malformed(code),
+                ServerErrorCode.MALFORMED_RESPONSE if not isinstance(code, str) else _code_or_malformed(code),
                 f"batch {batch.get('batch_id')} rejected by the server",
             )
         return SyncAck(accepted=True, batch_id=payload.get("batch_id"))
