@@ -33,6 +33,25 @@ def _no_bridge_env(monkeypatch):
             monkeypatch.delenv(key, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _simulate_linux_secret_backend(monkeypatch):
+    """Run the dev-fallback tests against the Linux backend on any OS.
+
+    ``DevFallbackSecretStore`` deliberately refuses to run on Windows
+    (a Windows production environment without Credential Manager/DPAPI
+    must fail loudly, never silently downgrade to plaintext), so these
+    tests simulate a Linux platform with no usable keyring backend.
+    Without this, every direct ``DevFallbackSecretStore`` construction
+    below raises ``SecretStoreError`` on a Windows runner and the whole
+    file fails there while passing on Linux. The Windows-refusal
+    behaviour itself is covered by
+    ``test_dev_fallback_refuses_windows``, which overrides the platform
+    back to ``win32`` inside the test body.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("nse_bridge.secrets._keyring_usable", lambda: False)
+
+
 def _settings(tmp_path, **overrides):
     return BridgeSettings(_env_file=None, data_dir=tmp_path, **overrides)
 
@@ -59,12 +78,9 @@ def test_dev_fallback_file_is_clearly_marked(tmp_path):
 
 
 def test_factory_degrades_to_dev_fallback_on_linux_without_keyring(tmp_path):
-    # This VM has keyring installed but no Secret Service backend, so
-    # the factory must degrade gracefully instead of failing.
-    from nse_bridge.secrets import _keyring_usable
-
-    if _keyring_usable():  # a real desktop backend — round-trip still works
-        pytest.skip("a real keyring backend is present on this machine")
+    # The autouse fixture simulates Linux with no usable keyring
+    # backend, so the factory must degrade gracefully to the dev
+    # fallback instead of failing.
     store = get_secret_store(tmp_path)
     assert isinstance(store, DevFallbackSecretStore)
     store.set_secret("server_token", "tok-1")
@@ -75,8 +91,18 @@ def test_dev_fallback_refuses_windows(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     with pytest.raises(SecretStoreError, match="refused on Windows"):
         DevFallbackSecretStore(tmp_path)
-    # The factory must also refuse (no Credential Manager here) rather
-    # than silently downgrading to plaintext on Windows.
+    # The factory must never return the dev fallback on Windows. With
+    # both real backends unavailable it fails loudly instead of
+    # silently downgrading to plaintext. (DPAPI is stubbed unavailable
+    # here because a real Windows runner HAS DPAPI, which would
+    # legitimately satisfy the factory.)
+    monkeypatch.setattr("nse_bridge.secrets._keyring_usable", lambda: False)
+
+    class _UnavailableDpapi:
+        def __init__(self, data_dir):
+            raise SecretStoreError("DPAPI is unavailable")
+
+    monkeypatch.setattr("nse_bridge.secrets.DpapiSecretStore", _UnavailableDpapi)
     with pytest.raises(SecretStoreError, match="no usable Windows secret store"):
         get_secret_store(tmp_path)
 
