@@ -14,10 +14,13 @@ from .registry import command
 
 
 class ConnectRequest(BaseModel):
-    """Optional runtime overrides — config file values remain the defaults."""
+    """Optional runtime overrides — config file values remain the defaults.
+
+    NOTE: there is deliberately NO password field. The user signs in
+    through MT5 itself; the bridge never asks for the MT5 password.
+    """
 
     login: int | None = None
-    password: str | None = None
     server: str | None = None
     terminal_path: str | None = None
     timeout_ms: int | None = None
@@ -74,6 +77,7 @@ class DisconnectResponse(BaseModel):
 def get_mt5_connection_status(ctx: BridgeContext, params: None) -> dict[str, Any]:
     state = ctx.driver.connection_state_dict()
     terminal_raw = ctx.driver.refresh_terminal() or {}
+    code = state.get("diagnostic_code")
     return {
         "terminal": {
             "name": terminal_raw.get("name"),
@@ -84,6 +88,14 @@ def get_mt5_connection_status(ctx: BridgeContext, params: None) -> dict[str, Any
         "state": state["state"],
         "pkg_version": state.get("pkg_version"),
         "login": state.get("login"),
+        # Structured MT5 diagnostic code (e.g. MT5_ACCOUNT_NOT_READY) +
+        # guidance; None when the terminal is healthy.
+        "diagnostic_code": code,
+        "guidance": (
+            "Open the MT5 terminal and log in to your trading account, then retry connect."
+            if code == "MT5_ACCOUNT_NOT_READY"
+            else None
+        ),
     }
 
 
@@ -103,9 +115,6 @@ def connect_mt5(ctx: BridgeContext, params: ConnectRequest | None) -> dict[str, 
     changed = False
     if p.login is not None:
         s.mt5_login = p.login
-        changed = True
-    if p.password is not None:
-        s.mt5_password = p.password
         changed = True
     if p.server is not None:
         s.mt5_server = p.server

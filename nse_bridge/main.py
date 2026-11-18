@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import threading
 import webbrowser
 
@@ -11,12 +12,13 @@ from loguru import logger
 
 from . import BRIDGE_VERSION
 from .api.app import create_app
-from .config import load_settings, persist_settings
+from .config import load_settings, persist_settings, validate_bind_host
 from .engine.common import BridgeContext
 from .gui.dashboard import register_dashboard
 from .gui.window import open_window
-from .logging_setup import setup_logging
+from .logging_setup import register_secret, setup_logging
 from .mt5.driver import Mt5Driver
+from .secrets import ensure_local_api_key
 
 
 def main(argv=None) -> None:
@@ -37,6 +39,21 @@ def main(argv=None) -> None:
         settings.port = args.port
     if args.gui:
         settings.gui_mode = args.gui
+
+    # --host is kept, with guardrails: a non-loopback bind requires
+    # explicit authorization (allow_non_loopback) AND the mandatory
+    # X-API-Key. Without the flag, refuse to start — never bind
+    # 0.0.0.0 by accident.
+    try:
+        validate_bind_host(settings.host, allow_non_loopback=settings.allow_non_loopback)
+    except ValueError as exc:
+        print(f"error: refusing to start: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    # Mandatory local API key (auto-generated on first run, stored in
+    # the secret store). Fail closed before serving anything.
+    ensure_local_api_key(settings)
+    register_secret(settings.server_token)
+    register_secret(settings.local_api_key)
 
     driver = Mt5Driver(settings)
     ctx = BridgeContext(settings=settings, driver=driver)

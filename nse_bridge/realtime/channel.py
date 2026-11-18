@@ -24,6 +24,7 @@ from loguru import logger
 from starlette.concurrency import run_in_threadpool
 
 from .. import BRIDGE_VERSION, PROTOCOL_VERSION
+from ..config import validate_server_url
 from ..engine.common import BridgeContext
 from ..engine.registry import REGISTRY, all_commands
 from ..errors import BridgeError
@@ -45,6 +46,16 @@ class ServerChannel:
     def start(self) -> None:
         if not self.ctx.settings.server_url:
             logger.info("[CHANNEL] server_url empty — outbound channel disabled")
+            return
+        # TLS is mandatory for server URLs: reject non-wss:// outside
+        # explicitly-marked test config (loopback ws:// only).
+        try:
+            validate_server_url(self.ctx.settings.server_url)
+        except ValueError as exc:
+            logger.error("[CHANNEL] refusing to connect: {}", exc)
+            state = self.ctx.server_channel_state
+            state["enabled"] = False
+            state["last_error"] = str(exc)
             return
         if not self.ctx.settings.server_token:
             logger.warning("[CHANNEL] server_token missing — outbound channel disabled")

@@ -18,6 +18,7 @@ eager annotation evaluation so FastAPI/pydantic can resolve `rm | None`.
 """
 
 import asyncio
+import hmac
 import json
 import time
 import uuid
@@ -36,8 +37,10 @@ from .. import BRIDGE_VERSION
 from ..engine.common import BridgeContext
 from ..engine.registry import CATEGORY_ORDER, REGISTRY, CommandSpec, all_commands
 from ..errors import BridgeError, ErrorCode
+from ..logging_setup import redact_text, sanitize_payload
 from ..realtime.bus import EventBus, start_streaming, stop_streaming
 from ..realtime.channel import ServerChannel
+from ..secrets import ensure_local_api_key
 from ..gui.dashboard import register_dashboard
 from .management import router as management_router
 from .agent_routes import router as agent_router
@@ -83,10 +86,10 @@ def _error_response(err: BridgeError, request_id: str) -> JSONResponse:
         ok=False,
         error=ErrorDetail(
             code=err.code.value,
-            message=err.message,
+            message=redact_text(err.message),
             retcode=err.retcode,
             retcode_label=None,
-            details=err.details or None,
+            details=sanitize_payload(err.details) or None,
         ),
         request_id=request_id,
     )
@@ -122,6 +125,10 @@ def build_endpoint(spec: CommandSpec, ctx: BridgeContext):
 
 
 def create_app(ctx: BridgeContext) -> FastAPI:
+    # Mandatory local API key: auto-generated on first run and stored
+    # in the secret store. There is no empty-key = open mode.
+    ensure_local_api_key(ctx.settings)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         bus = EventBus()
@@ -150,8 +157,9 @@ def create_app(ctx: BridgeContext) -> FastAPI:
             "official native C++ IPC driver and exposes exactly the 90 NSE bridge commands "
             "documented below. All endpoints are uniform `POST` JSON calls returning "
             "`{ok, data}` envelopes; broker rejections carry the official MT5 retcode.\n\n"
-            "*Security:* bind is localhost-only by default; an optional `X-API-Key` gate is "
-            "configurable; the platform talks to this bridge over an outbound-authenticated "
+            "*Security:* bind is localhost-only by default; a mandatory `X-API-Key` gate "
+            "protects every /api/v1/ endpoint (auto-generated on first run, stored in the "
+            "OS secret store); the platform talks to this bridge over an outbound-authenticated "
             "WebSocket channel (no inbound ports).\n\n"
             "*Real-time:* `/ws/ui` streams ticks + account updates to the local dashboard."
         ),
@@ -169,24 +177,23 @@ def create_app(ctx: BridgeContext) -> FastAPI:
     app.include_router(agent_router)
     register_dashboard(app)
 
-    # --- middleware: request id + latency logs + optional API key -------
+    # --- middleware: request id + latency logs + mandatory API key ------
     @app.middleware("http")
     async def request_context_middleware(request: Request, call_next):
         request_id = uuid.uuid4().hex[:12]
         request.state.request_id = request_id
         t0 = time.perf_counter()
-        api_key = ctx.settings.local_api_key
         path = request.url.path
-        if (
-            api_key
-            and path.startswith("/api/v1/")
-            and path != "/api/v1/get_bridge_health"
-            and request.headers.get("X-API-Key") != api_key
-        ):
-            err = BridgeError(
-                ErrorCode.UNAUTHORIZED, "Missing or invalid X-API-Key header", http_status=401
-            )
-            return _error_response(err, request_id)
+        # Mandatory X-API-Key on EVERY local API request. No empty-key =
+        # open mode; /health is a plain liveness probe, not an API call.
+        if path.startswith("/api/v1/"):
+            presented = request.headers.get("X-API-Key") or ""
+            expected = ctx.settings.local_api_key or ""
+            if not expected or not hmac.compare_digest(presented, expected):
+                err = BridgeError(
+                    ErrorCode.UNAUTHORIZED, "Missing or invalid X-API-Key header", http_status=401
+                )
+                return _error_response(err, request_id)
         try:
             response = await call_next(request)
         except BridgeError as exc:
@@ -194,7 +201,7 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             logger.exception("[API] unhandled error on {} {}", request.method, path)
             response = _error_response(
-                BridgeError(ErrorCode.INTERNAL, f"Internal error: {exc}", http_status=500),
+                BridgeError(ErrorCode.INTERNAL, f"Internal error: {redact_text(str(exc))}", http_status=500),
                 request_id,
             )
         response.headers["X-Request-Id"] = request_id

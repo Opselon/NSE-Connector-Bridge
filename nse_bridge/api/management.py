@@ -14,10 +14,12 @@ from fastapi import APIRouter, Request
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from ..config import persist_settings
+from ..config import persist_settings, validate_server_url
 from ..engine.common import BridgeContext, datetime_now_iso
 from ..errors import BridgeError, ErrorCode
+from ..logging_setup import redact_text
 from ..retcodes import translate_retcode
+from ..secrets import get_secret_store
 
 router = APIRouter(prefix="/api/v1", tags=["system"])
 
@@ -26,11 +28,16 @@ router = APIRouter(prefix="/api/v1", tags=["system"])
 # settings
 # ---------------------------------------------------------------------------
 class SettingsUpdate(BaseModel):
-    """Partial bridge configuration update. Omitted fields stay unchanged."""
+    """Partial bridge configuration update. Omitted fields stay unchanged.
+
+    Secret fields (``server_token``, ``local_api_key``) are accepted
+    here but NEVER written to config.json — the update handler routes
+    them through the secret store.
+    """
 
     server_url: str | None = Field(None, description="NSE server channel URL (wss://...; empty = disabled)")
-    server_token: str | None = Field(None, description="API key issued on the NSE Platform site")
-    local_api_key: str | None = Field(None, description="Local X-API-Key gate (empty = open on localhost)")
+    server_token: str | None = Field(None, description="API key issued on the NSE Platform site (stored in the secret store)")
+    local_api_key: str | None = Field(None, description="Local X-API-Key gate (mandatory; stored in the secret store)")
     magic: int | None = Field(None, ge=0, le=2**31 - 1)
     bot_symbol: str | None = Field(None, min_length=1, max_length=40)
     default_timeframe: str | None = Field(None, min_length=2, max_length=4)
@@ -59,6 +66,8 @@ async def get_settings(request: Request) -> dict[str, Any]:
         "ok": True,
         "data": {
             "server_url": s.server_url,
+            "server_base_url": s.server_base_url,
+            "environment": s.environment,
             "server_token_masked": _mask(s.server_token),
             "server_token_set": bool(s.server_token),
             "local_api_key_set": bool(s.local_api_key),
@@ -79,14 +88,36 @@ async def get_settings(request: Request) -> dict[str, Any]:
 
 
 @router.put("/settings", summary="Update bridge settings",
-    description="Partial update. Persisted to config.json. Server-channel fields apply immediately "
+    description="Partial update. Non-secret fields are persisted to config.json. "
+    "Secrets (server_token, local_api_key) are routed through the secret store and "
+    "never written to config.json. Server-channel fields apply immediately "
     "(the outbound channel restarts when URL/token change).")
 async def update_settings(request: Request, update: SettingsUpdate) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
     s = ctx.settings
     changed: list[str] = []
     channel_needs_restart = False
-    for key, value in update.model_dump(exclude_none=True).items():
+    values = update.model_dump(exclude_none=True)
+    # Secrets go through the secret store, never persist_settings.
+    secret_updates = {
+        key: values.pop(key) for key in ("server_token", "local_api_key") if key in values
+    }
+    if secret_updates:
+        store = get_secret_store(s.data_dir)
+        for key, value in secret_updates.items():
+            if getattr(s, key) == value:
+                continue
+            store.set_secret(key, value)
+            setattr(s, key, value)
+            changed.append(key)
+            if key == "server_token":
+                channel_needs_restart = True
+    if "server_url" in values:
+        try:
+            validate_server_url(values["server_url"])
+        except ValueError as exc:
+            raise BridgeError(ErrorCode.VALIDATION, str(exc), http_status=422)
+    for key, value in values.items():
         if key not in EDITABLE_KEYS or getattr(s, key) == value:
             continue
         setattr(s, key, value)
@@ -97,7 +128,7 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict[str,
         try:
             persist_settings(s)
         except Exception as exc:
-            logger.warning("[SETTINGS] persist failed: {}", exc)
+            logger.warning("[SETTINGS] persist failed: {}", redact_text(str(exc)))
         logger.info("[SETTINGS] updated: {}", ", ".join(changed))
 
     restarted = False
@@ -269,7 +300,7 @@ async def _probe_server(url: str, token: str, timeout: float = 5.0) -> tuple[boo
         await asyncio.wait_for(probe(), timeout=timeout + 1.0)
         return True, None
     except Exception as exc:
-        return False, str(exc)[:200]
+        return False, redact_text(str(exc))[:200]
 
 
 # ---------------------------------------------------------------------------

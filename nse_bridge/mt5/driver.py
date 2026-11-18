@@ -136,6 +136,7 @@ class Mt5Driver:
         self._pkg_version: str | None = None
         self._terminal_version: str | None = None
         self._login: int | None = None
+        self._diagnostic_code: str | None = None  # e.g. MT5_ACCOUNT_NOT_READY
         self._metrics: dict[str, OpMetrics] = {}
         self._ring: list[CallDiagnostic] = []
         self._ring_max = 50
@@ -258,6 +259,7 @@ class Mt5Driver:
             "pkg_version": self._pkg_version,
             "terminal_version": self._terminal_version,
             "login": self._login,
+            "diagnostic_code": self._diagnostic_code,
             "last_error": self._last_error,
         }
 
@@ -281,6 +283,7 @@ class Mt5Driver:
         s = self.settings
         self._set_state("CONNECTING", "initialize() attempt 1")
         self._last_error = None
+        self._diagnostic_code = None
         mt5.shutdown()  # BUG-310: release any stale attach before re-initializing
 
         last_err: Any = None
@@ -330,15 +333,27 @@ class Mt5Driver:
             pass
         self._pkg_version, self._terminal_version = pkg_ver, term_ver
 
-        # optional explicit login
-        if s.mt5_login and s.mt5_password and s.mt5_server:
-            if not mt5.login(login=s.mt5_login, password=s.mt5_password, server=s.mt5_server):
-                err = mt5.last_error()
-                mt5.shutdown()
-                self._connected = False
-                self._last_error = {"code": err[0], "message": err[1]}
-                self._set_state("AUTH_ERROR", f"login failed: {err}")
-                return {"ok": False, "error": f"login failed: {err}"}
+        # No MT5 password is ever requested or stored by the bridge (the
+        # user signs in through MT5 itself). A terminal that attached
+        # fine but has no logged-in account is a structured diagnostic,
+        # not a crash: MT5_ACCOUNT_NOT_READY, surfaced via the
+        # diagnostics/status path for the GUI to guide the user.
+        if self._login is None:
+            detail = (
+                "MT5 terminal is running but no account is logged in "
+                "(MT5_ACCOUNT_NOT_READY) — sign in through the MT5 terminal "
+                "itself; the bridge never asks for your MT5 password."
+            )
+            self._connected = False
+            self._diagnostic_code = "MT5_ACCOUNT_NOT_READY"
+            self._last_error = {"code": None, "message": detail}
+            self._set_state("AUTH_ERROR", detail)
+            return {
+                "ok": False,
+                "error": detail,
+                "diagnostic_code": "MT5_ACCOUNT_NOT_READY",
+                "guidance": "Open the MT5 terminal and log in to your trading account, then retry connect.",
+            }
 
         # account mismatch fail-safe
         if s.mt5_login:
@@ -365,6 +380,7 @@ class Mt5Driver:
             "pkg_version": pkg_ver,
             "terminal_version": term_ver,
             "login": self._login,
+            "diagnostic_code": None,
             "terminal_name": term_ver,
             "terminal_connected": bool(getattr(term_info, "connected", False)) if term_info else None,
         }

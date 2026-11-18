@@ -13,6 +13,9 @@ dependencies = [
     "loguru==0.8.0",
     "numpy==2.5.5",
     "pywebview==6.2.1",
+    # keyring provides Windows Credential Manager on win32; on Linux the
+    # dev-only file fallback is used instead (never required for tests).
+    "keyring==25.7.0; sys_platform == 'win32'",
     # MetaTrader5 ships Windows-only wheels.
     "MetaTrader5==5.0.6231; sys_platform == 'win32'",
     "pyinstaller==6.22.3",

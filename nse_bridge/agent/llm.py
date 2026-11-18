@@ -22,9 +22,15 @@ class LlmClient:
 
     @classmethod
     def from_config(cls, cfg) -> "LlmClient | None":
-        if not cfg.agent_llm_base_url or not cfg.agent_llm_api_key:
+        # Phase 1 removed the agent_llm_* config fields; getattr keeps
+        # this working (no LLM) until the agent package is deleted in
+        # Phase 3. Do NOT re-add the config fields.
+        base = getattr(cfg, "agent_llm_base_url", "") or ""
+        key = getattr(cfg, "agent_llm_api_key", "") or ""
+        model = getattr(cfg, "agent_llm_model", "gpt-4o-mini") or "gpt-4o-mini"
+        if not base or not key:
             return None
-        return cls(cfg.agent_llm_base_url, cfg.agent_llm_api_key, cfg.agent_llm_model)
+        return cls(base, key, model)
 
     def review(
         self,
