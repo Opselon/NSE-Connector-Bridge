@@ -1,11 +1,11 @@
 """Unit tests for config defaults + reconnect backoff arithmetic.
 
-There is no standalone retry/backoff helper in the codebase yet — the
-backoff lives inline in `realtime/channel.py::_run` (start at
-`reconnect_initial_ms`, multiply by 1.8, cap at `reconnect_max_ms`,
-plus up to 30% jitter). These tests pin the config defaults that
-formula reads, and verify the formula itself so a later extraction
-of a helper cannot silently change the schedule.
+The backoff lives in `realtime/channel.py` (`backoff_delay` /
+`backoff_with_jitter`): CONTRACT v1 §5.4 — start at
+`reconnect_initial_ms` (500 ms), double, cap at `reconnect_max_ms`
+(30 s), plus 0–100 ms jitter. These tests pin the config defaults
+that formula reads, and verify the formula itself so a later change
+cannot silently alter the schedule.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def test_server_channel_defaults():
 
 def test_reconnect_backoff_defaults():
     s = _settings()
-    assert s.reconnect_initial_ms == 1000
+    assert s.reconnect_initial_ms == 500  # CONTRACT v1 §5.4: initial 500 ms
     assert s.reconnect_max_ms == 30000
     assert s.reconnect_initial_ms <= s.reconnect_max_ms
 
@@ -60,26 +60,26 @@ def test_mt5_defaults():
 
 
 def _backoff_schedule(initial_ms: int, max_ms: int, steps: int) -> list[float]:
-    """Mirror of the schedule in realtime/channel.py::_run (no jitter)."""
+    """Mirror of the schedule in realtime/channel.py::backoff_delay (no jitter)."""
     backoff = initial_ms / 1000.0
     out = []
     for _ in range(steps):
         out.append(backoff)
-        backoff = min(backoff * 1.8, max_ms / 1000.0)
+        backoff = min(backoff * 2.0, max_ms / 1000.0)
     return out
 
 
-def test_reconnect_backoff_schedule_grows_by_1_8x_and_caps():
-    schedule = _backoff_schedule(1000, 30000, 12)
-    assert schedule[0] == pytest.approx(1.0)
-    assert schedule[1] == pytest.approx(1.8)
-    assert schedule[2] == pytest.approx(3.24)
+def test_reconnect_backoff_schedule_doubles_and_caps():
+    schedule = _backoff_schedule(500, 30000, 12)
+    assert schedule[0] == pytest.approx(0.5)
+    assert schedule[1] == pytest.approx(1.0)
+    assert schedule[2] == pytest.approx(2.0)
     assert schedule[-1] == pytest.approx(30.0)  # capped at reconnect_max_ms
     assert all(a <= b for a, b in itertools.pairwise(schedule))
     assert all(v <= 30.0 for v in schedule)
 
 
 def test_reconnect_backoff_respects_custom_max():
-    schedule = _backoff_schedule(1000, 5000, 10)
+    schedule = _backoff_schedule(500, 5000, 10)
     assert schedule[-1] == pytest.approx(5.0)
     assert all(v <= 5.0 for v in schedule)

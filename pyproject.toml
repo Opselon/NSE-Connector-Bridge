@@ -26,6 +26,10 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "trade: tests that execute real trades on the connected account (demo-safe, 0.01 lots, auto-cleanup)",
+    "unit: Linux-runnable unit tests (no MT5)",
+    "mock_integration: integration tests against the CONTRACT v1 mock server (real local WS/HTTP, no MT5)",
+    "real_mt5: tests that require a live MT5 terminal (Windows CI only; must FAIL, never skip, when MT5 is unavailable)",
+    "manual: manual verification steps, not automated",
 ]
 log_cli = false
 

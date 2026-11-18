@@ -19,11 +19,10 @@ eager annotation evaluation so FastAPI/pydantic can resolve `rm | None`.
 
 import asyncio
 import hmac
-import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Generic, Optional, TypeVar
+from typing import Any, Generic, TypeVar
 
 from fastapi import Body, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
@@ -35,15 +34,15 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .. import BRIDGE_VERSION
 from ..engine.common import BridgeContext
-from ..engine.registry import CATEGORY_ORDER, REGISTRY, CommandSpec, all_commands
+from ..engine.registry import REGISTRY, CommandSpec, all_commands
 from ..errors import BridgeError, ErrorCode
+from ..gui.dashboard import register_dashboard
 from ..logging_setup import redact_text, sanitize_payload
 from ..realtime.bus import EventBus, start_streaming, stop_streaming
 from ..realtime.channel import ServerChannel
 from ..secrets import ensure_local_api_key
-from ..gui.dashboard import register_dashboard
-from .management import router as management_router
 from .agent_routes import router as agent_router
+from .management import router as management_router
 
 T = TypeVar("T")
 
@@ -62,9 +61,9 @@ TAG_METADATA = [
 ]
 
 
-class Envelope(BaseModel, Generic[T]):
+class Envelope(BaseModel, Generic[T]):  # noqa: UP046 — pydantic/FastAPI generic compat; keep Generic[T]
     ok: bool = True
-    data: Optional[T] = None
+    data: T | None = None
 
 
 class ErrorDetail(BaseModel):
@@ -116,7 +115,7 @@ def build_endpoint(spec: CommandSpec, ctx: BridgeContext):
 
     else:
 
-        async def endpoint(request: Request, body: dict | None = Body(None)):
+        async def endpoint(request: Request, body: dict | None = Body(None)):  # noqa: B008 — FastAPI Body() default is the documented pattern
             result = await run_in_threadpool(spec.handler, ctx, body)
             return {"ok": True, "data": result}
 
@@ -133,19 +132,36 @@ def create_app(ctx: BridgeContext) -> FastAPI:
     async def lifespan(app: FastAPI):
         bus = EventBus()
         app.state.bus = bus
+        # CONTRACT v1 §3: REST client + sync engine (the ONLY sync
+        # channel). The server channel reuses them; the pollers enqueue
+        # account/positions batches into the engine.
+        from ..server.rest import RestClient
+        from ..server.sync import SyncEngine
+
+        rest_client = RestClient(ctx.settings, ctx.get_or_create_device_id())
+        sync_engine = SyncEngine(rest_client, ctx)
+        ctx.rest_client = rest_client
+        ctx.sync_engine = sync_engine
+        app.state.rest_client = rest_client
+        app.state.sync_engine = sync_engine
         pollers, stop_event = start_streaming(ctx, bus)
-        channel = ServerChannel(ctx, bus)
+        channel = ServerChannel(ctx, bus, rest_client=rest_client, sync_engine=sync_engine)
         channel.start()
         app.state.channel = channel
         ctx.bus = bus
+        sync_engine.start_flush_loop(interval_s=5.0)  # engine tracks the task itself
         # every order dispatch outcome flows to dashboard + server as trade_event
         ctx.trade_metrics.event_sink = lambda evt: bus.publish("trade_event", evt)
         logger.info("[APP] realtime streaming started (server_channel={})", bool(ctx.settings.server_url))
         yield
         await channel.stop()
+        await sync_engine.stop_flush_loop()
+        await rest_client.close()
         stop_streaming(pollers, stop_event)
         ctx.trade_metrics.event_sink = None
         ctx.bus = None
+        ctx.rest_client = None
+        ctx.sync_engine = None
         logger.info("[APP] realtime streaming stopped")
 
     app = FastAPI(
@@ -315,7 +331,7 @@ def create_app(ctx: BridgeContext) -> FastAPI:
                 reader_task.cancel()
                 try:
                     await reader_task
-                except (asyncio.CancelledError, Exception):
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001, S110 — dashboard socket teardown must never raise
                     pass
 
     # --- dynamic per-command endpoints ------------------------------------

@@ -9,10 +9,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from loguru import logger
-
 from ..config import BridgeSettings
-from ..errors import BridgeError, ErrorCode, not_connected
+from ..errors import BridgeError, ErrorCode
 from ..mt5.driver import Mt5Driver
 
 
@@ -35,7 +33,7 @@ class LogStore:
                         "message": rec["message"],
                     }
                 )
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 — a log sink must never raise
             pass
 
     def tail(self, limit: int = 200, level: str | None = None) -> list[dict[str, Any]]:
@@ -65,7 +63,7 @@ class TradeExecMetrics:
         if self.event_sink is not None:
             try:
                 self.event_sink(event)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 — a metrics sink must never raise
                 pass
 
     def record(self, op: str, ok: str, ms: float, retcode: int | None, detail: dict[str, Any] | None = None) -> None:
@@ -172,6 +170,8 @@ class BridgeContext:
     trade_metrics: TradeExecMetrics = field(default_factory=TradeExecMetrics)
     bus: Any = None  # EventBus, wired at app startup (loop-bound; set once)
     agent: Any = None  # AgentService, wired at app startup
+    rest_client: Any = None  # RestClient (CONTRACT v1 §3), wired at app startup
+    sync_engine: Any = None  # SyncEngine (CONTRACT v1 §3.3), wired at app startup
     server_channel_state: dict[str, Any] = field(
         default_factory=lambda: {
             "enabled": False, "connected": False, "url": "", "last_connected_at": None,
@@ -195,7 +195,7 @@ class BridgeContext:
 
             try:
                 persist_settings(self.settings)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 — device-id persistence is best-effort
                 pass
         return self.device_id
 

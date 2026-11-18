@@ -138,7 +138,8 @@ class BridgeSettings(BaseSettings):
     # Runtime-only secret (from the secret store, never config.json).
     server_token: str = ""  # auth token issued by the platform
     device_id: str = ""  # auto-generated + persisted when empty
-    reconnect_initial_ms: int = 1000
+    # CONTRACT v1 §5.4: initial backoff 500 ms, doubling, capped at 30 s.
+    reconnect_initial_ms: int = 500
     reconnect_max_ms: int = 30000
     heartbeat_interval_s: float = 15.0
 

@@ -231,9 +231,11 @@ def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) 
                 details={"ticket": ticket},
             )
         symbol = str(_f(pos, "symbol", ""))
-        filling = resolve_filling_mode(ctx, symbol)
+        # Validates the symbol/connection; TRADE_ACTION_SLTP carries no
+        # filling mode, so the resolved value is intentionally unused.
+        resolve_filling_mode(ctx, symbol)
 
-        def job(mt5: Any):
+        def job(mt5: Any, symbol=symbol, ticket=ticket, sl=sl, tp=tp):
             return mt5.order_send({
                 "action": mt5.TRADE_ACTION_SLTP,
                 "position": int(ticket),
@@ -268,6 +270,31 @@ def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) 
     )
 
 
+def modify_pending_order_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) -> dict[str, Any]:
+    """Modify SL/TP of a pending order (contract §17.4 ``modify_pending``).
+
+    SL/TP ONLY — price/volume/expiration changes have no verified
+    action and are out of scope (§17.4). The pending order's price and
+    volume are preserved from the live order; the dispatch reuses the
+    proven local ``trade_modify_pending_order`` request shape
+    (``TRADE_ACTION_MODIFY`` with the order ticket).
+
+    CAPABILITY GATE (§17.4): this function is reachable ONLY through
+    the server command path after the ``modify_pending`` gate passes
+    (:class:`nse_bridge.server.commands.CommandValidator` with
+    ``modify_pending_proven=True``). The gate is closed until the
+    §17.4 close-out (live proof at market open + published minimum
+    connector_version) is complete — calling this from anywhere else
+    bypasses that gate.
+    """
+    # Deferred import: orders.py imports this module at top level.
+    from .orders import ModifyPendingRequest, trade_modify_pending_order
+
+    return trade_modify_pending_order(
+        ctx, ModifyPendingRequest(ticket=ticket, sl=sl, tp=tp)
+    )
+
+
 def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None) -> dict[str, Any]:
     """Close (fully or partially) with idempotent ambiguous-close handling (ported)."""
     ctx.driver.ensure_connected()
@@ -294,7 +321,16 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
         tick = _fresh_tick(ctx, symbol)
         filling = resolve_filling_mode(ctx, symbol)
 
-        def job(mt5: Any):
+        def job(  # loop variables bound as defaults (B023): the job runs synchronously
+            mt5: Any,
+            pos_type=pos_type,
+            tick=tick,
+            close_volume=close_volume,
+            symbol=symbol,
+            pos_raw=pos_raw,
+            filling=filling,
+            ticket=ticket,
+        ):
             close_type = mt5.ORDER_TYPE_SELL if pos_type == 0 else mt5.ORDER_TYPE_BUY
             price = float(tick.bid) if pos_type == 0 else float(tick.ask)
             return mt5.order_send({
