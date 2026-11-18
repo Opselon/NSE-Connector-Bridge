@@ -107,9 +107,18 @@ class Entitlements:
             ai_coach=bool(raw.get("ai_coach", False)),
             position_manager=bool(raw.get("position_manager", False)),
             auto_trade=bool(raw.get("auto_trade", False)),
-            max_devices=int(raw.get("max_devices") or 0),
-            max_accounts=int(raw.get("max_accounts") or 0),
+            max_devices=_safe_count(raw.get("max_devices")),
+            max_accounts=_safe_count(raw.get("max_accounts")),
         )
+
+
+def _safe_count(value: Any) -> int:
+    """Coerce a server count to int (R4): a non-numeric string (``"abc"``)
+    must degrade to 0, never crash enrolment with ValueError."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 @dataclass

@@ -158,6 +158,15 @@ def market_order(
     # symbol here (spec §4); exact broker names pass through untouched.
     symbol = resolve_order_symbol(ctx, symbol)
     tick = _fresh_tick(ctx, symbol)
+    # A3: a tick with a missing/zero price must never reach the broker
+    # as a zero-price order — fail closed here, before dispatch.
+    price = float(tick.ask) if side == "buy" else float(tick.bid)
+    if not price > 0:
+        raise BridgeError(
+            ErrorCode.MT5_CALL_FAILED,
+            f"No usable {side} price for '{symbol}' (tick {side} is {price}) — refusing to send a zero-price order.",
+            details={"symbol": symbol, "side": side, "price": price},
+        )
     filling = resolve_filling_mode(ctx, symbol)
     # No hardcoded magic: per-command magic wins, else the explicitly
     # configured device magic, else None = no magic stamped (the
@@ -167,9 +176,8 @@ def market_order(
     mgc = magic if magic is not None else ctx.settings.magic
     mgc_for_match = mgc if mgc is not None else 0
 
-    def job(mt5: Any):
+    def job(mt5: Any, price=price):  # bound at definition time (B023)
         order_type = mt5.ORDER_TYPE_BUY if side == "buy" else mt5.ORDER_TYPE_SELL
-        price = float(tick.ask) if side == "buy" else float(tick.bid)
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
@@ -365,12 +373,22 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
                 details={"ticket": ticket, "position_volume": pos_volume},
             )
         tick = _fresh_tick(ctx, symbol)
+        # A3: a tick with a missing/zero price must never reach the broker
+        # as a zero-price close — fail closed here, before dispatch.
+        price = float(tick.bid) if pos_type == 0 else float(tick.ask)
+        if not price > 0:
+            raise BridgeError(
+                ErrorCode.MT5_CALL_FAILED,
+                f"No usable close price for position #{ticket} (tick price is {price}) — refusing to send a zero-price close.",
+                details={"ticket": ticket, "symbol": symbol, "price": price},
+            )
         filling = resolve_filling_mode(ctx, symbol)
 
         def job(  # loop variables bound as defaults (B023): the job runs synchronously
             mt5: Any,
             pos_type=pos_type,
             tick=tick,
+            price=price,
             close_volume=close_volume,
             symbol=symbol,
             pos_raw=pos_raw,
@@ -378,7 +396,6 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
             ticket=ticket,
         ):
             close_type = mt5.ORDER_TYPE_SELL if pos_type == 0 else mt5.ORDER_TYPE_BUY
-            price = float(tick.bid) if pos_type == 0 else float(tick.ask)
             return mt5.order_send(
                 {
                     "action": mt5.TRADE_ACTION_DEAL,

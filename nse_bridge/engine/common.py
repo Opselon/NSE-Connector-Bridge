@@ -326,6 +326,36 @@ def require_symbol_info(ctx: BridgeContext, symbol: str):
     return build_symbol_model(raw, ctx.settings.broker_utc_offset_minutes)
 
 
+def _coerce_filling_bitmask(raw: Any) -> int | None:
+    """Map a broker ``filling_mode`` value to the MT5 bitmask (1=FOK, 2=IOC).
+
+    Ints pass through; known strings map by name (``"IOC"``/``"FOK"``/
+    ``"RETURN"``, case-insensitive, with or without the
+    ``ORDER_FILLING_`` prefix); numeric strings parse as ints. Returns
+    None for unparseable garbage (the caller falls back to IOC) — a
+    non-numeric string (R3) must never crash order placement.
+    """
+    if raw is None:
+        return 0
+    if isinstance(raw, bool):
+        return int(raw)
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    if isinstance(raw, str):
+        text = raw.strip().upper()
+        if text in ("IOC", "ORDER_FILLING_IOC"):
+            return 2
+        if text in ("FOK", "ORDER_FILLING_FOK"):
+            return 1
+        if text in ("RETURN", "ORDER_FILLING_RETURN"):
+            return 0
+        try:
+            return int(float(text))
+        except ValueError:
+            return None
+    return None
+
+
 def resolve_filling_mode(ctx: BridgeContext, symbol: str) -> int:
     """Dynamic filling resolution from the broker bitmask (ported adapter logic).
 
@@ -342,7 +372,9 @@ def resolve_filling_mode(ctx: BridgeContext, symbol: str) -> int:
     raw = ctx.driver.run(job, op="symbol_info", context={"symbol": symbol})
     if raw is None:
         return 1  # ORDER_FILLING_IOC default
-    modes = int(_f(raw, "filling_mode", 0) or 0)
+    modes = _coerce_filling_bitmask(_f(raw, "filling_mode", 0))
+    if modes is None:
+        return 1  # ORDER_FILLING_IOC default on garbage
     if modes & 2:
         return 1  # ORDER_FILLING_IOC
     if modes & 1:
