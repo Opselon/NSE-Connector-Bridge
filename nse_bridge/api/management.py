@@ -60,6 +60,9 @@ class SettingsUpdate(BaseModel):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] | None = None
     gui_mode: Literal["auto", "webview", "browser", "none"] | None = None
     mt5_terminal_path: str | None = None
+    mt5_custom_terminal_dirs: str | None = Field(
+        None, description="Comma-separated extra directories searched for terminals (custom/portable installs)"
+    )
 
 
 EDITABLE_KEYS = set(SettingsUpdate.model_fields.keys())
@@ -93,6 +96,7 @@ async def get_settings(request: Request) -> dict[str, Any]:
             "log_level": s.log_level,
             "gui_mode": s.gui_mode,
             "mt5_terminal_path": s.mt5_terminal_path,
+            "mt5_custom_terminal_dirs": s.mt5_custom_terminal_dirs,
             "device_id": ctx.get_or_create_device_id(),
             "config_file": str(s.config_file),
             "server_channel": ctx.server_channel_state,
@@ -104,7 +108,11 @@ async def get_settings(request: Request) -> dict[str, Any]:
     description="Partial update. Non-secret fields are persisted to config.json. "
     "Secrets (server_token, local_api_key) are routed through the secret store and "
     "never written to config.json. Server-channel fields apply immediately "
-    "(the outbound channel restarts when URL/token change).")
+    "(the outbound channel restarts when URL/token change). Terminal fields "
+    "(mt5_terminal_path, mt5_custom_terminal_dirs) re-run discovery immediately "
+    "(fresh list returned in this response); changing the terminal path while the "
+    "driver is connected disconnects it from the old terminal instead of keeping "
+    "a stale selection.")
 async def update_settings(request: Request, update: SettingsUpdate) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
     s = ctx.settings
@@ -170,6 +178,31 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict[str,
             await channel.stop()
             channel.start()
             restarted = True
+
+    # Terminal re-discovery (spec §3: re-discover after configuration
+    # changes). Changing the terminal path or the custom terminal dirs
+    # re-runs discovery immediately and the fresh list is returned in
+    # this response — callers never have to guess whether a later GET
+    # will pick the change up. If the configured terminal path changed
+    # while the driver was attached, the driver is still connected to
+    # the OLD terminal: disconnect it rather than silently keep a
+    # stale selected terminal (the next connect attaches to the new
+    # path). A custom-dirs-only change leaves the attached terminal
+    # alone — the selection did not move.
+    terminals_rediscovered = bool(
+        {"mt5_terminal_path", "mt5_custom_terminal_dirs"} & set(changed)
+    )
+    discovery: dict[str, Any] | None = None
+    driver_disconnected = False
+    if terminals_rediscovered:
+        discovery = _discover_terminals(ctx)
+        if "mt5_terminal_path" in changed and ctx.driver.connected:
+            ctx.driver.disconnect()
+            driver_disconnected = True
+            logger.info(
+                "[SETTINGS] terminal path changed while connected — "
+                "driver disconnected from the old terminal"
+            )
     return {
         "ok": True,
         "data": {
@@ -177,6 +210,9 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict[str,
             "server_channel_restarted": restarted,
             "restart_required": restart_required,
             "server_channel": ctx.server_channel_state,
+            "terminals_rediscovered": terminals_rediscovered,
+            "driver_disconnected": driver_disconnected,
+            "discovery": discovery,
         },
     }
 
@@ -483,6 +519,7 @@ def _discover_terminals(ctx: BridgeContext) -> dict[str, Any]:
                 "running": False,
                 "source": "configured",
                 "exists": Path(configured).is_file(),
+                "data_dir": None,
                 "selected": True,
             }
         )
@@ -748,7 +785,10 @@ async def post_updates_download(request: Request) -> dict[str, Any]:
 @router.get("/mt5/terminals", summary="Detected MetaTrader 5 terminals",
     description="All discovered terminals (Phase 5): configured path, env var, standard install "
     "locations, App Paths registry, custom/portable directories, running processes — each with "
-    "version + running status. Selection stays user-driven (PUT /settings mt5_terminal_path).")
+    "version, data directory (when determinable, else null — never guessed), + running status. "
+    "Discovery re-runs on every request, and PUT /settings re-runs it immediately when the "
+    "terminal path or custom terminal dirs change. Selection stays user-driven "
+    "(PUT /settings mt5_terminal_path).")
 async def list_mt5_terminals(request: Request) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
     state = ctx.driver.connection_state_dict()

@@ -239,7 +239,7 @@ def get_symbol_tick_size(ctx: BridgeContext, params: dict[str, Any] | None) -> d
     number=23,
     category="symbols",
     title="Get Symbol Point",
-    description="One point value for the symbol (e.g. 0.00001 on EURUSD 5-digit).",
+    description="One point value for the symbol (e.g. 0.00001 on a 5-digit pair).",
     response_model=PointResponse,
 )
 def get_symbol_point(ctx: BridgeContext, params: dict[str, Any] | None) -> dict[str, Any]:

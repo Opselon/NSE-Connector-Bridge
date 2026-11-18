@@ -19,6 +19,20 @@ trace. For verbose output, restart with `--diagnostic`
 | `MT5_UNSUPPORTED_VERSION` | Terminal build is too old/new for the driver | Update the terminal (or the Bridge, if a newer minimum is published). |
 | `MT5_NOT_CONNECTED` (local API error) | A local command ran while the driver was disconnected | `connect_mt5` first (Connection screen or `POST /api/v1/connect_mt5`). |
 
+### Terminal data directories (`data_dir` in `GET /api/v1/mt5/terminals`)
+
+Each discovered terminal reports a `data_dir` when it can be determined, `null`
+otherwise — a path is never guessed. Portable installs resolve to the folder
+next to the executable once it carries live data markers (`MQL5` + `Logs`);
+standard installs live under `%APPDATA%\MetaQuotes\Terminal\<hash>`, and that
+folder is attributed to a terminal only when exactly one terminal and exactly
+one data directory exist on the machine. A `null` data directory means "not
+determinable from this machine", not "no data directory exists". Changing the
+terminal path or custom terminal directories in Settings re-runs discovery
+immediately (the fresh list is in the `PUT /settings` response); changing the
+terminal path while connected disconnects the driver from the old terminal —
+reconnect to attach to the new one.
+
 ## 2. "AutoTrading disabled" — the hidden killer (MT5 build 6306+)
 
 Symptom: every Python-API order is rejected with retcode **10027**
