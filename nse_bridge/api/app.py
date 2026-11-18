@@ -361,7 +361,23 @@ def create_app(ctx: BridgeContext) -> FastAPI:
     # --- system endpoints -------------------------------------------------
     @app.get("/health", tags=["system"], summary="Plain liveness probe (no auth)")
     async def health():
-        return {"ok": True, "status": "alive", "mt5_connected": ctx.driver.connected}
+        # Real-MT5 defect 4 (2026-11-18): the terminal lost its broker
+        # link for 4+ minutes while /health still reported
+        # mt5_connected:true — that flag only measures the IPC link to
+        # the terminal. The response now also carries the terminal→
+        # broker link from the driver's live liveness probe
+        # (terminal_info().connected + login), so a dead broker link
+        # can never report healthy. broker_connected is None (unknown)
+        # when the IPC link itself is down or the probe fails; ok /
+        # status stay process liveness, not broker health.
+        broker = await run_in_threadpool(ctx.driver.refresh_terminal)
+        return {
+            "ok": True,
+            "status": "alive",
+            "mt5_connected": ctx.driver.connected,
+            "broker_connected": broker["connected"] if broker else None,
+            "broker": broker,
+        }
 
     @app.get(
         "/api/v1/commands",
