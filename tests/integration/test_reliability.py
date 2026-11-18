@@ -6,7 +6,7 @@ mock server (no MT5, no live Platform):
 - a Bridge restart mid-operation re-queues a durably persisted
   command result and the mock server receives it on reconnect;
 - the diagnostics summary exposes the telemetry queue state and the
-  15-scenario self-healing state (data only — the GUI renders it).
+  20-scenario self-healing state (data only — the GUI renders it).
 """
 
 from __future__ import annotations
@@ -142,7 +142,7 @@ def test_diagnostics_summary_exposes_telemetry_and_self_healing(tmp_path):
     assert telemetry["queue"]["max_items"] == 128
 
     healing = data["self_healing"]
-    assert len(healing) == 15
+    assert len(healing) == 20
     assert healing["mt5_close"]["status"] == "degraded"
     assert healing["mt5_close"]["occurrences"] == 1
     assert healing["mt5_close"]["last_error_code"] == "MT5_NOT_RUNNING"
@@ -153,7 +153,7 @@ def test_diagnostics_summary_exposes_telemetry_and_self_healing(tmp_path):
 @pytest.mark.mock_integration
 def test_diagnostics_summary_without_reliability_wired_reports_defaults(tmp_path):
     """A bare context (no lifespan ran) still returns a well-formed
-    summary — all 15 scenarios present, never claiming a recovery."""
+    summary — all 20 scenarios present, never claiming a recovery."""
     settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
     driver = Mt5Driver(settings)
     ctx = BridgeContext(settings=settings, driver=driver)
@@ -170,5 +170,5 @@ def test_diagnostics_summary_without_reliability_wired_reports_defaults(tmp_path
     data = resp.json()["data"]
     assert data["telemetry"]["sink_inert"] is True
     assert data["telemetry"]["queue"]["queued"] == 0
-    assert len(data["self_healing"]) == 15
+    assert len(data["self_healing"]) == 20
     assert all(entry["occurrences"] == 0 for entry in data["self_healing"].values())

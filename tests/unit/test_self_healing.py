@@ -25,15 +25,23 @@ def _registry():
     return SelfHealingRegistry(telemetry=TelemetryEmitter("dev-1"))
 
 
-def test_registry_covers_exactly_the_15_contract_scenarios():
-    assert len(SCENARIOS) == 15
+def test_registry_covers_exactly_the_20_spec_scenarios():
+    assert len(SCENARIOS) == 20
     assert {s.value for s in SCENARIOS} == {
         "internet_loss", "platform_down", "ws_drop", "server_restart",
         "mt5_close", "mt5_restart", "ipc_loss", "terminal_path_change",
         "auth_expiry", "registration_invalid", "lost_execution_response",
         "duplicate_commands", "expired_command", "invalid_local_config",
         "bridge_restart_mid_operation",
+        # Phase B3 (spec §13.9, 13.10, 13.12, 13.17, 13.19+13.20):
+        "account_disconnect", "broker_connection_change",
+        "symbol_unavailable", "diagnostic_queue_full", "update_failure",
     }
+    # Every scenario has a handler: no entry falls through to the
+    # "no handler registered" failure.
+    registry = _registry()
+    for scenario in SCENARIOS:
+        assert getattr(registry, f"_handle_{scenario.value}", None) is not None
     summary = _registry().summary()
     assert set(summary) == {s.value for s in SCENARIOS}
     for entry in summary.values():
@@ -348,3 +356,242 @@ def test_handler_crash_is_recorded_not_raised():
     )
     assert state.status == "failed"
     assert state.last_error_code == "self_healing_error"
+
+
+# ---------------------------------------------------------------------------
+# Phase B3 — the 5 missing spec §13 entries.
+# Mapping (see self_healing.py module docstring): account_disconnect
+# = §13.9, broker_connection_change = §13.10, symbol_unavailable =
+# §13.12, diagnostic_queue_full = §13.17, update_failure = §13.19
+# (download) + §13.20 (verification) in ONE entry — the handler
+# branches on stage, so both spec items are covered and asserted.
+# ---------------------------------------------------------------------------
+def test_account_disconnect_marks_unavailable_no_execution_attempted():
+    state = _registry().handle(
+        Scenario.ACCOUNT_DISCONNECT,
+        HealingContext(account_connected=False, account_was_connected=True,
+                        account_login="12345678901"),
+    )
+    assert state.status == "degraded"
+    assert state.last_error_code == "MT5_ACCOUNT_NOT_READY"
+    assert "no execution attempted" in state.last_action
+    assert "was connected and is now lost" in state.last_action
+    assert state.detail == "account_login=12345678901"
+
+
+def test_account_disconnect_requests_reconnect_when_wired():
+    called: list[str] = []
+    state = _registry().handle(
+        Scenario.ACCOUNT_DISCONNECT,
+        HealingContext(account_connected=False,
+                       on_account_reconnect=lambda: called.append("account-reconnect")),
+    )
+    assert state.status == "degraded"
+    assert "account reconnect requested" in state.last_action
+    assert called == ["account-reconnect"]
+
+
+def test_account_disconnect_ok_when_account_connected():
+    state = _registry().handle(
+        Scenario.ACCOUNT_DISCONNECT, HealingContext(account_connected=True)
+    )
+    assert state.status == "ok"
+
+
+def test_broker_connection_change_triggers_fresh_sync_and_symbol_refresh():
+    called: list[str] = []
+    state = _registry().handle(
+        Scenario.BROKER_CONNECTION_CHANGE,
+        HealingContext(
+            broker_server="NewBroker-Live", broker_server_previous="OldBroker-Demo",
+            broker_server_changed=True,
+            on_resync=lambda: called.append("resync"),
+            on_refresh_symbols=lambda: called.append("symbols"),
+        ),
+    )
+    assert state.status == "recovering"
+    assert state.last_error_code == "broker_connection_changed"
+    assert "fresh sync account → positions" in state.last_action
+    assert "never assumed to carry over" in state.last_action
+    assert "symbol refresh requested" in state.last_action
+    assert state.detail == "broker_server OldBroker-Demo -> NewBroker-Live"
+    assert called == ["resync", "symbols"]
+
+
+def test_broker_connection_change_without_resync_stays_degraded():
+    state = _registry().handle(
+        Scenario.BROKER_CONNECTION_CHANGE,
+        HealingContext(
+            broker_server="NewBroker-Live", broker_server_previous="OldBroker-Demo",
+            broker_server_changed=True,
+        ),
+    )
+    assert state.status == "degraded"
+    assert state.last_error_code == "broker_connection_changed"
+
+
+def test_broker_connection_change_ok_when_stable():
+    state = _registry().handle(
+        Scenario.BROKER_CONNECTION_CHANGE,
+        HealingContext(broker_server="Broker-Live", broker_server_changed=False),
+    )
+    assert state.status == "ok"
+    assert "stable on Broker-Live" in state.last_action
+
+
+def test_broker_connection_change_unknown_server_is_degraded_not_ok():
+    state = _registry().handle(
+        Scenario.BROKER_CONNECTION_CHANGE,
+        HealingContext(broker_server=None, broker_server_changed=False),
+    )
+    assert state.status == "degraded"
+    assert state.last_error_code == "broker_server_unknown"
+
+
+def test_symbol_unavailable_rejects_never_substitutes():
+    called: list[str] = []
+    state = _registry().handle(
+        Scenario.SYMBOL_UNAVAILABLE,
+        HealingContext(
+            symbol="XAUUSD.a", symbol_available=False,
+            symbol_unavailable_reason="not visible in market watch",
+            on_refresh_symbols=lambda: called.append("refresh"),
+        ),
+    )
+    assert state.status == "degraded"
+    assert state.last_error_code == "symbol_unavailable"
+    assert "never guessed" in state.last_action
+    assert "no similarly named symbol is substituted" in state.last_action
+    assert state.detail == "symbol=XAUUSD.a; reason=not visible in market watch"
+    assert called == ["refresh"]
+
+
+def test_symbol_unavailable_ok_when_available():
+    state = _registry().handle(
+        Scenario.SYMBOL_UNAVAILABLE,
+        HealingContext(symbol="EURUSD", symbol_available=True),
+    )
+    assert state.status == "ok"
+
+
+def test_diagnostic_queue_full_requests_drain_and_reports_counts():
+    called: list[str] = []
+    stats = {"queued": 128, "max_items": 128, "evicted": 3, "expired": 1}
+    state = _registry().handle(
+        Scenario.DIAGNOSTIC_QUEUE_FULL,
+        HealingContext(
+            queue_full=True, queue_stats=stats,
+            on_drain_diagnostics=lambda: called.append("drain"),
+        ),
+    )
+    assert state.status == "recovering"
+    assert state.last_error_code == "diagnostic_queue_full"
+    assert "evicted with a warning" in state.last_action
+    assert "drain requested" in state.last_action
+    assert state.detail == "queued=128 max_items=128 evicted=3 expired=1"
+    assert called == ["drain"]
+
+
+def test_diagnostic_queue_full_without_drain_says_ttl_honestly():
+    state = _registry().handle(
+        Scenario.DIAGNOSTIC_QUEUE_FULL, HealingContext(queue_full=True)
+    )
+    assert state.status == "recovering"
+    assert "age out by TTL" in state.last_action
+    assert "no diagnostics endpoint exists yet, D1" in state.last_action
+
+
+def test_diagnostic_queue_full_ok_when_within_bound():
+    state = _registry().handle(
+        Scenario.DIAGNOSTIC_QUEUE_FULL, HealingContext(queue_full=False)
+    )
+    assert state.status == "ok"
+
+
+def test_update_download_failure_is_retryable_nothing_staged():
+    called: list[str] = []
+    state = _registry().handle(
+        Scenario.UPDATE_FAILURE,
+        HealingContext(
+            update_stage="download", update_error_code="DOWNLOAD_FAILED",
+            update_error="Download failed: connection reset",
+            update_version="1.2.0",
+            on_retry_update=lambda: called.append("retry"),
+        ),
+    )
+    assert state.status == "recovering"
+    assert state.last_error_code == "DOWNLOAD_FAILED"
+    assert "nothing staged" in state.last_action
+    assert "retry is safe" in state.last_action
+    assert "update retry requested" in state.last_action
+    assert state.detail == "stage=download version=1.2.0; Download failed: connection reset"
+    assert called == ["retry"]
+
+
+def test_update_download_failure_without_retry_callback_awaits_retry():
+    state = _registry().handle(
+        Scenario.UPDATE_FAILURE,
+        HealingContext(update_stage="download", update_error_code="DOWNLOAD_FAILED"),
+    )
+    assert state.status == "recovering"
+    assert "awaiting retry" in state.last_action
+
+
+def test_update_verification_failure_is_terminal_never_retried():
+    called: list[str] = []
+    state = _registry().handle(
+        Scenario.UPDATE_FAILURE,
+        HealingContext(
+            update_stage="verify", update_error_code="SHA256_MISMATCH",
+            update_error="SHA-256 mismatch — the downloaded bytes do not match",
+            update_version="1.2.0",
+            on_retry_update=lambda: called.append("retry"),
+        ),
+    )
+    assert state.status == "failed"
+    assert state.last_error_code == "SHA256_MISMATCH"
+    assert "artifact REFUSED" in state.last_action
+    assert "nothing staged, nothing installed" in state.last_action
+    assert "never be retried" in state.last_action
+    assert called == []  # the retry callback must NOT fire for a bad artifact
+    assert state.detail.startswith("stage=verify version=1.2.0;")
+
+
+def test_update_verification_failure_classified_by_code_without_stage():
+    # A caller that only knows the UpdateError code (no stage) is
+    # still classified as verification — never retried.
+    state = _registry().handle(
+        Scenario.UPDATE_FAILURE,
+        HealingContext(update_error_code="SIGNATURE_INVALID"),
+    )
+    assert state.status == "failed"
+    assert state.last_error_code == "SIGNATURE_INVALID"
+
+
+def test_update_no_public_key_is_a_verification_refusal():
+    state = _registry().handle(
+        Scenario.UPDATE_FAILURE,
+        HealingContext(update_stage="verify", update_error_code="NO_PUBLIC_KEY"),
+    )
+    assert state.status == "failed"
+    assert state.last_error_code == "NO_PUBLIC_KEY"
+    assert "artifact REFUSED" in state.last_action
+
+
+def test_new_scenarios_report_structured_telemetry_events():
+    emitter = TelemetryEmitter("dev-1")
+    registry = SelfHealingRegistry(telemetry=emitter)
+    registry.handle(
+        Scenario.ACCOUNT_DISCONNECT, HealingContext(account_connected=False)
+    )
+    registry.handle(
+        Scenario.UPDATE_FAILURE,
+        HealingContext(update_stage="verify", update_error_code="SHA256_MISMATCH"),
+    )
+    assert len(emitter.queue) == 2  # degraded → WARN, failed → ERROR, both queued
+    events = emitter.queue.snapshot()
+    assert events[0].event_type == "self_healing.account_disconnect"
+    assert events[0].severity == "WARN"
+    assert events[1].event_type == "self_healing.update_failure"
+    assert events[1].severity == "ERROR"
+    assert events[1].error_code == "SHA256_MISMATCH"

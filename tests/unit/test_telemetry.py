@@ -255,6 +255,17 @@ def test_queue_drain_survives_a_crashing_sink():
     assert len(queue) == 0
 
 
+def test_queue_records_expose_dedup_key_and_attempts_for_persistence():
+    queue = DiagnosticQueue(max_items=10)
+    queue.put(_event(event_type="test.a", correlation_id="c1"))
+    records = queue.records()
+    assert len(records) == 1
+    assert records[0]["dedup_key"] == DiagnosticQueue.dedup_key(_event(event_type="test.a", correlation_id="c1"))
+    assert records[0]["attempts"] == 0
+    assert records[0]["event"]["event_type"] == "test.a"
+    assert list(records[0]["event"]) == EVENT_FIELDS
+
+
 # ---------------------------------------------------------------------------
 # The inert adapter
 # ---------------------------------------------------------------------------
