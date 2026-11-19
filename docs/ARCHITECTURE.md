@@ -41,7 +41,8 @@ compute (§7) — but no engine is implemented now.
 │                  registered | failed_auth | failed_transient;   │
 │                  re-enrolment is the recovery path after 401   │
 │    commands.py   §6.2 envelope, §6.3 validation order, §6.1     │
-│                  3-op allowlist, replay cache (10,000),         │
+│                  allowlist (3 sendable ops + closed §17.5       │
+│                  open_order gate), replay cache (10,000),       │
 │                  lifecycle, action.result (§6.5), reconcile    │
 │    chart.py      §17.1 chart request/subscribe, rate limit      │
 │                  60 frames/min, max 20 subscriptions           │
@@ -202,7 +203,8 @@ it does not own the server-side lifecycle.
 
 ```
 malformed → expired → wrong-device → wrong-account → allowlist
-(→ modify_pending capability gate §17.4) → entitlement
+(→ modify_pending capability gate §17.4 → open_order activation
+gate §17.5, both CLOSED by default) → entitlement
 (position_manager + auto_trade) → replay
 ```
 
