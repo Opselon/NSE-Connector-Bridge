@@ -93,6 +93,23 @@ class _FakeMt5:
     def shutdown(self):
         pass
 
+    def order_check(self, request):
+        """Official pre-send check (W2): always passes in this fake."""
+        self.check_calls = getattr(self, "check_calls", 0) + 1
+        self.check_requests = getattr(self, "check_requests", [])
+        self.check_requests.append(dict(request))
+        return SimpleNamespace(
+            retcode=0,
+            balance=10000.0,
+            equity=10000.0,
+            profit=0.0,
+            margin=0.0,
+            margin_free=10000.0,
+            margin_level=0.0,
+            comment="Done",
+            request=dict(request),
+        )
+
     def order_send(self, request):
         self.sent_requests.append(dict(request))
         self.send_calls += 1

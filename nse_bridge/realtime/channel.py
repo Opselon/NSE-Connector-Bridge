@@ -82,6 +82,7 @@ from ..server.commands import (
     CommandValidator,
 )
 from ..server.manifest import ManifestTracker, build_manifest, build_manifest_update_envelope
+from ..server.policy import POLICY_FRAME_TYPE
 from ..server.queue import BoundedPendingQueue
 from ..server.rest import RestClient
 from ..server.sync import SyncEngine
@@ -210,6 +211,7 @@ class ServerChannel:
         sync_engine: SyncEngine | None = None,
         chart_service: ChartService | None = None,
         executor: CommandExecutor | None = None,
+        policy_service: Any | None = None,
         enrolment: Any | None = None,
         manifest_tracker: ManifestTracker | None = None,
         dead_after_s: float = HEARTBEAT_DEAD_S,
@@ -240,6 +242,9 @@ class ServerChannel:
         self._sync = sync_engine
         self._chart = chart_service
         self._executor = executor
+        # W6: policy-envelope gate + trailing/breakeven executor (built
+        # in _ensure_components; injectable for tests via the kwarg).
+        self._policy: Any = policy_service
         # Enrolment state machine (§5.1: device enrolled first via
         # REST — the channel must not open the WS until REGISTERED).
         # Falls back to ctx.enrolment when not injected (app startup
@@ -441,6 +446,15 @@ class ServerChannel:
                 user_id=rest.user_id,
                 telemetry=getattr(self.ctx, "telemetry", None),
             )
+        if self._policy is None:
+            # W6 (D-5): the policy-envelope gate + trailing/breakeven
+            # executor. Dormant until a valid, fresh ``policy.envelope``
+            # frame arrives (a frame type the contract does not define
+            # yet — unknown frames are ignored, so the service stays
+            # dormant in production until the Platform adopts it).
+            from ..server.policy import PolicyService
+
+            self._policy = PolicyService(self.ctx, telemetry=getattr(self.ctx, "telemetry", None))
 
     def start(self) -> None:
         url = self.ctx.settings.resolved_server_ws_url
@@ -664,10 +678,11 @@ class ServerChannel:
         heartbeat = asyncio.create_task(self._heartbeat_loop(ws), name="nse-channel-hb")
         sender = asyncio.create_task(self._send_loop(ws), name="nse-channel-send")
         chart_poll = asyncio.create_task(self._chart_poll_loop(), name="nse-channel-chart")
+        policy_poll = asyncio.create_task(self._policy_poll_loop(), name="nse-channel-policy")
         got_frame = False
         try:
             done, _pending = await asyncio.wait(
-                {receiver, heartbeat, sender, chart_poll},
+                {receiver, heartbeat, sender, chart_poll, policy_poll},
                 return_when=asyncio.FIRST_COMPLETED,
             )
             got_frame = getattr(receiver, "_got_frame", False)
@@ -677,7 +692,7 @@ class ServerChannel:
                     if exc is not None:
                         raise exc
         finally:
-            for task in (receiver, heartbeat, sender, chart_poll):
+            for task in (receiver, heartbeat, sender, chart_poll, policy_poll):
                 task.cancel()
                 try:
                     await task
@@ -783,6 +798,33 @@ class ServerChannel:
             for sub in self._chart.poll_due(now):
                 asyncio.create_task(self._poll_subscription(sub))
 
+    async def _policy_poll_loop(self) -> None:
+        """W6: evaluate the policy envelope's trailing/breakeven rules
+        against the open positions every 2 s.
+
+        The loop is the ONLY caller of the executor; every move is
+        authorized at move time (fresh envelope + healthy WS), runs on
+        the serialized MT5 worker via threadpool, and is recorded with
+        rule_id/decision_id/envelope version. No envelope, no moves.
+        """
+        while True:
+            await asyncio.sleep(2.0)
+            if self._policy is None or self._ws is None:
+                continue
+            if not self._policy.executor.ws_connected():
+                continue  # fail closed: no WS, no autonomous moves
+            from ..engine.trading import fetch_positions
+
+            try:
+                positions = await run_in_threadpool(fetch_positions, self.ctx)
+            except Exception as exc:  # noqa: BLE001 — a poll failure must not kill the session
+                logger.debug("[POLICY] position read for policy evaluation failed: {}", type(exc).__name__)
+                continue
+            try:
+                await self._policy.poll_once(positions)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[POLICY] policy evaluation failed: {}", type(exc).__name__)
+
     async def _poll_subscription(self, sub: Any) -> None:
         if self._chart is None:
             return
@@ -887,6 +929,13 @@ class ServerChannel:
         elif mtype == "chart.unsubscribe":
             if self._chart is not None:
                 self._chart.handle_unsubscribe(msg)
+        elif mtype == POLICY_FRAME_TYPE:
+            # W6 (PROPOSED frame type): a fresh policy envelope. The
+            # gate validates and stores it; the trailing executor picks
+            # it up on the next poll cycle. An invalid/expired envelope
+            # is rejected — fail closed.
+            if self._policy is not None:
+                self._policy.handle_envelope_frame(msg)
         else:
             # Unknown frames are silently ignored, never fatal (§5.2).
             logger.debug("[CHANNEL] ignored server message type={}", mtype)

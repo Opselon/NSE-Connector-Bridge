@@ -431,6 +431,7 @@ def discover_terminals(
     winreg_module: Any = None,
     version_fn: Callable[[str], str | None] | None = None,
     appdata_root: str | None = None,
+    standard_paths: list[str] | None = None,
 ) -> list[TerminalInfo]:
     """Enumerate ALL MT5 terminal candidates (Phase 5).
 
@@ -488,7 +489,7 @@ def discover_terminals(
     env_path = _env_terminal_path()
     if env_path:
         add(env_path, "env")
-    for cand in _standard_terminal_paths():
+    for cand in standard_paths if standard_paths is not None else _standard_terminal_paths():
         if Path(cand).is_file():
             add(cand, "standard")
     for cand in _app_paths_candidates(winreg_module):

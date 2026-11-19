@@ -17,7 +17,12 @@ from ..mt5.types import (
 from ..mt5.types import (
     f as _f,
 )
-from ..retcodes import TRADE_RETCODE_DONE, TRADE_RETCODE_NO_CHANGES, translate_retcode
+from ..retcodes import (
+    TRADE_RETCODE_CONNECTION,
+    TRADE_RETCODE_DONE,
+    TRADE_RETCODE_NO_CHANGES,
+    translate_retcode,
+)
 from ..timeutil import broker_dt
 from .common import BridgeContext
 from .registry import command
@@ -411,6 +416,15 @@ def trade_cancel_pending_order(ctx: BridgeContext, params: TicketRequest) -> dic
     mutates=True,
 )
 def trade_modify_pending_order(ctx: BridgeContext, params: ModifyPendingRequest) -> dict[str, Any]:
+    """Modify a pending order (price/SL/TP/expiration, TRADE_ACTION_MODIFY).
+
+    W2: the exact request runs through the official ``order_check``
+    first (``no_changes_ok`` — MODIFY checks report NO_CHANGES when the
+    target state already holds, verified live E-OC-1). W4: a ``None``
+    response or retcode 10031 raises TRADE_UNVERIFIED — the command
+    layer reconciles against the live order; the request is never
+    re-sent while the outcome is unknown.
+    """
     raw = _fetch_order(ctx, params.ticket)
     if raw is None:
         raise BridgeError(
@@ -422,30 +436,43 @@ def trade_modify_pending_order(ctx: BridgeContext, params: ModifyPendingRequest)
     price = params.price if params.price is not None else float(_f(raw, "price_open", 0.0))
     sl = params.sl if params.sl is not None else float(_f(raw, "sl", 0.0) or 0.0)
     tp = params.tp if params.tp is not None else float(_f(raw, "tp", 0.0) or 0.0)
+    from .trading import mt5_trade_constants
 
-    def job(mt5: Any):
-        request = {
-            "action": mt5.TRADE_ACTION_MODIFY,
-            "order": int(params.ticket),
-            "price": float(price),
-            "sl": float(sl),
-            "tp": float(tp),
-        }
-        if params.expiration_utc:
-            exp = broker_dt(params.expiration_utc, ctx.settings)
-            if exp is not None:
-                request["type_time"] = mt5.ORDER_TIME_SPECIFIED
-                request["expiration"] = exp
+    consts = mt5_trade_constants(ctx)
+    request: dict[str, Any] = {
+        "action": consts["action_modify"],
+        "order": int(params.ticket),
+        "price": float(price),
+        "sl": float(sl),
+        "tp": float(tp),
+    }
+    if params.expiration_utc:
+        exp = broker_dt(params.expiration_utc, ctx.settings)
+        if exp is not None:
+            request["type_time"] = consts["order_time_specified"]
+            request["expiration"] = exp
+    # W2: official pre-send check with the exact request.
+    from .trading import order_check_send
+
+    check = order_check_send(ctx, request, "modify_pending", no_changes_ok=True)
+
+    def job(mt5: Any, request=request):
         return mt5.order_send(request)
 
     result = ctx.driver.run(job, op="order_send_modify", context={"ticket": params.ticket})
-    if result is None:
+    retcode = int(_f(result, "retcode", 0)) if result is not None else None
+    if result is None or retcode == TRADE_RETCODE_CONNECTION:
         raise BridgeError(
             ErrorCode.TRADE_UNVERIFIED,
-            "order_send returned no result — broker state unverified.",
-            details={"ticket": params.ticket},
+            f"Pending-order modify for #{params.ticket} returned "
+            + ("no result" if result is None else "retcode 10031 (no connection)")
+            + " — outcome unverified; reconcile the live order before retrying (never blind-retry).",
+            details={
+                "ticket": params.ticket,
+                "retcode": retcode,
+                "order_check": check,
+            },
         )
-    retcode = int(_f(result, "retcode", 0))
     if retcode == TRADE_RETCODE_NO_CHANGES:
         # Idempotent success (real-MT5 defect 1, same as modify_position_sltp):
         # the requested price/SL/TP already hold — return success, never reject.
@@ -455,14 +482,18 @@ def trade_modify_pending_order(ctx: BridgeContext, params: ModifyPendingRequest)
             "retcode": retcode,
             "retcode_label": translate_retcode(retcode),
             "no_changes": True,
+            "order_check": check,
         }
     if retcode != TRADE_RETCODE_DONE:
-        raise reject(result, "modify_pending_order", symbol)
+        exc = reject(result, "modify_pending_order", symbol)
+        exc.details["order_check"] = check
+        raise exc
     return {
         "status": "done",
         "ticket": params.ticket,
         "retcode": retcode,
         "retcode_label": translate_retcode(retcode),
+        "order_check": check,
     }
 
 

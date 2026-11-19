@@ -77,6 +77,11 @@ PENDING_CLASS_REPAIRABLE: frozenset[int] = frozenset({10013, 10015, 10016})
 TRADE_RETCODE_DONE = 10009
 TRADE_RETCODE_DONE_PARTIAL = 10010  # DONE_PARTIAL — request partially completed
 TRADE_RETCODE_NO_CHANGES = 10025  # NO_CHANGES — requested state already holds; idempotent success
+TRADE_RETCODE_PLACED = 10008  # PLACED — order accepted and placed (pending), not yet filled
+TRADE_RETCODE_CONNECTION = 10031  # CONNECTION — no connection with the trade server (outcome UNKNOWN)
+#: order_check pass code — the package reports 0 when the pre-send check
+#: succeeded (verified live: scripts/phase2b_probe_order_check.py, E-OC-1).
+ORDER_CHECK_RETCODE_OK = 0
 
 
 def translate_retcode(retcode: int | None) -> str:

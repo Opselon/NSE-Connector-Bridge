@@ -60,6 +60,7 @@ class _FakeMt5:
         account=None,
         send_retcode=10009,
         send_partial_volume=None,
+        check_retcode=0,
     ):
         self.positions = {p.ticket: p for p in (positions or [])}
         self.orders: dict[int, SimpleNamespace] = {}
@@ -70,8 +71,12 @@ class _FakeMt5:
         # When set, a DEAL close reduces the position by this amount
         # instead of the requested volume (simulates a partial fill).
         self.send_partial_volume = send_partial_volume
+        # W2: the pre-send order_check retcode (0 = pass).
+        self.check_retcode = check_retcode
         self.sent_requests: list[dict] = []
         self.send_calls = 0
+        self.check_calls = 0
+        self.check_requests: list[dict] = []
         self._next_order_ticket = 7000001
 
     # -- broker state -------------------------------------------------
@@ -118,6 +123,23 @@ class _FakeMt5:
         pass
 
     # -- dispatch -----------------------------------------------------
+    def order_check(self, request):
+        """Official pre-send check (W2): passes (retcode 0) unless a
+        test forces a refusal via ``check_retcode``."""
+        self.check_calls += 1
+        self.check_requests.append(dict(request))
+        return SimpleNamespace(
+            retcode=self.check_retcode,
+            balance=10000.0,
+            equity=10000.0,
+            profit=0.0,
+            margin=0.0,
+            margin_free=10000.0,
+            margin_level=0.0,
+            comment="Done" if self.check_retcode == 0 else "CheckFailed",
+            request=dict(request),
+        )
+
     def order_send(self, request):
         self.sent_requests.append(dict(request))
         self.send_calls += 1
@@ -253,7 +275,9 @@ def _tick(bid=1.1000, ask=1.1002):
     return SimpleNamespace(time=int(time.time()), bid=bid, ask=ask, last=1.1001, volume=10, flags=0)
 
 
-def _account(margin_mode=1):
+def _account(margin_mode=2):
+    """Test account; ``margin_mode`` uses the official ENUM_ACCOUNT_MARGIN_MODE
+    (0=netting, 1=exchange, 2=RETAIL_HEDGING — real-MT5 defect D5 fix)."""
     return SimpleNamespace(
         login=123456,
         name="Test",
@@ -408,7 +432,7 @@ def test_close_by_equal_volumes_both_gone(tmp_path):
         positions=[_position(1001, type_=0, volume=0.5), _position(1002, type_=1, volume=0.5)],
         symbol_rows=[_symbol_row("EURUSD")],
         ticks={"EURUSD": _tick()},
-        account=_account(margin_mode=1),
+        account=_account(margin_mode=2),
     )
     ctx, driver = _ctx_with(fake, tmp_path)
     try:
@@ -430,7 +454,7 @@ def test_close_by_unequal_volumes_larger_remains(tmp_path):
         positions=[_position(1001, type_=0, volume=1.0), _position(1002, type_=1, volume=0.4)],
         symbol_rows=[_symbol_row("EURUSD")],
         ticks={"EURUSD": _tick()},
-        account=_account(margin_mode=1),
+        account=_account(margin_mode=2),
     )
     ctx, driver = _ctx_with(fake, tmp_path)
     try:
@@ -490,7 +514,7 @@ def test_close_by_requires_same_symbol_and_opposite_types(tmp_path):
         ],
         symbol_rows=[_symbol_row("EURUSD"), _symbol_row("GBPUSD")],
         ticks={"EURUSD": _tick()},
-        account=_account(margin_mode=1),
+        account=_account(margin_mode=2),
     )
     ctx, driver = _ctx_with(fake, tmp_path)
     try:
@@ -510,7 +534,7 @@ def test_close_by_broker_reject_preserves_retcode(tmp_path):
         positions=[_position(1001, type_=0), _position(1002, type_=1)],
         symbol_rows=[_symbol_row("EURUSD")],
         ticks={"EURUSD": _tick()},
-        account=_account(margin_mode=1),
+        account=_account(margin_mode=2),
         send_retcode=10006,
     )
     ctx, driver = _ctx_with(fake, tmp_path)
@@ -528,7 +552,7 @@ def test_close_by_done_but_position_remains_is_unverified(tmp_path):
         positions=[_position(1001, type_=0, volume=0.5), _position(1002, type_=1, volume=0.5)],
         symbol_rows=[_symbol_row("EURUSD")],
         ticks={"EURUSD": _tick()},
-        account=_account(margin_mode=1),
+        account=_account(margin_mode=2),
     )
 
     # Broker claims DONE but the fake never applies the close: the
@@ -695,12 +719,19 @@ def test_build_symbol_model_splits_exmode_and_calc_mode():
 
 
 def test_build_account_model_margin_mode():
-    row = _account(margin_mode=1)
+    # ENUM_ACCOUNT_MARGIN_MODE (real-MT5 defect D5 fix): 0=RETAIL_NETTING,
+    # 1=EXCHANGE, 2=RETAIL_HEDGING — verified against the package
+    # constants live (E-OC-1). The old labels had 1 and 2 swapped.
+    row = _account(margin_mode=2)
     row.margin_so_mode = 0
     model = build_account_model(row)
-    assert model.margin_mode == 1
+    assert model.margin_mode == 2
     assert model.margin_mode_label == "RETAIL_HEDGING"
     assert model.margin_so_mode == 0  # stop-out mode stays separate
+    exchange = build_account_model(_account(margin_mode=1))
+    assert exchange.margin_mode_label == "EXCHANGE"
+    netting = build_account_model(_account(margin_mode=0))
+    assert netting.margin_mode_label == "RETAIL_NETTING"
 
 
 def test_build_account_model_trade_mode_uses_account_enum_not_symbol_enum():
@@ -728,7 +759,7 @@ def test_trading_permissions_returns_real_margin_mode(ctx):
     from nse_bridge.engine.account import get_trading_permissions
 
     out = get_trading_permissions(ctx, None)
-    assert out["margin_mode"] == 1
+    assert out["margin_mode"] == 2  # official RETAIL_HEDGING value (D5 fix)
     assert out["margin_mode_label"] == "RETAIL_HEDGING"
 
 
@@ -958,7 +989,7 @@ def test_executor_partial_close_reports_partially_completed(monkeypatch, tmp_pat
     settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
     context = BridgeContext(settings=settings, driver=Mt5Driver(settings))
 
-    def partial_close(ctx_, ticket):
+    def partial_close(ctx_, ticket, volume=None):
         return {
             "status": "done",
             "ticket": ticket,

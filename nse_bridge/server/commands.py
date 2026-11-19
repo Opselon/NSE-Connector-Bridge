@@ -15,12 +15,18 @@ alongside it)::
     }
 
 ``operation`` is a tagged object: ``close_position`` takes
-``{type, ticket}``; ``modify_sl_tp`` / ``modify_pending`` take
-``{type, ticket, sl?, tp?}`` with ``sl``/``tp`` nullable (absent =
-leave unchanged). ``ticket`` is a string (MT5 ticket ids exceed
-32-bit ints). Unknown fields are ignored. There is no per-command
-signature in v1 (§6.2, delta D-CMD-3): commands are authenticated by
-the mutually-authenticated WSS session itself.
+``{type, ticket}`` — plus, as a PROPOSED Phase 2b amendment (PR body,
+Platform decision outstanding), an optional ``volume`` field for the
+reduce-volume operation (CONTRACTS.md §7 ``partial_close`` row):
+``{type, ticket, volume?}`` with ``volume`` a positive number of
+lots; absent/``null`` volume keeps the v1 semantics (full close), so
+a server that never sends the field behaves exactly as before.
+``modify_sl_tp`` / ``modify_pending`` take ``{type, ticket, sl?, tp?}``
+with ``sl``/``tp`` nullable (absent = leave unchanged). ``ticket`` is
+a string (MT5 ticket ids exceed 32-bit ints). Unknown fields are
+ignored. There is no per-command signature in v1 (§6.2, delta
+D-CMD-3): commands are authenticated by the mutually-authenticated
+WSS session itself.
 
 Server allowlist (§6.1) — EXACTLY three operations in v1:
 ``close_position``, ``modify_sl_tp``, ``modify_pending``. ``open_order``
@@ -34,11 +40,13 @@ contract-defined but NOT sendable until its capability gate passes —
 (b) tests, (c) live proof at market open that ``trade_modify_sl_tp``
 accepts a pending-order ticket, (d) a published minimum
 ``connector_version`` recorded in the contract. This Bridge has (a)
-(the mapping in :mod:`nse_bridge.engine.trading`) but (c) and (d) are
-NOT done, so the gate starts CLOSED: ``modify_pending`` is rejected
-as ``UnsupportedOperation`` exactly like any other non-allowlisted op
-until the gate is proven and ``modify_pending_proven=True`` is set by
-the code that owns the proof. The server MUST NOT send it before then
+and (b); (c) is DONE (2026-11-19, live on the MetaQuotes-Demo
+terminal, E-P2B-6 in docs/upgrade/PHASE-2B-VERIFICATION.md); (d) is
+the Platform owner's decision and remains outstanding — so the gate
+starts CLOSED: ``modify_pending`` is rejected as
+``UnsupportedOperation`` exactly like any other non-allowlisted op
+until (d) lands and ``modify_pending_proven=True`` is set by the code
+that owns the decision. The server MUST NOT send it before then
 either (its own capability rule, §17.4).
 
 Local validation order (§6.3) — EXACT, the server assumes this order
@@ -125,6 +133,7 @@ financial op in this phase: the server must re-authorize with a NEW
 
 from __future__ import annotations
 
+import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -170,15 +179,19 @@ SERVER_ALLOWLIST = frozenset({"close_position", "modify_sl_tp", "modify_pending"
 
 #: §17.4 close-out status. (a) allowlist code exists in this module;
 #: (b) tests exist in tests/unit/test_server_commands.py; (c) live
-#: proof at market open that trade_modify_sl_tp accepts a
-#: pending-order ticket is NOT done; (d) no published minimum
-#: connector_version is recorded in the contract. Until (c) and (d)
-#: land, the gate stays closed.
+#: proof at market open that TRADE_ACTION_MODIFY accepts a
+#: pending-order ticket: DONE 2026-11-19 on the MetaQuotes-Demo
+#: terminal (retcode 10009, SL landed on the live order, order_check
+#: passed — E-P2B-6 in docs/upgrade/PHASE-2B-VERIFICATION.md); (d) NO
+#: published minimum connector_version is recorded in the contract —
+#: that publication is the Platform owner's decision. The gate stays
+#: CLOSED until (d) lands.
 MODIFY_PENDING_GATE_NOTE = (
-    "modify_pending is capability-gated (§17.4): the §17.4 close-out "
-    "(live proof at market open + published minimum connector_version) "
-    "is not complete, so modify_pending is rejected as "
-    "UnsupportedOperation until the gate is proven."
+    "modify_pending is capability-gated (§17.4): conditions (a) code, "
+    "(b) tests and (c) live proof (2026-11-19, E-P2B-6) are done; (d) "
+    "the published minimum connector_version is the Platform owner's "
+    "decision and is still outstanding, so modify_pending is rejected "
+    "as UnsupportedOperation until the version gate is published."
 )
 
 #: Local MT5 source-tool names (§6.5 ``source_tool``) per operation.
@@ -186,6 +199,7 @@ SOURCE_TOOL = {
     "close_position": "trade_close_single_position",
     "modify_sl_tp": "trade_modify_sl_tp",
     "modify_pending": "trade_modify_sl_tp",
+    "open_order": "trade_send_market_order",  # pending opens report trade_send_pending_order
 }
 
 
@@ -244,6 +258,21 @@ class CommandEnvelope:
     ticket: str
     sl: float | None = None
     tp: float | None = None
+    #: Optional reduce-volume close volume (PROPOSED Phase 2b wire
+    #: amendment, close_position only; absent/None = full close, v1
+    #: semantics). Validated at parse time (positive number) and again
+    #: against the live position volume at execution.
+    volume: float | None = None
+    #: W5 fields (PROPOSED §17.5 wire shapes — the market form follows
+    #: CONTRACTS.md §7; the pending form is proposed in the PR body).
+    #: Parsed only when ``operation.type == "open_order"``; the default
+    #: gate keeps the operation REJECTED, so these never reach MT5
+    #: until all four §17.5 activation conditions are met.
+    symbol: str | None = None
+    side: str | None = None
+    order_kind: str | None = None  # market | limit | stop | stop_limit
+    price: float | None = None  # pending entries only
+    stoplimit: float | None = None  # stop_limit entries only
     issued_at: str | None = None
     expires_at: str | None = None
     idempotency_key: str | None = None
@@ -252,6 +281,28 @@ class CommandEnvelope:
     @property
     def ticket_int(self) -> int:
         return int(self.ticket)
+
+
+def _ticket_str(ticket: Any) -> str:
+    """Normalize an operation ticket to a numeric string (§6.2).
+
+    A non-integral float must be rejected, never truncated to a
+    different ticket (Codex P2: 9000001.5 silently became 9000001).
+    """
+    if isinstance(ticket, bool):
+        raise TypeError("command operation ticket is not an integer")
+    if isinstance(ticket, float):
+        if not ticket.is_integer():
+            raise ValueError("command operation ticket is not an integer")
+        return str(int(ticket))
+    if isinstance(ticket, int):
+        return str(ticket)
+    text = str(ticket).strip()
+    try:
+        int(text)  # ticket must be numeric
+    except (TypeError, ValueError):
+        raise ValueError("command operation ticket is not numeric") from None
+    return text
 
 
 def parse_envelope(frame: Any) -> CommandEnvelope:
@@ -267,25 +318,19 @@ def parse_envelope(frame: Any) -> CommandEnvelope:
     operation = frame.get("operation")
     if not isinstance(operation, dict) or not operation.get("type"):
         raise ValueError("command frame operation is missing or has no type")
+    op_type = str(operation["type"])
     ticket = operation.get("ticket")
-    if ticket in (None, ""):
-        raise ValueError("command operation is missing ticket")
-    if isinstance(ticket, bool):
-        raise TypeError("command operation ticket is not an integer")
-    if isinstance(ticket, float):
-        # A non-integral float must be rejected, never truncated to a
-        # different ticket (Codex P2: 9000001.5 silently became 9000001).
-        if not ticket.is_integer():
-            raise ValueError("command operation ticket is not an integer")
-        ticket_str = str(int(ticket))
-    elif isinstance(ticket, int):
-        ticket_str = str(ticket)
+    if op_type == "open_order":
+        # W5: an open has no broker ticket yet — the ticket is assigned
+        # by MT5 on execution. The frame must still be a well-formed
+        # open (structurally validated at dispatch, inside the gate).
+        ticket_str = ""
+        if ticket not in (None, ""):
+            ticket_str = _ticket_str(ticket)
     else:
-        ticket_str = str(ticket).strip()
-        try:
-            int(ticket_str)  # ticket must be numeric
-        except (TypeError, ValueError):
-            raise ValueError("command operation ticket is not numeric") from None
+        if ticket in (None, ""):
+            raise ValueError("command operation is missing ticket")
+        ticket_str = _ticket_str(ticket)
     expires = normalize_utc(frame.get("expires_at"), 0)
     if expires is None:
         raise ValueError("command expires_at is not RFC 3339")
@@ -300,6 +345,20 @@ def parse_envelope(frame: Any) -> CommandEnvelope:
         except (TypeError, ValueError):
             raise ValueError("command sl/tp is not a number") from None
 
+    volume = _num(operation.get("volume"))
+    if volume is not None and volume <= 0:
+        # A non-positive reduce-volume is a shape violation, not a
+        # broker state issue: reject at parse time (§6.3 step 1).
+        raise ValueError("command volume must be a positive number of lots")
+
+    # W5 open-order fields (parsed for every frame; meaningful only for
+    # operation.type == "open_order"). Structural requirements are
+    # enforced at dispatch, inside the gate.
+    order_kind_raw = operation.get("order_kind")
+    order_kind = str(order_kind_raw).strip().lower() if order_kind_raw not in (None, "") else None
+    if order_kind == "market" or (operation.get("type") == "open_order" and order_kind is None):
+        order_kind = order_kind or "market"  # CONTRACTS §7 market default
+
     return CommandEnvelope(
         command_id=str(frame["command_id"]),
         account_id=str(frame["account_id"]),
@@ -308,6 +367,12 @@ def parse_envelope(frame: Any) -> CommandEnvelope:
         ticket=ticket_str,
         sl=_num(operation.get("sl")),
         tp=_num(operation.get("tp")),
+        volume=volume,
+        symbol=str(operation["symbol"]).strip() if operation.get("symbol") not in (None, "") else None,
+        side=str(operation["side"]).strip().lower() if operation.get("side") not in (None, "") else None,
+        order_kind=order_kind,
+        price=_num(operation.get("price")),
+        stoplimit=_num(operation.get("stoplimit")),
         issued_at=str(frame["issued_at"]),
         expires_at=str(frame["expires_at"]),
         idempotency_key=str(frame["idempotency_key"]) if frame.get("idempotency_key") is not None else None,
@@ -367,6 +432,7 @@ class CommandValidator:
         entitlements: Entitlements | Callable[[], Entitlements] | None = None,
         replay_cache: ReplayCache | None = None,
         modify_pending_proven: bool = False,
+        open_order_authorized: bool = False,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.device_id = device_id
@@ -374,6 +440,14 @@ class CommandValidator:
         self._entitlements_source = entitlements
         self.replay_cache = replay_cache or ReplayCache()
         self.modify_pending_proven = modify_pending_proven
+        #: W5 / §17.5 open decision. DEFAULT CLOSED: ``open_order`` is
+        #: rejected as ``UnsupportedOperation`` unless all four §17.5
+        #: activation conditions are met — (1) the user's explicit
+        #: approval, (2) the approved allowlist addition with tests,
+        #: (3) Risk Engine + financial-consent proof on Demo, and
+        #: (4) an approved ``schema_version`` bump. None of the four is
+        #: satisfied by the existence of this implementation.
+        self.open_order_authorized = open_order_authorized
         self._clock = clock or (lambda: datetime.now(UTC))
 
     @property
@@ -408,9 +482,16 @@ class CommandValidator:
         bound = self._get_account_id()
         if bound is None or envelope.account_id != bound:
             return ValidationOutcome(rejection=RejectionReason.WRONG_ACCOUNT)
-        # 5 — allowlist (5a: modify_pending capability gate, §17.4)
+        # 5 — allowlist (5a: modify_pending capability gate, §17.4;
+        #     5b: open_order §17.5 activation gate — default CLOSED)
         if envelope.operation_type not in SERVER_ALLOWLIST:
-            return ValidationOutcome(rejection=RejectionReason.UNSUPPORTED_OPERATION)
+            if envelope.operation_type == "open_order" and self.open_order_authorized:
+                logger.warning(
+                    "[COMMAND] open_order accepted by the §17.5 activation gate "
+                    "(all four activation conditions must be recorded before this flag is set)"
+                )
+            else:
+                return ValidationOutcome(rejection=RejectionReason.UNSUPPORTED_OPERATION)
         if envelope.operation_type == "modify_pending" and not self.modify_pending_proven:
             logger.warning("[COMMAND] modify_pending rejected — capability gate closed (§17.4)")
             return ValidationOutcome(rejection=RejectionReason.UNSUPPORTED_OPERATION)
@@ -753,7 +834,10 @@ class CommandExecutor:
 
         execution.transition(CommandState.DISPATCHED)
         execution.transition(CommandState.EXECUTING)
-        source_tool = SOURCE_TOOL[envelope.operation_type]
+        if envelope.operation_type == "open_order" and (envelope.order_kind or "market") != "market":
+            source_tool = "trade_send_pending_order"
+        else:
+            source_tool = SOURCE_TOOL[envelope.operation_type]
         try:
             if envelope.operation_type in ("modify_sl_tp", "modify_pending"):
                 with self._modify_lock:
@@ -800,7 +884,11 @@ class CommandExecutor:
         )
 
         if envelope.operation_type == "close_position":
-            return close_position(self.ctx, envelope.ticket_int)
+            # W3: an explicit volume (PROPOSED Phase 2b amendment) turns
+            # the close into the reduce-volume operation — the local
+            # partial-close path with its full reconciliation facts.
+            # Absent volume keeps the v1 full-close semantics.
+            return close_position(self.ctx, envelope.ticket_int, envelope.volume)
         if envelope.operation_type == "modify_sl_tp":
             pos = fetch_position(self.ctx, envelope.ticket_int)
             from ..mt5.types import f as _f
@@ -821,7 +909,64 @@ class CommandExecutor:
             sl = envelope.sl if envelope.sl is not None else float(_f(order, "sl", 0.0) or 0.0)
             tp = envelope.tp if envelope.tp is not None else float(_f(order, "tp", 0.0) or 0.0)
             return modify_pending_order_sltp(self.ctx, envelope.ticket_int, sl, tp)
+        if envelope.operation_type == "open_order":
+            # W5 / §17.5: reachable ONLY through the activation gate
+            # (``open_order_authorized=True``). The execution path runs
+            # the proven local primitives — market (CONTRACTS §7 wire
+            # shape) or pending (proposed shape in the PR body) — both
+            # of which carry the mandatory pre-send ``order_check`` and
+            # the W4 reconciliation semantics.
+            return self._dispatch_open_order(envelope)
         raise BridgeError(ErrorCode.VALIDATION, f"unsupported operation {envelope.operation_type!r}")
+
+    def _dispatch_open_order(self, envelope: CommandEnvelope) -> dict[str, Any]:
+        """§17.5 open path (market or pending). Structural requirements
+        are enforced here — a malformed open is a VALIDATION failure,
+        never a guessed order."""
+        from ..engine.execution import PendingOrderRequest, trade_send_pending_order
+        from ..engine.trading import market_order
+
+        kind = envelope.order_kind or "market"
+        if not envelope.symbol:
+            raise BridgeError(ErrorCode.VALIDATION, "open_order requires a symbol.", http_status=422)
+        if envelope.side not in ("buy", "sell"):
+            raise BridgeError(ErrorCode.VALIDATION, "open_order requires side 'buy' or 'sell'.", http_status=422)
+        if envelope.volume is None or envelope.volume <= 0:
+            raise BridgeError(ErrorCode.VALIDATION, "open_order requires a positive volume.", http_status=422)
+        if kind == "market":
+            return market_order(
+                self.ctx,
+                symbol=envelope.symbol,
+                side=envelope.side,
+                volume=envelope.volume,
+                sl=envelope.sl or 0.0,
+                tp=envelope.tp or 0.0,
+                comment="NSE_OPEN",
+            )
+        pending_types = {"limit": "LIMIT", "stop": "STOP", "stop_limit": "STOP_LIMIT"}
+        if kind not in pending_types:
+            raise BridgeError(
+                ErrorCode.VALIDATION,
+                f"open_order order_kind must be one of market|limit|stop|stop_limit (got {kind!r}).",
+                http_status=422,
+            )
+        if envelope.price is None or envelope.price <= 0:
+            raise BridgeError(
+                ErrorCode.VALIDATION, f"open_order order_kind={kind} requires a positive price.", http_status=422
+            )
+        return trade_send_pending_order(
+            self.ctx,
+            PendingOrderRequest(
+                symbol=envelope.symbol,
+                order_type=f"{envelope.side.upper()}_{pending_types[kind]}",
+                volume=envelope.volume,
+                price=envelope.price,
+                stoplimit=envelope.stoplimit,
+                sl=envelope.sl or 0.0,
+                tp=envelope.tp or 0.0,
+                comment="NSE_OPEN",
+            ),
+        )
 
     def _finish_error(
         self,
@@ -954,6 +1099,33 @@ class CommandExecutor:
                         return {
                             "status": "done",
                             "ticket": envelope.ticket_int,
+                            "ambiguous_fill_recovered": True,
+                        }
+                return None
+            if envelope.operation_type == "open_order":
+                # W5/W4: an uncertain open reconciles against live
+                # positions with the same fingerprint the engine's
+                # ambiguous-fill recovery uses (side + magic + recency).
+                # The submitted request is never evidence of execution.
+                from ..engine.trading import fetch_positions
+                from ..mt5.types import f as _f
+
+                want_type = 0 if envelope.side == "buy" else 1  # ORDER_TYPE_BUY / SELL
+                cutoff = time.time() - 120.0
+                for raw in fetch_positions(self.ctx, envelope.symbol or None):
+                    if int(_f(raw, "type", -1)) != want_type:
+                        continue
+                    magic = self.ctx.settings.magic
+                    if magic is not None and int(_f(raw, "magic", -1)) != int(magic):
+                        continue
+                    opened = float(_f(raw, "time", 0) or 0)
+                    if opened and opened >= cutoff:
+                        return {
+                            "status": "done",
+                            "ticket": int(_f(raw, "ticket", 0)),
+                            "symbol": envelope.symbol,
+                            "side": envelope.side,
+                            "volume": float(_f(raw, "volume", 0.0) or 0.0),
                             "ambiguous_fill_recovered": True,
                         }
                 return None

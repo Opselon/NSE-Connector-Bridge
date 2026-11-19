@@ -235,7 +235,7 @@ def test_executor_close_position_success(monkeypatch):
     ctx = _ctx()
     monkeypatch.setattr(
         "nse_bridge.engine.trading.close_position",
-        lambda ctx_, ticket: {"status": "done", "ticket": ticket, "retcode": 10009},
+        lambda ctx_, ticket, volume=None: {"status": "done", "ticket": ticket, "retcode": 10009},
     )
     results = BoundedPendingQueue(32, "test/results")
     executor = CommandExecutor(ctx, _validator(), results_queue=results, clock=lambda: NOW)
@@ -253,7 +253,7 @@ def test_executor_rejected_command_never_executes(monkeypatch):
     calls: list[int] = []
     monkeypatch.setattr(
         "nse_bridge.engine.trading.close_position",
-        lambda ctx_, ticket: calls.append(ticket) or {"status": "done"},
+        lambda ctx_, ticket, volume=None: calls.append(ticket) or {"status": "done"},
     )
     executor = CommandExecutor(ctx, _validator(), results_queue=None, clock=lambda: NOW)
     execution, result = executor.execute(_frame(operation={"type": "open_order", "ticket": "1"}))
@@ -288,7 +288,7 @@ def test_executor_modify_sltp_fills_missing_values_from_position(monkeypatch):
 def test_executor_unknown_after_unverified_close_reconciles_to_executed(monkeypatch):
     ctx = _ctx()
 
-    def failing_close(ctx_, ticket):
+    def failing_close(ctx_, ticket, volume=None):
         raise BridgeError(ErrorCode.TRADE_UNVERIFIED, "order_send returned no result")
 
     def fetch_gone(ctx_, ticket):
@@ -308,7 +308,7 @@ def test_executor_unknown_after_unverified_close_reconciles_to_executed(monkeypa
 def test_executor_unknown_when_position_still_open(monkeypatch):
     ctx = _ctx()
 
-    def failing_close(ctx_, ticket):
+    def failing_close(ctx_, ticket, volume=None):
         raise BridgeError(ErrorCode.TRADE_UNVERIFIED, "order_send returned no result")
 
     def fetch_open(ctx_, ticket):
@@ -328,7 +328,7 @@ def test_executor_unknown_when_position_still_open(monkeypatch):
 def test_executor_trade_rejected_is_failed_not_unknown(monkeypatch):
     ctx = _ctx()
 
-    def rejecting_close(ctx_, ticket):
+    def rejecting_close(ctx_, ticket, volume=None):
         raise BridgeError(ErrorCode.TRADE_REJECTED, "broker rejected", retcode=10016)
 
     monkeypatch.setattr("nse_bridge.engine.trading.close_position", rejecting_close)
@@ -363,3 +363,346 @@ def test_parse_envelope_rejects_non_integral_ticket():
 def test_parse_envelope_accepts_integral_float_ticket():
     env = parse_envelope(_frame(operation={"type": "close_position", "ticket": 9000001.0}))
     assert env.ticket == "9000001" and env.ticket_int == 9000001
+
+
+# ----------------------------------------------------------------------
+# W3 — reduce-volume close via the optional `volume` field (PROPOSED
+# Phase 2b wire amendment; absent volume keeps v1 full-close semantics).
+# ----------------------------------------------------------------------
+@pytest.mark.unit
+def test_parse_envelope_volume_optional_and_validated():
+    env = parse_envelope(_frame(operation={"type": "close_position", "ticket": "9000001", "volume": 0.2}))
+    assert env.volume == pytest.approx(0.2)
+    env_none = parse_envelope(_frame(operation={"type": "close_position", "ticket": "9000001"}))
+    assert env_none.volume is None
+    env_null = parse_envelope(_frame(operation={"type": "close_position", "ticket": "9000001", "volume": None}))
+    assert env_null.volume is None
+    for bad in (0, -0.1, "abc"):
+        with pytest.raises(ValueError):
+            parse_envelope(_frame(operation={"type": "close_position", "ticket": "9000001", "volume": bad}))
+
+
+@pytest.mark.unit
+def test_partial_close_via_volume_reports_partial_facts(monkeypatch):
+    ctx = _ctx()
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "nse_bridge.engine.trading.close_position",
+        lambda ctx_, ticket, volume=None: (
+            seen.update({"ticket": ticket, "volume": volume})
+            or {
+                "status": "done",
+                "ticket": ticket,
+                "retcode": 10010,
+                "retcode_label": "DONE_PARTIAL - Request partially completed",
+                "closed_volume": 0.2,
+                "partial": True,
+                "remaining_volume": 0.3,
+                "reconciled": True,
+            }
+        ),
+    )
+    results = BoundedPendingQueue(32, "test/results")
+    executor = CommandExecutor(ctx, _validator(), results_queue=results, clock=lambda: NOW)
+    execution, result = executor.execute(
+        _frame(operation={"type": "close_position", "ticket": "9000001", "volume": 0.2})
+    )
+    assert seen == {"ticket": 9000001, "volume": pytest.approx(0.2)}
+    # Local lifecycle: PARTIALLY_COMPLETED; wire status stays `executed`
+    # (§6.5 has no partial status — dependency D5) with the partial
+    # facts carried in the payload.
+    assert execution.state is CommandState.PARTIALLY_COMPLETED
+    assert result["status"] == "executed"
+    assert result["payload"]["partial"] is True
+    assert result["payload"]["closed_volume"] == pytest.approx(0.2)
+    assert result["payload"]["remaining_volume"] == pytest.approx(0.3)
+    assert result["payload"]["reconciled"] is True
+    assert result["payload"]["retcode"] == 10010
+    assert len(results) == 1
+
+
+@pytest.mark.unit
+def test_close_without_volume_keeps_full_close(monkeypatch):
+    ctx = _ctx()
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "nse_bridge.engine.trading.close_position",
+        lambda ctx_, ticket, volume=None: seen.update({"volume": volume}) or {"status": "done", "ticket": ticket},
+    )
+    executor = CommandExecutor(ctx, _validator(), clock=lambda: NOW)
+    execution, result = executor.execute(_frame())
+    assert "volume" not in seen or seen["volume"] is None  # v1 semantics
+    assert execution.state is CommandState.COMPLETED
+    assert result["payload"].get("partial") is not True
+
+
+@pytest.mark.unit
+def test_volume_oversize_is_mcp_failed_never_retried(monkeypatch):
+    ctx = _ctx()
+
+    def oversize(ctx_, ticket, volume=None):
+        raise BridgeError(
+            ErrorCode.VALIDATION,
+            "Close volume 5.0 exceeds position volume 0.5.",
+            http_status=422,
+            details={"ticket": ticket, "position_volume": 0.5},
+        )
+
+    monkeypatch.setattr("nse_bridge.engine.trading.close_position", oversize)
+    executor = CommandExecutor(ctx, _validator(), clock=lambda: NOW)
+    execution, result = executor.execute(
+        _frame(operation={"type": "close_position", "ticket": "9000001", "volume": 5.0})
+    )
+    assert execution.state is CommandState.FAILED
+    assert result["status"] == "mcp_failed"
+    assert result["error"]["code"] == "VALIDATION_ERROR"
+    assert result["error"]["retry_safe"] is False  # server decides; never a blind retry
+
+
+# ----------------------------------------------------------------------
+# W5 — open_order technical path behind the INACTIVE §17.5 gate.
+# ----------------------------------------------------------------------
+@pytest.mark.unit
+def test_open_order_rejected_by_default_gate_closed(monkeypatch):
+    ctx = _ctx()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "nse_bridge.engine.trading.market_order",
+        lambda ctx_, **kw: calls.append("sent") or {"status": "done"},
+    )
+    executor = CommandExecutor(ctx, _validator(), clock=lambda: NOW)
+    execution, result = executor.execute(
+        _frame(operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.01})
+    )
+    # §17.5 mandatory default: rejected as UnsupportedOperation until
+    # ALL FOUR activation conditions are met — never executed.
+    assert execution.state is CommandState.FAILED
+    assert result["status"] == "rejected"
+    assert result["error"]["code"] == "UnsupportedOperation"
+    assert calls == []
+
+
+@pytest.mark.unit
+def test_open_order_gate_open_market_dispatches(monkeypatch):
+    ctx = _ctx()
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "nse_bridge.engine.trading.market_order",
+        lambda ctx_, **kw: seen.update(kw) or {"status": "done", "ticket": 8001234, "retcode": 10009},
+    )
+    validator = _validator(open_order_authorized=True)
+    executor = CommandExecutor(ctx, validator, clock=lambda: NOW)
+    execution, result = executor.execute(
+        _frame(
+            operation={
+                "type": "open_order",
+                "symbol": "EURUSD",
+                "side": "buy",
+                "volume": 0.01,
+                "sl": 1.08,
+                "tp": 1.10,
+            }
+        )
+    )
+    assert execution.state is CommandState.COMPLETED
+    assert result["status"] == "executed"
+    assert result["source_tool"] == "trade_send_market_order"
+    assert seen["symbol"] == "EURUSD"
+    assert seen["side"] == "buy"
+    assert seen["volume"] == pytest.approx(0.01)
+
+
+@pytest.mark.unit
+def test_open_order_gate_open_pending_dispatches(monkeypatch):
+    ctx = _ctx()
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "nse_bridge.engine.execution.trade_send_pending_order",
+        lambda ctx_, params: (
+            seen.update(
+                {
+                    "symbol": params.symbol,
+                    "order_type": params.order_type,
+                    "price": params.price,
+                    "volume": params.volume,
+                }
+            )
+            or {"status": "done", "order_ticket": 7100001, "retcode": 10009}
+        ),
+    )
+    validator = _validator(open_order_authorized=True)
+    executor = CommandExecutor(ctx, validator, clock=lambda: NOW)
+    execution, result = executor.execute(
+        _frame(
+            operation={
+                "type": "open_order",
+                "order_kind": "limit",
+                "symbol": "EURUSD",
+                "side": "buy",
+                "volume": 0.01,
+                "price": 1.05,
+            }
+        )
+    )
+    assert execution.state is CommandState.COMPLETED
+    assert result["status"] == "executed"
+    assert result["source_tool"] == "trade_send_pending_order"
+    assert seen["order_type"] == "BUY_LIMIT"
+    assert seen["price"] == pytest.approx(1.05)
+
+
+@pytest.mark.unit
+def test_open_order_structural_requirements_enforced():
+    # A market open parses structurally; a pending open carries price
+    # (+ stoplimit for stop_limit). An open has no broker ticket yet.
+    env = parse_envelope(_frame(operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.01}))
+    assert env.symbol == "EURUSD"
+    assert env.side == "buy"
+    assert env.order_kind == "market"  # CONTRACTS §7 default
+    assert env.ticket == ""  # an open has no broker ticket yet
+    pending_env = parse_envelope(
+        _frame(
+            operation={
+                "type": "open_order",
+                "order_kind": "stop_limit",
+                "symbol": "EURUSD",
+                "side": "sell",
+                "volume": 0.01,
+                "price": 1.15,
+                "stoplimit": 1.12,
+            }
+        )
+    )
+    assert pending_env.order_kind == "stop_limit"
+    assert pending_env.stoplimit == pytest.approx(1.12)
+
+
+@pytest.mark.unit
+def test_open_order_gate_open_but_malformed_open_is_validation_error(monkeypatch):
+    ctx = _ctx()
+    monkeypatch.setattr("nse_bridge.engine.trading.market_order", lambda ctx_, **kw: {"status": "done"})
+    validator = _validator(open_order_authorized=True)
+    executor = CommandExecutor(ctx, validator, clock=lambda: NOW)
+    execution, result = executor.execute(
+        _frame(operation={"type": "open_order", "symbol": "EURUSD", "side": "sideways", "volume": 0.01})
+    )
+    assert execution.state is CommandState.FAILED
+    assert result["status"] == "mcp_failed"
+    assert result["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.unit
+def test_open_order_uncertain_send_reconciles_via_fingerprint(monkeypatch):
+    ctx = _ctx()
+
+    def unverified_open(ctx_, **kw):
+        raise BridgeError(ErrorCode.TRADE_UNVERIFIED, "order_send returned no result")
+
+    monkeypatch.setattr("nse_bridge.engine.trading.market_order", unverified_open)
+    # A just-opened matching position exists (side + magic + recency).
+    pos = SimpleNamespace(
+        ticket=8001234,
+        symbol="EURUSD",
+        type=0,
+        volume=0.01,
+        price_open=1.098,
+        sl=0.0,
+        tp=0.0,
+        magic=888101,
+        time=datetime.now(UTC).timestamp() - 5,
+        comment="",
+        profit=0.0,
+        swap=0.0,
+        commission=0.0,
+    )
+    monkeypatch.setattr("nse_bridge.engine.trading.fetch_positions", lambda ctx_, symbol=None: [pos])
+    validator = _validator(open_order_authorized=True)
+    executor = CommandExecutor(ctx, validator, clock=lambda: NOW)
+    execution, result = executor.execute(
+        _frame(operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.01})
+    )
+    # W4: reconciliation proves the open landed → executed, never re-sent.
+    assert execution.state is CommandState.COMPLETED
+    assert result["status"] == "executed"
+    assert result["payload"]["ticket"] == 8001234
+    assert result["payload"]["ambiguous_fill_recovered"] is True
+
+
+# ----------------------------------------------------------------------
+# W1 — modify_pending close-out (§17.4): SL/TP only, order tickets only,
+# gate closed by default; the execution semantics are pinned here.
+# ----------------------------------------------------------------------
+@pytest.mark.unit
+def test_modify_pending_non_numeric_ticket_is_malformed():
+    v = _validator(modify_pending_proven=True)
+    assert v.validate(_frame(operation={"type": "modify_pending", "ticket": "abc", "sl": 1.08})).rejection is (
+        RejectionReason.MALFORMED
+    )
+
+
+@pytest.mark.unit
+def test_modify_pending_with_position_ticket_is_rejected_not_executed(monkeypatch):
+    """§17.4 pinned semantics: `modify_pending` names a PENDING ORDER.
+    A ticket that only exists as an open position is TICKET_NOT_FOUND —
+    never silently converted into a position modification."""
+    ctx = _ctx()
+    monkeypatch.setattr("nse_bridge.engine.orders._fetch_order", lambda ctx_, ticket: None)
+    monkeypatch.setattr(
+        "nse_bridge.engine.trading.fetch_position",
+        lambda ctx_, ticket: SimpleNamespace(ticket=ticket, symbol="EURUSD", sl=0.0, tp=0.0),
+    )
+    dispatched: list[str] = []
+    monkeypatch.setattr(
+        "nse_bridge.engine.trading.modify_pending_order_sltp",
+        lambda ctx_, ticket, sl, tp: dispatched.append("dispatched") or {"status": "done"},
+    )
+    executor = CommandExecutor(ctx, _validator(modify_pending_proven=True), clock=lambda: NOW)
+    execution, result = executor.execute(_frame(operation={"type": "modify_pending", "ticket": "9000001", "sl": 1.05}))
+    assert execution.state is CommandState.FAILED
+    assert result["status"] == "mcp_failed"
+    assert result["error"]["code"] == "TICKET_NOT_FOUND"
+    assert dispatched == []  # the position-modify path was never taken
+
+
+@pytest.mark.unit
+def test_modify_pending_success_with_gate_open(monkeypatch):
+    ctx = _ctx()
+    monkeypatch.setattr(
+        "nse_bridge.engine.orders._fetch_order",
+        lambda ctx_, ticket: SimpleNamespace(ticket=ticket, symbol="EURUSD", sl=0.0, tp=0.0),
+    )
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "nse_bridge.engine.trading.modify_pending_order_sltp",
+        lambda ctx_, ticket, sl, tp: (
+            seen.update({"ticket": ticket, "sl": sl, "tp": tp})
+            or {"status": "done", "ticket": ticket, "retcode": 10009}
+        ),
+    )
+    executor = CommandExecutor(ctx, _validator(modify_pending_proven=True), clock=lambda: NOW)
+    execution, result = executor.execute(_frame(operation={"type": "modify_pending", "ticket": "9000002", "sl": 1.04}))
+    assert execution.state is CommandState.COMPLETED
+    assert result["status"] == "executed"
+    assert result["source_tool"] == "trade_modify_sl_tp"  # §17.4: same MT5 action, order ticket
+    assert seen == {"ticket": 9000002, "sl": pytest.approx(1.04), "tp": 0.0}
+
+
+@pytest.mark.unit
+def test_modify_pending_broker_rejection_is_failed_never_retried(monkeypatch):
+    ctx = _ctx()
+    monkeypatch.setattr(
+        "nse_bridge.engine.orders._fetch_order",
+        lambda ctx_, ticket: SimpleNamespace(ticket=ticket, symbol="EURUSD", sl=0.0, tp=0.0),
+    )
+    monkeypatch.setattr(
+        "nse_bridge.engine.trading.modify_pending_order_sltp",
+        lambda ctx_, ticket, sl, tp: (_ for _ in ()).throw(
+            BridgeError(ErrorCode.TRADE_REJECTED, "modify rejected by broker", retcode=10016)
+        ),
+    )
+    executor = CommandExecutor(ctx, _validator(modify_pending_proven=True), clock=lambda: NOW)
+    execution, result = executor.execute(_frame(operation={"type": "modify_pending", "ticket": "9000002", "sl": 1.04}))
+    assert execution.state is CommandState.FAILED
+    assert result["status"] == "mcp_failed"
+    assert result["error"]["code"] == "TRADE_REJECTED"
+    assert result["error"]["retry_safe"] is False

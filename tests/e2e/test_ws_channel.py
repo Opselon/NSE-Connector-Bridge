@@ -181,7 +181,19 @@ async def test_server_channel_full_roundtrip(ctx, client):
     server = await websockets.serve(handler, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     test_ctx = _test_context(ctx, f"ws://127.0.0.1:{port}")
-    channel = ServerChannel(test_ctx, EventBus())
+    from nse_bridge.server.commands import CommandExecutor, CommandValidator
+    from nse_bridge.server.rest import Entitlements
+
+    # The platform resolves entitlements via validate-key; the fake server
+    # never does, so the test provisions the entitled validator itself (§6.3
+    # step 6 would otherwise reject every command with AutoTradeNotEnabled —
+    # which is exactly what it did on the first live run).
+    validator = CommandValidator(
+        test_ctx.get_or_create_device_id(),
+        get_account_id=lambda: str(ctx.driver.connection_state_dict().get("login") or ""),
+        entitlements=Entitlements(position_manager=True, auto_trade=True),
+    )
+    channel = ServerChannel(test_ctx, EventBus(), executor=CommandExecutor(test_ctx, validator))
     channel.start()
     try:
         await asyncio.wait_for(result_seen.wait(), timeout=25)
@@ -269,7 +281,19 @@ async def test_server_channel_unknown_command_response(ctx, client):
     server = await websockets.serve(handler, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     test_ctx = _test_context(ctx, f"ws://127.0.0.1:{port}")
-    channel = ServerChannel(test_ctx, EventBus())
+    from nse_bridge.server.commands import CommandExecutor, CommandValidator
+    from nse_bridge.server.rest import Entitlements
+
+    # The platform resolves entitlements via validate-key; the fake server
+    # never does, so the test provisions the entitled validator itself (§6.3
+    # step 6 would otherwise reject every command with AutoTradeNotEnabled —
+    # which is exactly what it did on the first live run).
+    validator = CommandValidator(
+        test_ctx.get_or_create_device_id(),
+        get_account_id=lambda: str(ctx.driver.connection_state_dict().get("login") or ""),
+        entitlements=Entitlements(position_manager=True, auto_trade=True),
+    )
+    channel = ServerChannel(test_ctx, EventBus(), executor=CommandExecutor(test_ctx, validator))
     channel.start()
     try:
         await asyncio.wait_for(got_error.wait(), timeout=25)

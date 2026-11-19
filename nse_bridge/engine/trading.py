@@ -5,6 +5,18 @@ Ported production semantics:
 - non-DONE retcode -> TRADE_REJECTED with the official label
 - close: ambiguous retcode re-checked against live positions (no duplicate close)
 - filling mode resolved from the broker bitmask per symbol
+
+Phase 2b execution-safety additions (W2/W4):
+
+- Official pre-send ``order_check`` (CONTRACTS.md §7, DESIGN.md §3.8):
+  every financial send in the gateway execution path first runs the
+  official ``mt5.order_check`` with the EXACT request on the serialized
+  worker, preserves the raw check result, and refuses the send on a
+  failed check. A passing check is never a guarantee of execution.
+- Uncertain outcomes (a ``None`` response or retcode 10031 CONNECTION)
+  never prove non-execution: they reconcile against live broker state
+  and are never re-sent. A volume-bearing re-send could double-fill a
+  partial close or duplicate an open — so the send loop stops instead.
 """
 
 from __future__ import annotations
@@ -17,9 +29,126 @@ from pydantic import BaseModel
 
 from ..errors import BridgeError, ErrorCode
 from ..mt5.types import f as _f
-from ..retcodes import TRADE_RETCODE_DONE, TRADE_RETCODE_DONE_PARTIAL, TRADE_RETCODE_NO_CHANGES, translate_retcode
+from ..retcodes import (
+    ORDER_CHECK_RETCODE_OK,
+    TRADE_RETCODE_CONNECTION,
+    TRADE_RETCODE_DONE,
+    TRADE_RETCODE_DONE_PARTIAL,
+    TRADE_RETCODE_NO_CHANGES,
+    translate_retcode,
+)
 from .common import BridgeContext, account_info_model, resolve_filling_mode, resolve_order_symbol
 from .symbols import _fresh_tick
+
+# ENUM_ACCOUNT_MARGIN_MODE (verified against the package constants in
+# E-OC-1, scripts/phase2b_probe_order_check.py): 0=RETAIL_NETTING,
+# 1=EXCHANGE, 2=RETAIL_HEDGING. Close-by is a hedging-account
+# operation (real-MT5 defect D5: the old check compared against 1,
+# wrongly refusing real hedging accounts — including the MetaQuotes
+# Demo account used for Phase 2b verification).
+ACCOUNT_MARGIN_MODE_RETAIL_NETTING = 0
+ACCOUNT_MARGIN_MODE_EXCHANGE = 1
+ACCOUNT_MARGIN_MODE_RETAIL_HEDGING = 2
+
+
+def mt5_trade_constants(ctx: BridgeContext) -> dict[str, int]:
+    """Resolve the MT5 action/type constants on the worker thread.
+
+    One cheap IPC hop per financial send keeps the request dict
+    canonical against the ACTUAL loaded package (never a hardcoded
+    guess) while leaving it buildable outside the worker so the exact
+    request can go through :func:`order_check_send` first (W2 step 4).
+    """
+    ctx.driver.ensure_connected()
+
+    def job(mt5: Any):
+        return {
+            "action_deal": int(mt5.TRADE_ACTION_DEAL),
+            "action_pending": int(mt5.TRADE_ACTION_PENDING),
+            "action_sltp": int(mt5.TRADE_ACTION_SLTP),
+            "action_modify": int(mt5.TRADE_ACTION_MODIFY),
+            "order_type_buy": int(mt5.ORDER_TYPE_BUY),
+            "order_type_sell": int(mt5.ORDER_TYPE_SELL),
+            "order_time_gtc": int(mt5.ORDER_TIME_GTC),
+            "order_time_specified": int(mt5.ORDER_TIME_SPECIFIED),
+        }
+
+    return ctx.driver.run(job, op="mt5_constants")
+
+
+def _check_result_dict(raw: Any) -> Any:
+    """JSON-safe conversion of an order_check result (nested namedtuples,
+    SimpleNamespace-style objects, dicts, lists, scalars)."""
+    if hasattr(raw, "_asdict"):
+        return {key: _check_result_dict(value) for key, value in raw._asdict().items()}
+    if isinstance(raw, dict):
+        return {key: _check_result_dict(value) for key, value in raw.items()}
+    if isinstance(raw, (list, tuple)):
+        return [_check_result_dict(value) for value in raw]
+    d = getattr(raw, "__dict__", None)
+    if isinstance(d, dict):
+        return {key: _check_result_dict(value) for key, value in d.items()}
+    return raw
+
+
+def order_check_send(
+    ctx: BridgeContext,
+    request: dict[str, Any],
+    op: str,
+    *,
+    no_changes_ok: bool = False,
+) -> dict[str, Any]:
+    """Official MT5 ``order_check`` pre-send validation (W2, CONTRACTS §7).
+
+    Runs the EXACT request that is about to be sent through the
+    serialized worker — the official broker check, never a locally
+    invented approximation. Semantics (all verified live, E-OC-1):
+
+    - retcode 0 → check passed (validity + post-trade margin preview).
+    - retcode 10025 (NO_CHANGES) with ``no_changes_ok`` → pass: the
+      request is valid and the target state already holds (idempotent
+      SLTP/MODIFY sends report this instead of a plain pass).
+    - anything else → REFUSAL: the caller must not call ``order_send``;
+      a BridgeError with code ``ORDER_CHECK_FAILED`` carries the raw
+      check result.
+    - ``None`` → the check itself is unavailable: fail closed, never
+      send unverified.
+
+    A passing check is a preview at check time only — requotes,
+    disconnects and market moves can still fail the send (CONTRACTS §7).
+    """
+    ctx.driver.ensure_connected()
+
+    def job(mt5: Any):
+        return mt5.order_check(request)
+
+    raw = ctx.driver.run(
+        job,
+        op="order_check",
+        context={"op": op, "symbol": request.get("symbol"), "action": request.get("action")},
+    )
+    symbol = str(request.get("symbol") or "")
+    if raw is None:
+        raise BridgeError(
+            ErrorCode.ORDER_CHECK_FAILED,
+            f"order_check returned no result — refusing to send an unverified {op} request (fail closed).",
+            details={"op": op, "symbol": symbol},
+        )
+    retcode = int(_f(raw, "retcode", 0))
+    if retcode != ORDER_CHECK_RETCODE_OK and not (no_changes_ok and retcode == TRADE_RETCODE_NO_CHANGES):
+        raise BridgeError(
+            ErrorCode.ORDER_CHECK_FAILED,
+            f"order_check refused the {op} request: {translate_retcode(retcode)} — order_send not reached.",
+            retcode=retcode,
+            details={"op": op, "symbol": symbol, "order_check": _check_result_dict(raw)},
+        )
+    check = _check_result_dict(raw)
+    ctx.trade_metrics.record("order_check", "done", 0.0, retcode, {"op": op, "symbol": symbol})
+    return check
+
+
+def _unverified(op: str, message: str, details: dict[str, Any]) -> BridgeError:
+    return BridgeError(ErrorCode.TRADE_UNVERIFIED, message, details=details)
 
 
 def order_send_checked(ctx: BridgeContext, request: dict[str, Any], op: str) -> Any:
@@ -35,10 +164,10 @@ def order_send_checked(ctx: BridgeContext, request: dict[str, Any], op: str) -> 
     if raw is None:
         # No result object at all: outcome unobserved — never treated as rejection.
         ctx.trade_metrics.record(op, "unknown", ms, None, {"symbol": request.get("symbol")})
-        raise BridgeError(
-            ErrorCode.TRADE_UNVERIFIED,
+        raise _unverified(
+            op,
             "order_send returned no result — broker state unverified. Reconcile (positions/orders) before retrying.",
-            details={"op": op, "symbol": request.get("symbol")},
+            {"op": op, "symbol": request.get("symbol")},
         )
     retcode = int(_f(raw, "retcode", 0))
     outcome = "done" if retcode == TRADE_RETCODE_DONE else "rejected"
@@ -151,7 +280,14 @@ def market_order(
     comment: str = "NSE_MARKET",
     magic: int | None = None,
 ) -> dict[str, Any]:
-    """Market order with ambiguous-fill recovery (ported execute_market_order)."""
+    """Market order with ambiguous-fill recovery (ported execute_market_order).
+
+    W2: the exact request goes through the official ``order_check``
+    first; a failed check raises ``ORDER_CHECK_FAILED`` and
+    ``order_send`` is never reached. W4: a ``None`` response or retcode
+    10031 reconciles against live positions (fingerprint match) and is
+    never re-sent — an open must not duplicate.
+    """
     symbol = symbol.strip()
     ctx.driver.ensure_connected()
     # Canonical ``BASE/QUOTE`` spellings resolve to the exact broker
@@ -175,42 +311,69 @@ def market_order(
     # because that is the magic MT5 assigns to an unstamped order.
     mgc = magic if magic is not None else ctx.settings.magic
     mgc_for_match = mgc if mgc is not None else 0
+    consts = mt5_trade_constants(ctx)
+    request: dict[str, Any] = {
+        "action": consts["action_deal"],
+        "symbol": symbol,
+        "volume": float(volume),
+        "type": consts["order_type_buy"] if side == "buy" else consts["order_type_sell"],
+        "price": price,
+        "sl": float(sl),
+        "tp": float(tp),
+        "deviation": int(deviation),
+        "comment": comment,
+        "type_time": consts["order_time_gtc"],
+        "type_filling": filling,
+    }
+    if mgc is not None:
+        request["magic"] = int(mgc)
+    # W2 step 5: the official pre-send check with the exact request.
+    check = order_check_send(ctx, request, "market_order")
 
-    def job(mt5: Any, price=price):  # bound at definition time (B023)
-        order_type = mt5.ORDER_TYPE_BUY if side == "buy" else mt5.ORDER_TYPE_SELL
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": float(volume),
-            "type": order_type,
-            "price": price,
-            "sl": float(sl),
-            "tp": float(tp),
-            "deviation": int(deviation),
-            "comment": comment,
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": filling,
-        }
-        if mgc is not None:
-            request["magic"] = int(mgc)
+    def job(mt5: Any, request=request):  # bound at definition time (B023)
         return mt5.order_send(request)
 
     raw = ctx.driver.run(job, op="order_send", context={"symbol": symbol, "side": side, "volume": volume})
     ms_probe = 0.0  # metrics handled inside order_send paths below
 
-    if raw is None:
-        ctx.trade_metrics.record("order_send", "unknown", ms_probe, None, {"symbol": symbol, "side": side})
-        # ambiguous fill recovery: verify against broker truth before failing
+    if raw is None or int(_f(raw, "retcode", 0)) == TRADE_RETCODE_CONNECTION:
+        # W4: a lost response or retcode 10031 does NOT prove the order
+        # was not executed — recover from live broker truth, never re-send.
+        outcome: str = "unknown" if raw is None else "rejected"
+        ctx.trade_metrics.record(
+            "order_send",
+            outcome,
+            ms_probe,
+            None if raw is None else TRADE_RETCODE_CONNECTION,
+            {"symbol": symbol, "side": side},
+        )
         recovered = _recover_ambiguous(ctx, symbol, side, mgc_for_match)
         if recovered is not None:
+            logger.warning(
+                "[ORDER_WRITE] uncertain order_send outcome ({}), but live position found (ticket={}) — "
+                "reconciled as executed without re-sending",
+                "None" if raw is None else "retcode 10031",
+                int(_f(recovered, "ticket", 0)),
+            )
             ctx.trade_metrics.record(
                 "order_send", "done", ms_probe, TRADE_RETCODE_DONE, {"symbol": symbol, "recovered": True}
             )
-            return _execution_payload(recovered, symbol, recovered=True)
-        raise BridgeError(
-            ErrorCode.TRADE_UNVERIFIED,
-            "order_send returned no result — reconcile broker state before retrying.",
-            details={"symbol": symbol, "side": side, "volume": volume},
+            payload = _execution_payload(recovered, symbol, recovered=True)
+            payload["order_check"] = check
+            return payload
+        raise _unverified(
+            "market_order",
+            "order_send returned "
+            + ("no result" if raw is None else "retcode 10031 (no connection)")
+            + " — outcome unverified. Reconcile (positions) before retrying; the open was never re-sent.",
+            {
+                "op": "market_order",
+                "symbol": symbol,
+                "side": side,
+                "volume": volume,
+                "retcode": None if raw is None else TRADE_RETCODE_CONNECTION,
+                "order_check": check,
+            },
         )
     retcode = int(_f(raw, "retcode", 0))
     if retcode != TRADE_RETCODE_DONE:
@@ -223,10 +386,16 @@ def market_order(
                 int(_f(recovered, "ticket", 0)),
             )
             ctx.trade_metrics.record("order_send", "done", ms_probe, retcode, {"symbol": symbol, "recovered": True})
-            return _execution_payload(recovered, symbol, recovered=True)
-        raise reject(raw, "market_order", symbol)
+            payload = _execution_payload(recovered, symbol, recovered=True)
+            payload["order_check"] = check
+            return payload
+        exc = reject(raw, "market_order", symbol)
+        exc.details["order_check"] = check
+        raise exc
     ctx.trade_metrics.record("order_send", "done", ms_probe, retcode, {"symbol": symbol, "side": side})
-    return _execution_payload(raw, symbol)
+    payload = _execution_payload(raw, symbol)
+    payload["order_check"] = check
+    return payload
 
 
 def _recover_ambiguous(ctx: BridgeContext, symbol: str, side: str, magic: int) -> Any | None:
@@ -248,9 +417,19 @@ def _recover_ambiguous(ctx: BridgeContext, symbol: str, side: str, magic: int) -
 
 
 def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) -> dict[str, Any]:
-    """TRADE_ACTION_SLTP with retries + ownership guard (ported modify_position)."""
+    """TRADE_ACTION_SLTP with pre-send order_check + ownership guard (ported modify_position).
+
+    W2: the exact request runs through the official ``order_check``
+    first (``no_changes_ok``: SLTP checks report NO_CHANGES when the
+    target state already holds — verified live, E-OC-1). W4: a ``None``
+    response or retcode 10031 raises TRADE_UNVERIFIED — the command
+    layer reconciles against the live SL/TP; the request is NEVER
+    re-sent while the outcome is unknown (TRADE_ACTION_SLTP sets an
+    absolute state, so the reconciliation read is conclusive).
+    """
     ctx.driver.ensure_connected()
     last: Any = None
+    last_check: dict[str, Any] | None = None
     for attempt in range(1, 4):
         pos = fetch_position(ctx, ticket)
         if not _position_owns(ctx, pos):
@@ -264,22 +443,38 @@ def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) 
         # Validates the symbol/connection; TRADE_ACTION_SLTP carries no
         # filling mode, so the resolved value is intentionally unused.
         resolve_filling_mode(ctx, symbol)
+        consts = mt5_trade_constants(ctx)
+        request: dict[str, Any] = {
+            "action": consts["action_sltp"],
+            "position": int(ticket),
+            "symbol": symbol,
+            "sl": float(sl),
+            "tp": float(tp),
+        }
+        last_check = order_check_send(ctx, request, "modify_sl_tp", no_changes_ok=True)
 
-        def job(mt5: Any, symbol=symbol, ticket=ticket, sl=sl, tp=tp):
-            return mt5.order_send(
-                {
-                    "action": mt5.TRADE_ACTION_SLTP,
-                    "position": int(ticket),
-                    "symbol": symbol,
-                    "sl": float(sl),
-                    "tp": float(tp),
-                }
-            )
+        def job(mt5: Any, request=request):
+            return mt5.order_send(request)
 
         last = ctx.driver.run(job, op="order_send_sltp", context={"ticket": ticket, "sl": sl, "tp": tp})
-        if last is None:
-            continue
-        retcode = int(_f(last, "retcode", 0))
+        retcode = int(_f(last, "retcode", 0)) if last is not None else None
+        if last is None or retcode == TRADE_RETCODE_CONNECTION:
+            # W4: outcome unknown — stop sending; the command layer
+            # reconciles against the live SL/TP before anything else.
+            ctx.trade_metrics.record("modify_sltp", "unknown", 0.0, retcode, {"ticket": ticket, "uncertain": True})
+            raise _unverified(
+                "modify_sl_tp",
+                f"SL/TP modification for #{ticket} returned "
+                + ("no result" if last is None else "retcode 10031 (no connection)")
+                + " — outcome unverified; reconcile the live SL/TP before retrying (never blind-retry).",
+                {
+                    "ticket": ticket,
+                    "sl": sl,
+                    "tp": tp,
+                    "retcode": retcode,
+                    "order_check": last_check,
+                },
+            )
         if retcode == TRADE_RETCODE_NO_CHANGES:
             # Idempotent success (real-MT5 defect 1): the requested SL/TP
             # already hold — the desired state is in effect, so there is
@@ -296,6 +491,7 @@ def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) 
                 "retcode": retcode,
                 "retcode_label": translate_retcode(retcode),
                 "no_changes": True,
+                "order_check": last_check,
             }
         if retcode == TRADE_RETCODE_DONE:
             ctx.trade_metrics.record("modify_sltp", "done", 0.0, retcode, {"ticket": ticket})
@@ -307,6 +503,7 @@ def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) 
                 "tp": tp,
                 "retcode": retcode,
                 "retcode_label": translate_retcode(retcode),
+                "order_check": last_check,
             }
         time.sleep(0.025)
     retcode = int(_f(last, "retcode", 0)) if last is not None else 0
@@ -315,7 +512,7 @@ def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) 
         ErrorCode.TRADE_REJECTED,
         f"SL/TP modification failed for #{ticket} after 3 attempts: {translate_retcode(retcode)}",
         retcode=retcode if retcode else None,
-        details={"ticket": ticket, "sl": sl, "tp": tp},
+        details={"ticket": ticket, "sl": sl, "tp": tp, "order_check": last_check},
     )
 
 
@@ -359,6 +556,49 @@ def _reconcile_close_volume(ctx: BridgeContext, ticket: int) -> tuple[float | No
     return float(_f(current, "volume", 0.0) or 0.0), True
 
 
+def _reconcile_uncertain_close(
+    ctx: BridgeContext, ticket: int, pre_volume: float, symbol: str
+) -> dict[str, Any] | None:
+    """W4: reconcile a lost/uncertain close against live broker truth.
+
+    Returns the truthful payload when the outcome is established from
+    broker state (position gone → fully closed; volume reduced → the
+    actual partial fill), ``None`` when it remains unknown. Never
+    re-sends the close — a re-send could double-fill a partial close.
+    """
+    try:
+        current = fetch_position(ctx, ticket)
+    except BridgeError as exc:
+        if exc.code is ErrorCode.TICKET_NOT_FOUND:
+            return {
+                "status": "done",
+                "symbol": symbol,
+                "ticket": ticket,
+                "closed_volume": pre_volume,
+                "remaining_volume": 0.0,
+                "partial": False,
+                "reconciled": True,
+                "ambiguous_fill_recovered": True,
+                "reconciliation": "position_gone",
+            }
+        return None  # re-read failed — outcome stays unknown
+    remaining = float(_f(current, "volume", 0.0) or 0.0)
+    closed = max(0.0, pre_volume - remaining)
+    if closed <= 1e-9:
+        return None  # nothing landed — the outcome is genuinely unknown
+    return {
+        "status": "done",
+        "symbol": symbol,
+        "ticket": ticket,
+        "closed_volume": closed,
+        "remaining_volume": remaining,
+        "partial": remaining > 1e-9,
+        "reconciled": True,
+        "ambiguous_fill_recovered": True,
+        "reconciliation": "volume_reduced",
+    }
+
+
 def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None) -> dict[str, Any]:
     """Close (fully or partially) with idempotent ambiguous-close handling (ported).
 
@@ -367,9 +607,17 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
     payload carries ``partial``, ``closed_volume`` (actually closed, not
     merely requested) and ``remaining_volume``. A DONE_PARTIAL retcode
     (10010) is NEVER retried — retrying would close more volume.
+
+    W2: the exact request runs through the official ``order_check``
+    first; a refusal raises ORDER_CHECK_FAILED and nothing is sent.
+    W4: a ``None`` response or retcode 10031 (no connection) does not
+    prove the close failed — the send loop stops and the close is
+    reconciled against live broker state (:func:`_reconcile_uncertain_close`);
+    it is never re-sent while the outcome is unknown.
     """
     ctx.driver.ensure_connected()
     last: Any = None
+    last_check: dict[str, Any] | None = None
     for attempt in range(1, 4):
         pos_raw = fetch_position(ctx, ticket)
         if not _position_owns(ctx, pos_raw):
@@ -400,44 +648,62 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
                 details={"ticket": ticket, "symbol": symbol, "price": price},
             )
         filling = resolve_filling_mode(ctx, symbol)
+        consts = mt5_trade_constants(ctx)
+        request: dict[str, Any] = {
+            "action": consts["action_deal"],
+            "symbol": symbol,
+            "volume": close_volume,
+            "type": consts["order_type_sell"] if pos_type == 0 else consts["order_type_buy"],
+            "position": int(ticket),
+            "price": price,
+            "magic": int(_f(pos_raw, "magic", 0) or 0),
+            "comment": "NSE_CLOSE",
+            "type_time": consts["order_time_gtc"],
+            "type_filling": filling,
+        }
+        # W2 step 5: official pre-send check with the exact request —
+        # a refusal raises and order_send is never reached.
+        last_check = order_check_send(ctx, request, "close_position")
 
-        def job(  # loop variables bound as defaults (B023): the job runs synchronously
-            mt5: Any,
-            pos_type=pos_type,
-            tick=tick,
-            price=price,
-            close_volume=close_volume,
-            symbol=symbol,
-            pos_raw=pos_raw,
-            filling=filling,
-            ticket=ticket,
-        ):
-            close_type = mt5.ORDER_TYPE_SELL if pos_type == 0 else mt5.ORDER_TYPE_BUY
-            return mt5.order_send(
-                {
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": symbol,
-                    "volume": close_volume,
-                    "type": close_type,
-                    "position": int(ticket),
-                    "price": price,
-                    "magic": int(_f(pos_raw, "magic", 0) or 0),
-                    "comment": "NSE_CLOSE",
-                    "type_time": mt5.ORDER_TIME_GTC,
-                    "type_filling": filling,
-                }
-            )
+        def job(mt5: Any, request=request):  # loop variables bound as defaults (B023)
+            return mt5.order_send(request)
 
         last = ctx.driver.run(job, op="order_send_close", context={"ticket": ticket, "volume": close_volume})
-        if last is None:
-            continue
-        retcode = int(_f(last, "retcode", 0))
+        retcode = int(_f(last, "retcode", 0)) if last is not None else None
+        if last is None or retcode == TRADE_RETCODE_CONNECTION:
+            # W4: uncertain — reconcile against broker truth, never re-send.
+            outcome_uncertain = _reconcile_uncertain_close(ctx, ticket, pos_volume, symbol)
+            if outcome_uncertain is not None:
+                outcome_uncertain["retcode"] = retcode
+                outcome_uncertain["retcode_label"] = (
+                    translate_retcode(retcode)
+                    if retcode is not None
+                    else "NO_RESPONSE - order_send returned no result object"
+                )
+                outcome_uncertain["order_check"] = last_check
+                ctx.trade_metrics.record("close_position", "done", 0.0, retcode, {"ticket": ticket, "reconciled": True})
+                return outcome_uncertain
+            ctx.trade_metrics.record("close_position", "unknown", 0.0, retcode, {"ticket": ticket, "uncertain": True})
+            raise _unverified(
+                "close_position",
+                f"Close for #{ticket} returned "
+                + ("no result" if last is None else "retcode 10031 (no connection)")
+                + " and reconciliation could not establish the outcome — reconcile broker state "
+                "before any retry; the close was never re-sent.",
+                {
+                    "ticket": ticket,
+                    "volume": close_volume,
+                    "retcode": retcode,
+                    "order_check": last_check,
+                },
+            )
         if retcode in (TRADE_RETCODE_DONE, TRADE_RETCODE_DONE_PARTIAL):
             outcome = "done" if retcode == TRADE_RETCODE_DONE else "partial"
             payload = _execution_payload(last, symbol) | {
                 "status": "done",
                 "ticket": ticket,
                 "closed_volume": close_volume,
+                "order_check": last_check,
             }
             requested_partial = close_volume < pos_volume - 1e-9
             if requested_partial or retcode == TRADE_RETCODE_DONE_PARTIAL:
@@ -459,7 +725,7 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
                             ErrorCode.TRADE_UNVERIFIED,
                             f"Close for #{ticket} reported DONE_PARTIAL but the position volume is unchanged "
                             f"({remaining}) — reconcile broker state before retrying.",
-                            details={"ticket": ticket, "remaining_volume": remaining},
+                            details={"ticket": ticket, "remaining_volume": remaining, "order_check": last_check},
                         )
                     payload["closed_volume"] = closed
                     payload["partial"] = remaining > 1e-9
@@ -492,6 +758,7 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
                     "retcode": retcode,
                     "retcode_label": translate_retcode(retcode),
                     "ambiguous_fill_recovered": True,
+                    "order_check": last_check,
                 }
             time.sleep(0.025)
     retcode = int(_f(last, "retcode", 0)) if last is not None else 0
@@ -500,7 +767,7 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
         ErrorCode.TRADE_REJECTED,
         f"Close failed for #{ticket} after 3 attempts: {translate_retcode(retcode)}",
         retcode=retcode if retcode else None,
-        details={"ticket": ticket},
+        details={"ticket": ticket, "order_check": last_check},
     )
 
 
@@ -508,10 +775,15 @@ def close_position_by(ctx: BridgeContext, ticket: int, ticket_by: int) -> dict[s
     """Close two opposite positions against each other (spec §6, C2).
 
     Sends ``TRADE_ACTION_CLOSE_BY`` with ``position`` + ``position_by``.
-    Hedging accounts ONLY (MT5 ``margin_mode`` 1 = RETAIL_HEDGING): on
-    a netting account (0) close-by is impossible by construction — the
-    caller must close + open an opposing deal instead. When the margin
-    mode is unreported the Bridge refuses rather than guessing.
+    Hedging accounts ONLY (ENUM_ACCOUNT_MARGIN_MODE:
+    ``ACCOUNT_MARGIN_MODE_RETAIL_HEDGING`` = 2 — verified against the
+    package constants live, E-OC-1): on a netting account (0) close-by
+    is impossible by construction — the caller must close + open an
+    opposing deal instead. (Real-MT5 defect D5, fixed in Phase 2b: the
+    old check compared against 1, which is EXCHANGE, and therefore
+    wrongly refused every genuine hedging account, including the
+    MetaQuotes Demo account used for Phase 2b verification.) When the
+    margin mode is unreported the Bridge refuses rather than guessing.
 
     Both positions must exist, share one symbol, and be opposite types.
     Per MQL5, the smaller-volume position closes entirely and the larger
@@ -555,12 +827,12 @@ def close_position_by(ctx: BridgeContext, ticket: int, ticket_by: int) -> dict[s
             http_status=422,
             details={"ticket": ticket, "ticket_by": ticket_by},
         )
-    if margin_mode != 1:
+    if margin_mode != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING:
         raise BridgeError(
             ErrorCode.VALIDATION,
-            f"Close-by requires a hedging account (margin_mode={margin_mode}, "
-            "0=netting, 2=exchange). On a netting account close the position and open an "
-            "opposing deal instead.",
+            f"Close-by requires a hedging account (margin_mode={margin_mode}; "
+            "0=netting, 1=exchange, 2=hedging). On a netting account close the position "
+            "and open an opposing deal instead.",
             http_status=422,
             details={"ticket": ticket, "ticket_by": ticket_by, "margin_mode": margin_mode},
         )

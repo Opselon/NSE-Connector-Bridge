@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import call
+from tests.conftest import auth_headers, call
 
 pytestmark = pytest.mark.real_mt5
 
@@ -13,10 +13,12 @@ SYMBOL = "XAUUSD"
 
 
 def test_settings_get_masked(client):
-    data = client.get("/api/v1/settings").json()["data"]
+    data = client.get("/api/v1/settings", headers=auth_headers(client)).json()["data"]
     assert data["device_id"].startswith("nse-")
     assert "config_file" in data
-    assert data["magic"] >= 0
+    # magic is None when no bridge magic is configured — a valid state
+    # (the bridge then stamps no magic; the strict guard stays permissive).
+    assert data["magic"] is None or data["magic"] >= 0
     # token must never leak unmasked
     assert "server_token" not in data
     assert "server_token_masked" in data
@@ -26,24 +28,29 @@ def test_settings_put_updates_and_applies(client):
     data = client.put(
         "/api/v1/settings",
         json={"magic": 999123, "log_level": "WARNING"},
+        headers=auth_headers(client),
     ).json()["data"]
     assert "magic" in data["changed"] and "log_level" in data["changed"]
     # restore
-    data = client.put("/api/v1/settings", json={"magic": 888101, "log_level": "INFO"}).json()["data"]
+    data = client.put(
+        "/api/v1/settings", json={"magic": 888101, "log_level": "INFO"}, headers=auth_headers(client)
+    ).json()["data"]
     assert "magic" in data["changed"]
     assert isinstance(data["server_channel_restarted"], bool)
 
 
 def test_settings_put_partial_untouched_fields(client):
-    original = client.get("/api/v1/settings").json()["data"]["broker_utc_offset_minutes"]
+    original = client.get("/api/v1/settings", headers=auth_headers(client)).json()["data"]["broker_utc_offset_minutes"]
     new_value = (original + 30) % 721
-    data = client.put("/api/v1/settings", json={"broker_utc_offset_minutes": new_value}).json()["data"]
+    data = client.put(
+        "/api/v1/settings", json={"broker_utc_offset_minutes": new_value}, headers=auth_headers(client)
+    ).json()["data"]
     assert data["changed"] == ["broker_utc_offset_minutes"]
-    client.put("/api/v1/settings", json={"broker_utc_offset_minutes": original})
+    client.put("/api/v1/settings", json={"broker_utc_offset_minutes": original}, headers=auth_headers(client))
 
 
 def test_settings_put_invalid_log_level_422(client):
-    resp = client.put("/api/v1/settings", json={"log_level": "LOUD"})
+    resp = client.put("/api/v1/settings", json={"log_level": "LOUD"}, headers=auth_headers(client))
     assert resp.status_code == 422
 
 

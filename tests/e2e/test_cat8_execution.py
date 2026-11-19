@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 from starlette.testclient import TestClient
 
-from tests.conftest import call
+from tests.conftest import auth_headers, call
 
 pytestmark = pytest.mark.real_mt5
 
@@ -89,6 +89,7 @@ def test_67_trade_send_pending_order_and_validation(client):
         resp = client.post(
             "/api/v1/trade_send_pending_order",
             json={"symbol": SYMBOL, "order_type": "BUY_LIMIT", "volume": 0.01, "price": round(ask + 2.5, 2)},
+            headers=auth_headers(client),
         )
         assert resp.status_code == 422
         err = resp.json()["error"]
@@ -99,6 +100,7 @@ def test_67_trade_send_pending_order_and_validation(client):
         resp = client.post(
             "/api/v1/trade_send_pending_order",
             json={"symbol": SYMBOL, "order_type": "BUY_LIMIT", "volume": 0.011, "price": round(ask - 2.5, 2)},
+            headers=auth_headers(client),
         )
         assert resp.status_code == 422
         err = resp.json()["error"]
@@ -121,7 +123,11 @@ def test_68_trade_close_partial_position(client):
         ticket = positions[-1]["ticket"]
 
         # validation: partial volume must be smaller than position volume (422)
-        resp = client.post("/api/v1/trade_close_partial_position", json={"ticket": ticket, "volume": 0.02})
+        resp = client.post(
+            "/api/v1/trade_close_partial_position",
+            json={"ticket": ticket, "volume": 0.02},
+            headers=auth_headers(client),
+        )
         assert resp.status_code == 422
         body = resp.json()
         assert body["error"]["code"] == "VALIDATION_ERROR"
