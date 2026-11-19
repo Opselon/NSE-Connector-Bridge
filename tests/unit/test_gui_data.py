@@ -474,7 +474,7 @@ def test_executor_recent_records_completed_and_rejected(tmp_path, monkeypatch):
     ctx = _executor_ctx(tmp_path)
     monkeypatch.setattr(
         "nse_bridge.engine.trading.close_position",
-        lambda ctx_, ticket: {"status": "done", "ticket": ticket, "retcode": 10009},
+        lambda ctx_, ticket, volume=None: {"status": "done", "ticket": ticket, "retcode": 10009},
     )
     executor = CommandExecutor(
         ctx, _validator(), results_queue=BoundedPendingQueue(32, "test/results"), clock=lambda: NOW
@@ -511,7 +511,7 @@ def test_executor_recent_records_partially_completed_with_partial_facts(tmp_path
     ctx = _executor_ctx(tmp_path)
     monkeypatch.setattr(
         "nse_bridge.engine.trading.close_position",
-        lambda ctx_, ticket: {
+        lambda ctx_, ticket, volume=None: {
             "status": "done",
             "ticket": ticket,
             "closed_volume": 0.4,
@@ -539,7 +539,7 @@ def test_executor_recent_is_bounded_and_newest_first(tmp_path, monkeypatch):
     ctx = _executor_ctx(tmp_path)
     monkeypatch.setattr(
         "nse_bridge.engine.trading.close_position",
-        lambda ctx_, ticket: {"status": "done", "ticket": ticket, "retcode": 10009},
+        lambda ctx_, ticket, volume=None: {"status": "done", "ticket": ticket, "retcode": 10009},
     )
     executor = CommandExecutor(
         ctx, _validator(), results_queue=BoundedPendingQueue(32, "test/results"), clock=lambda: NOW

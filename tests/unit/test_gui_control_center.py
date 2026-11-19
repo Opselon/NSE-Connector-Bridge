@@ -53,6 +53,38 @@ def _no_bridge_env(monkeypatch):
     monkeypatch.delenv("NSE_MT5_TERMINAL_PATH", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_host_mt5_install(monkeypatch):
+    r"""Hermetic on MT5-equipped hosts (Phase 2b W0): the host's real
+    terminal (C:\Program Files, App Paths registry, running
+    terminal64.exe, real %APPDATA% data dirs) must never leak into
+    fixtures that assert specific diagnostic codes — CI has no MT5,
+    a developer machine does. Sources with a per-test fake pass
+    through unchanged."""
+    from nse_bridge.mt5 import driver as _driver_module
+
+    monkeypatch.setattr(_driver_module, "_standard_terminal_paths", list)
+
+    real_app_paths = _driver_module._app_paths_candidates
+    monkeypatch.setattr(
+        _driver_module,
+        "_app_paths_candidates",
+        lambda winreg_module=None: real_app_paths(winreg_module) if winreg_module is not None else [],
+    )
+    real_running = _driver_module._running_terminal_paths
+    monkeypatch.setattr(
+        _driver_module,
+        "_running_terminal_paths",
+        lambda process_list=None: real_running(process_list) if process_list is not None else [],
+    )
+    real_appdata = _driver_module._appdata_terminal_data_dirs
+    monkeypatch.setattr(
+        _driver_module,
+        "_appdata_terminal_data_dirs",
+        lambda appdata_root=None: real_appdata(appdata_root) if appdata_root is not None else [],
+    )
+
+
 @pytest.fixture
 def client(tmp_path):
     settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
@@ -276,7 +308,11 @@ def test_updates_latest_reports_newer_version(client):
     resp = http.get("/api/v1/updates/latest", headers=_auth(ctx))
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
-    assert data["installed_version"] == "1.0.0"
+    # The installed version IS the single-source-of-truth version —
+    # never a hardcoded copy (this test broke on the 1.1.0 bump).
+    from nse_bridge import BRIDGE_VERSION
+
+    assert data["installed_version"] == BRIDGE_VERSION
     assert data["latest"]["version"] == "1.2.0"
     assert data["update_available"] is True
     assert data["status"] == "update_available"

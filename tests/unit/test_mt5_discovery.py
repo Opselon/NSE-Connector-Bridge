@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 from nse_bridge.api.app import create_app
 from nse_bridge.config import BridgeSettings
 from nse_bridge.engine.common import BridgeContext
+from nse_bridge.mt5 import driver as _driver_module
 from nse_bridge.mt5.driver import (
     Mt5Driver,
     _pe_file_version,
@@ -41,6 +42,44 @@ def _no_bridge_env(monkeypatch):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("NSE_MT5_TERMINAL_PATH", raising=False)
     monkeypatch.delenv("MT5_PATH", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_host_mt5_install(monkeypatch):
+    """Hermetic on MT5-equipped hosts (Phase 2b W0 finding).
+
+    CI runners have no MetaTrader 5; a developer machine DOES — the
+    real install at ``C:\\Program Files\\MetaTrader 5``, the real App
+    Paths registry and the real running terminal64.exe process used to
+    leak into fixtures that expect only their own fakes (19 failures
+    on such hosts, 0 on CI). Discovery sources that have no per-test
+    fake are isolated here: standard install paths never leak, and the
+    registry/process probes fall through ONLY when the test injects
+    its own ``winreg_module`` / ``running_paths``. No assertion is
+    loosened — the fixtures simply stop seeing the host's terminal.
+    """
+    monkeypatch.setattr(_driver_module, "_standard_terminal_paths", list)
+
+    real_app_paths = _driver_module._app_paths_candidates
+
+    def app_paths_only_when_injected(winreg_module=None):
+        return real_app_paths(winreg_module) if winreg_module is not None else []
+
+    monkeypatch.setattr(_driver_module, "_app_paths_candidates", app_paths_only_when_injected)
+
+    real_running = _driver_module._running_terminal_paths
+
+    def running_only_when_injected(process_list=None):
+        return real_running(process_list) if process_list is not None else []
+
+    monkeypatch.setattr(_driver_module, "_running_terminal_paths", running_only_when_injected)
+
+    real_appdata = _driver_module._appdata_terminal_data_dirs
+
+    def appdata_only_when_injected(appdata_root=None):
+        return real_appdata(appdata_root) if appdata_root is not None else []
+
+    monkeypatch.setattr(_driver_module, "_appdata_terminal_data_dirs", appdata_only_when_injected)
 
 
 @pytest.fixture

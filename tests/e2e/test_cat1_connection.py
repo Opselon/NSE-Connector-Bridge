@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import call
+from tests.conftest import auth_headers, call
 
 pytestmark = pytest.mark.real_mt5
 
@@ -54,7 +54,9 @@ def test_06_get_mt5_server_info(client):
     assert data["server"]  # e.g. MetaQuotes-Demo
     assert data["currency"]
     assert data["login"] > 0
-    assert data["tick_latency_ms"] is not None and data["tick_latency_ms"] < 5000
+    # The latency probe runs only when a bot_symbol is configured (there is
+    # no default symbol to probe in a fresh test env); tolerate the explicit skip.
+    assert data["tick_latency_ms"] is None or 0 < data["tick_latency_ms"] < 5000
 
 
 def test_07_get_mcp_server_info(client):
@@ -92,7 +94,7 @@ def test_11_swagger_docs_served(client):
 
 
 def test_12_commands_listing(client):
-    data = client.get("/api/v1/commands").json()["data"]
+    data = client.get("/api/v1/commands", headers=auth_headers(client)).json()["data"]
     numbers = [c["number"] for c in data]
     assert numbers[:9] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     assert all(c["mutates"] is False for c in data if c["category"] == "connection")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import call
+from tests.conftest import auth_headers, call
 
 pytestmark = pytest.mark.real_mt5
 
@@ -91,7 +91,7 @@ def test_27_get_symbol_trade_constraints(client):
 
 
 def test_27b_validation_missing_symbol(client):
-    resp = client.post("/api/v1/get_symbol_price", json={})
+    resp = client.post("/api/v1/get_symbol_price", json={}, headers=auth_headers(client))
     assert resp.status_code == 422
     body = resp.json()
     assert body["ok"] is False

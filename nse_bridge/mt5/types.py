@@ -104,8 +104,11 @@ EXECUTION_LABELS = {0: "REQUEST", 1: "INSTANT", 2: "MARKET", 3: "EXCHANGE"}
 #: truth — ``nse_bridge.symbols.metadata`` imports this dict.
 CALC_MODE_LABELS = {0: "FOREX", 1: "FOREX_NO_LEVERAGE", 2: "FUTURES", 3: "CFD", 4: "CFD_LEVERAGE"}
 #: Account margin-mode labels (MT5 ``margin_mode``,
-#: ENUM_ACCOUNT_MARGIN_MODE). Raw int is authoritative.
-MARGIN_MODE_LABELS = {0: "RETAIL_NETTING", 1: "RETAIL_HEDGING", 2: "EXCHANGE"}
+#: ENUM_ACCOUNT_MARGIN_MODE: 0=RETAIL_NETTING, 1=EXCHANGE,
+#: 2=RETAIL_HEDGING — verified against the package constants live,
+#: E-OC-1 in scripts/phase2b_probe_order_check.py; real-MT5 defect D5
+#: had 1 and 2 swapped). Raw int is authoritative.
+MARGIN_MODE_LABELS = {0: "RETAIL_NETTING", 1: "EXCHANGE", 2: "RETAIL_HEDGING"}
 TIMEFRAME_NAMES = (
     "M1",
     "M2",
@@ -188,10 +191,11 @@ class AccountInfoModel(BaseModel):
     margin_so_mode: int | None = None
     margin_so_call: float | None = None
     margin_so_so: float | None = None
-    #: Account margin mode (MT5 ``margin_mode``): 0 netting, 1 hedging,
-    #: 2 exchange. Distinct from ``margin_so_mode`` (stop-out mode) —
-    #: an earlier ``get_trading_permissions`` build returned the stop-out
-    #: mode under the name ``margin_mode`` (fixed in the C2 execution work).
+    #: Account margin mode (MT5 ``margin_mode``, ENUM_ACCOUNT_MARGIN_MODE):
+    #: 0 netting, 1 exchange, 2 hedging. Distinct from ``margin_so_mode``
+    #: (stop-out mode) — an earlier ``get_trading_permissions`` build
+    #: returned the stop-out mode under the name ``margin_mode`` (fixed
+    #: in the C2 execution work).
     margin_mode: int | None = None
     margin_mode_label: str | None = None
     trade_allowed: bool | None = None

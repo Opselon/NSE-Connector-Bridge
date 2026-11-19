@@ -22,6 +22,12 @@ def ctx():
         log_dir=".pytest-logs",
         log_level="INFO",
         port=8788,
+        # A deployed device carries its chart-context configuration
+        # (Phase 2b: the chart-context commands read these — a fresh
+        # unconfigured env returns an empty timeframe / 422, which is
+        # truthful but not what a real deployment looks like).
+        bot_symbol="XAUUSD",
+        default_timeframe="M1",
     )
     # isolate config persistence — never write the real user config during tests
     settings.data_dir = Path(tempfile.mkdtemp(prefix="nse-bridge-test-"))
@@ -67,9 +73,23 @@ def client(app):
         yield c
 
 
+def auth_headers(client: TestClient) -> dict[str, str]:
+    """The app's own local API key (set by create_app → ensure_local_api_key).
+
+    The mandatory X-API-Key gate rejects every unauthenticated /api/v1
+    call with 401 — the e2e suite runs only on machines WITH a live
+    terminal, so every direct client.post/get in the e2e files must
+    carry this header (Phase 2b fix: it previously never did, and the
+    suite could never go green where it can actually run).
+    """
+    ctx = getattr(client.app.state, "ctx", None)
+    key = getattr(getattr(ctx, "settings", None), "local_api_key", "") or ""
+    return {"X-API-Key": key} if key else {}
+
+
 def call(client: TestClient, name: str, params: dict | None = None, *, expect_ok: bool = True):
     """POST a command through the real HTTP layer and unwrap the envelope."""
-    resp = client.post(f"/api/v1/{name}", json=params or {})
+    resp = client.post(f"/api/v1/{name}", json=params or {}, headers=auth_headers(client))
     assert resp.status_code == 200, f"{name}: HTTP {resp.status_code}: {resp.text[:500]}"
     body = resp.json()
     if expect_ok:

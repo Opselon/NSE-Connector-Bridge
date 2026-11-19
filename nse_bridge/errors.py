@@ -25,6 +25,10 @@ class ErrorCode(str, Enum):
     NOT_FOUND = "NOT_FOUND"
     TRADE_REJECTED = "TRADE_REJECTED"
     TRADE_UNVERIFIED = "TRADE_UNVERIFIED"
+    #: Official MT5 order_check refused the pre-send validation (W2 /
+    #: CONTRACTS §7): order_send is never reached. Bridge-local code —
+    #: the check's raw result travels in the error details.
+    ORDER_CHECK_FAILED = "ORDER_CHECK_FAILED"
     INTERNAL = "INTERNAL_ERROR"
     UNAUTHORIZED = "UNAUTHORIZED"
     DISABLED = "FEATURE_DISABLED"

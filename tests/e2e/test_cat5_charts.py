@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import call
+from tests.conftest import auth_headers, call
 
 pytestmark = pytest.mark.real_mt5
 
@@ -33,7 +33,11 @@ def test_37b_get_chart_history_range_mode(client):
 
 
 def test_37c_unknown_timeframe_rejected(client):
-    resp = client.post("/api/v1/get_chart_history", json={"symbol": SYMBOL, "timeframe": "M7", "count": 10})
+    resp = client.post(
+        "/api/v1/get_chart_history",
+        json={"symbol": SYMBOL, "timeframe": "M7", "count": 10},
+        headers=auth_headers(client),
+    )
     assert resp.status_code == 422
     body = resp.json()
     assert body["ok"] is False
@@ -55,6 +59,9 @@ def test_38b_get_chart_ticks_history_range(client):
 
 def test_39_get_chart_current_timeframe(client):
     data = call(client, "get_chart_current_timeframe")
+    # The bridge reports its CONFIGURED chart context (source:
+    # bridge_config) — the session fixture configures M1.
+    assert data["source"] == "bridge_config"
     assert data["timeframe"] == "M1"
     assert data["source"] == "bridge_config"
 
@@ -91,6 +98,7 @@ def test_43_get_chart_objects(client):
 
 def test_44_get_chart_active_info(client):
     data = call(client, "get_chart_active_info")
+    # The configured chart context (bot_symbol from the session fixture).
     assert data["symbol"] == SYMBOL
     assert data["symbol_selected"] is True
     assert data["last_tick_utc"]

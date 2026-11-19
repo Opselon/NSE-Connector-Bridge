@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import call
+from tests.conftest import auth_headers, call
 
 pytestmark = pytest.mark.real_mt5
 
@@ -39,7 +39,11 @@ def pytest_approx(value):
 
 
 def test_73c_missing_risk_param_rejected(client):
-    resp = client.post("/api/v1/calculate_position_size", json={"symbol": SYMBOL, "stop_points": 100})
+    resp = client.post(
+        "/api/v1/calculate_position_size",
+        json={"symbol": SYMBOL, "stop_points": 100},
+        headers=auth_headers(client),
+    )
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 

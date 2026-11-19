@@ -242,6 +242,16 @@ def validate_pending(
     mutates=True,
 )
 def trade_send_pending_order(ctx: BridgeContext, params: PendingOrderRequest) -> dict[str, Any]:
+    """Place a pending order (spec §6).
+
+    W2: the exact request runs through the official ``order_check``
+    first — a refusal raises ORDER_CHECK_FAILED and nothing is sent.
+    W4: a ``None`` response or retcode 10031 raises TRADE_UNVERIFIED
+    (the order may exist — the caller must reconcile the live order
+    book; never re-send). Retcode 10008 (PLACED — order accepted, not
+    yet filled) is a SUCCESS for a pending placement, never a
+    rejection: the placed order's ticket is returned and reconciled.
+    """
     ctx.driver.ensure_connected()
     # Canonical ``BASE/QUOTE`` spellings resolve to the exact broker
     # symbol here (spec §4); exact broker names pass through untouched.
@@ -267,57 +277,81 @@ def trade_send_pending_order(ctx: BridgeContext, params: PendingOrderRequest) ->
     # resolve filling BEFORE entering the worker job — never call driver.run()
     # from inside a job (single-thread executor: nested run() deadlocks)
     from .common import resolve_filling_mode
+    from .trading import mt5_trade_constants, order_check_send
 
     filling = resolve_filling_mode(ctx, symbol)
+    consts = mt5_trade_constants(ctx)
 
-    def job(mt5: Any):
-        # No hardcoded magic: per-command magic wins, else the
-        # explicitly configured device magic, else the "magic" key is
-        # omitted entirely (MT5 records magic 0 = no magic stamped).
-        mgc = params.magic if params.magic is not None else ctx.settings.magic
-        request = {
-            "action": mt5.TRADE_ACTION_PENDING,
-            "symbol": symbol,
-            "volume": float(params.volume),
-            "type": PENDING_TYPES[params.order_type],
-            "price": float(params.price),
-            "sl": float(params.sl),
-            "tp": float(params.tp),
-            "comment": params.comment,
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": filling,
-        }
-        if params.stoplimit is not None:
-            # Stop-limit only: the limit price placed once the trigger fires.
-            request["stoplimit"] = float(params.stoplimit)
-        if mgc is not None:
-            request["magic"] = int(mgc)
-        if params.expiration_utc:
-            from ..timeutil import broker_dt
+    # No hardcoded magic: per-command magic wins, else the
+    # explicitly configured device magic, else the "magic" key is
+    # omitted entirely (MT5 records magic 0 = no magic stamped).
+    mgc = params.magic if params.magic is not None else ctx.settings.magic
+    request: dict[str, Any] = {
+        "action": consts["action_pending"],
+        "symbol": symbol,
+        "volume": float(params.volume),
+        "type": PENDING_TYPES[params.order_type],
+        "price": float(params.price),
+        "sl": float(params.sl),
+        "tp": float(params.tp),
+        "comment": params.comment,
+        "type_time": consts["order_time_gtc"],
+        "type_filling": filling,
+    }
+    if params.stoplimit is not None:
+        # Stop-limit only: the limit price placed once the trigger fires.
+        request["stoplimit"] = float(params.stoplimit)
+    if mgc is not None:
+        request["magic"] = int(mgc)
+    if params.expiration_utc:
+        from ..timeutil import broker_dt
 
-            exp = broker_dt(params.expiration_utc, ctx.settings)
-            if exp is not None:
-                request["type_time"] = mt5.ORDER_TIME_SPECIFIED
-                request["expiration"] = exp
+        exp = broker_dt(params.expiration_utc, ctx.settings)
+        if exp is not None:
+            request["type_time"] = consts["order_time_specified"]
+            request["expiration"] = exp
+
+    # W2: official pre-send check with the exact request.
+    check = order_check_send(ctx, request, "pending_order")
+
+    def job(mt5: Any, request=request):
         return mt5.order_send(request)
 
-    from ..retcodes import TRADE_RETCODE_DONE
+    from ..retcodes import (
+        TRADE_RETCODE_CONNECTION,
+        TRADE_RETCODE_DONE,
+        TRADE_RETCODE_PLACED,
+        translate_retcode,
+    )
 
     result = ctx.driver.run(job, op="order_send_pending", context={"symbol": symbol, "type": params.order_type})
-    if result is None:
-        ctx.trade_metrics.record("order_send_pending", "unknown", 0.0, None, {"symbol": symbol})
+    retcode = int(_f(result, "retcode", 0)) if result is not None else None
+    if result is None or retcode == TRADE_RETCODE_CONNECTION:
+        ctx.trade_metrics.record("order_send_pending", "unknown", 0.0, retcode, {"symbol": symbol, "uncertain": True})
         raise BridgeError(
             ErrorCode.TRADE_UNVERIFIED,
-            "order_send returned no result — broker state unverified.",
-            details={"symbol": symbol, "order_type": params.order_type},
+            f"Pending order for {symbol} returned "
+            + ("no result" if result is None else "retcode 10031 (no connection)")
+            + " — outcome unverified; reconcile the live order book before retrying (never blind-retry).",
+            details={
+                "symbol": symbol,
+                "order_type": params.order_type,
+                "retcode": retcode,
+                "order_check": check,
+            },
         )
-    retcode = int(_f(result, "retcode", 0))
-    if retcode != TRADE_RETCODE_DONE:
+    if retcode not in (TRADE_RETCODE_DONE, TRADE_RETCODE_PLACED):
         ctx.trade_metrics.record("order_send_pending", "rejected", 0.0, retcode, {"symbol": symbol})
-        raise reject(result, "pending_order", symbol)
+        exc = reject(result, "pending_order", symbol)
+        exc.details["order_check"] = check
+        raise exc
     ctx.trade_metrics.record("order_send_pending", "done", 0.0, retcode, {"symbol": symbol})
     ticket = int(_f(result, "order", 0) or 0)
-    return _pending_payload(ctx, symbol, ticket)
+    payload = _pending_payload(ctx, symbol, ticket)
+    payload["retcode"] = retcode
+    payload["retcode_label"] = translate_retcode(retcode)
+    payload["order_check"] = check
+    return payload
 
 
 def _resolve_filling(ctx: BridgeContext, mt5: Any, symbol: str) -> int:
