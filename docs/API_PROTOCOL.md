@@ -173,15 +173,22 @@ envelope when the manifest changes mid-session. No `ping`, no
 
 ## 3. Commands (§6)
 
-### 3.1 Server allowlist (§6.1) — exactly three operations in v1
+### 3.1 Server allowlist (§6.1) — three sendable operations in v1, `open_order` behind the closed §17.5 gate
 
 | Operation | Maps to (Python driver, NOT the MCP transport) | Notes |
 |---|---|---|
 | `close_position` | `trade_close_single_position` (close-by-ticket; idempotent ambiguous-close handling) | |
 | `modify_sl_tp` | `trade_modify_sl_tp` (SL/TP by ticket; absent sl/tp filled from the live position) | |
-| `modify_pending` | `trade_modify_sl_tp` on a pending order (SL/TP only) | **Capability-gated (§17.4): starts REJECTED.** Live proof at market open + a published minimum `connector_version` are still owed (docs/PLATFORM-GAPS.md §4). Until the gate is proven (`modify_pending_proven=True`), the op is rejected as `UnsupportedOperation`. |
+| `modify_pending` | `trade_modify_sl_tp` on a pending order (SL/TP only) | **Capability-gated (§17.4): the gate stays CLOSED.** The code path, tests, and the 2026-11-19 live-verification pass (docs/upgrade/PHASE-2B-VERIFICATION.md) are done — conditions (a)–(c) — but the Platform-published minimum `connector_version` (condition d) is still owed, so the default `modify_pending_proven=False` rejects the op as `UnsupportedOperation`. |
 
-`open_order` and `cancel_order` are explicitly NOT sendable in v1.
+`cancel_order` is explicitly NOT sendable in v1. `open_order` is
+implemented behind the **closed** §17.5 activation gate
+(`open_order_authorized=False` by default, with no config knob to open
+it): the market + pending execution path exists (with mandatory
+`order_check` + W4 reconciliation) but accepts no commands until all
+four §17.5 activation conditions are met — user approval, allowlist +
+tests, risk-engine/consent proof, and a `schema_version` bump. Until
+then the wire behavior stays `UnsupportedOperation`.
 The full 91-command registry stays available **locally**; only the
 server channel enforces this allowlist, at this boundary.
 
@@ -201,7 +208,11 @@ server channel enforces this allowlist, at this boundary.
 ```
 
 `operation` is a tagged object: `close_position` takes
-`{type, ticket}`; `modify_sl_tp` / `modify_pending` take
+`{type, ticket}` plus an optional `volume` (partial close — PROPOSED
+wire shape, contract delta D5: executed + `partial` /
+`closed_volume` / `remaining_volume` / `reconciled` in the payload;
+no first-class status in CONTRACT v1 §6.2/§6.5 yet);
+`modify_sl_tp` / `modify_pending` take
 `{type, ticket, sl?, tp?}` with `sl`/`tp` nullable (absent = leave
 unchanged). `ticket` is a string (MT5 ticket ids exceed 32-bit ints).
 Unknown fields are ignored. There is no per-command signature in v1
