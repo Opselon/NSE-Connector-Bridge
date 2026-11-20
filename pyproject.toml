@@ -1,6 +1,6 @@
 [project]
 name = "nse-bridge"
-version = "1.0.0"
+version = "1.1.0"
 description = "NSE MT5 Bridge - secure local bridge between MetaTrader 5 terminal and the NSE Platform server"
 requires-python = ">=3.12"
 dependencies = [
