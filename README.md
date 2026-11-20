@@ -1,5 +1,7 @@
 # NSE MT5 Bridge
 
+**Live platform: [https://subscribe.nexusverse.space](https://subscribe.nexusverse.space)** — the NSE Platform server this Bridge connects your MetaTrader 5 terminal to. Sign in with GitHub to get the free models, analyse an MT5 History report in Trading Lab, or analyse a chart screenshot in AI Chart Lab.
+
 **Secure, reliable, persistent communication infrastructure between the
 user's MetaTrader 5 terminal and the NSE Platform server.** The Bridge is
 the local communication gateway and execution agent; the server owns all
