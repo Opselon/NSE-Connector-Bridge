@@ -70,12 +70,14 @@ verbatim + UTC `produced_at`; never re-localize.
 
 ### 1.4 `POST heartbeat` (§3.4)
 
-Request: `{}`. Response: `{ok, server_time, pending_commands}`. If
-`pending_commands > 0` and no WS is live, open/refresh the WS: the
-REST heartbeat loop wakes the WS supervisor immediately
-(`ServerChannel._request_ws_open`) instead of waiting out the
-reconnect backoff (up to 30 s). Keep-alive when WS is down — NOT a
-substitute for the WS heartbeat.
+Request: `{}`. Response: `{ok, server_time, pending_commands}`. Sent
+ONLY while the WS is down (`_rest_heartbeat_loop`,
+channel.py:532 — when a WS session is up, the WS heartbeat owns
+liveness and the loop skips). If `pending_commands > 0` and no WS is
+live, open/refresh the WS: the REST heartbeat loop wakes the WS
+supervisor immediately (`ServerChannel._request_ws_open`) instead of
+waiting out the reconnect backoff (up to 30 s). Keep-alive when WS is
+down — NOT a substitute for the WS heartbeat.
 
 ### 1.5 `POST session/refresh` + `POST session/revoke` (§3.4, [client-v1.1])
 
@@ -134,12 +136,19 @@ whether to retry — the client never silently retries it.
 | 401/403 | unknown code | MALFORMED RESPONSE — never treated as success. |
 
 Retry policy (`server/rest.py`, `RestClient`): max 3 retries, base
-0.5 s doubling (`retry_base_s * 2**attempt`), `Retry-After`
-preferred when the server sends one. A 401 on a non-auth endpoint
-triggers ONE re-enrolment via `register-device` and then a single
-retry; if `register-device` itself 401s, the error propagates.
-Transport errors are retryable the same way. Error messages never
-contain key material, secrets, SQL, or stack traces.
+0.5 s doubling (`retry_base_s * 2**attempt`) with ±15% jitter
+(`_jittered_backoff`, rest.py:282 — a fleet of bridges does not
+retry in lockstep), `Retry-After` preferred when the server sends
+one. Per-request budgets: the client default is
+`httpx.Timeout(30.0, connect=10.0)` (rest.py:238); the bulk calls
+get tighter, explicit budgets — `sync/batch` runs per-request 15 s /
+connect 5 s (rest.py:476, worst-case flush of 32 queued batches ≈
+64 s, down from ≈97 s) and `releases/latest` 10 s / connect 5 s
+(rest.py:534). A 401 on a non-auth endpoint triggers ONE
+re-enrolment via `register-device` and then a single retry; if
+`register-device` itself 401s, the error propagates. Transport
+errors are retryable the same way. Error messages never contain key
+material, secrets, SQL, or stack traces.
 
 ## 2. WebSocket (§5)
 
@@ -148,14 +157,36 @@ contain key material, secrets, SQL, or stack traces.
 - URL: `wss://bridge.nexusverse.space/api/v1/connector/ws`.
 - Auth in the upgrade headers (see above). **NO `hello` frame.**
 - Heartbeat: client sends `{type: "heartbeat", device_id}` every
-  15 s; the server replies `heartbeat`. Session dead after 45 s
-  without a frame.
+  15 s; the server replies `heartbeat`. §5.3 liveness is
+  **heartbeat-REPLY based** on the client too
+  (`_heartbeat_loop`, channel.py:781–798): the session is dead after
+  **45 s without a server HEARTBEAT REPLY** (`HEARTBEAT_DEAD_S`,
+  channel.py:96), NOT merely without any frame — command/chart/policy
+  frames are server-originated pushes and do not prove the heartbeat
+  path is alive. This mirrors the server side since Platform PR #144
+  (Bug C): the server's own liveness timer counts only
+  client-originated frames. Pinned by
+  `tests/unit/test_platform_contract_compat.py`
+  (`test_session_survives_when_heartbeat_replies_arrive`,
+  `test_session_dies_without_heartbeat_replies_despite_other_frames`).
 - Reconnect: fresh session, no resume payload; backoff 500 ms
   doubling → 30 s + jitter (0–100 ms), reset on success; clean
   `close()` on shutdown. The server re-sends only `pending` commands
   on reconnect — never `executed` / `rejected` / `expired`.
 - Outbound bound 128 messages; results first, chart frames second;
   the oldest unsent chart frame is dropped with a warning when full.
+  Implementation shape (`_OutboundQueue`, channel.py:119–206): two
+  FIFO deques (results, charts) sharing the bound, drained through a
+  single consumer wake event — an item is popped only by the
+  consumer, so a completing waiter can never silently swallow a
+  chart frame while a result is returned (the two-queue race the
+  deques replace).
+
+All §5 timing/liveness constants above (15 s heartbeat, 45 s
+heartbeat-reply dead-after, backoff 500 ms → 30 s + 0–100 ms jitter,
+outbound bound 128) are pinned by `scripts/mock_server.py` and the
+contract tests — changing the implementation without the mock and
+the tests is a contradiction, not a doc update.
 
 ### 2.2 Frames
 
