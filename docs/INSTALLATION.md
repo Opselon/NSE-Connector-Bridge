@@ -97,6 +97,24 @@ live under `%LOCALAPPDATA%\NSEBridge`.
 | MetaTrader 5 | any recent terminal build; the Bridge attaches to it via the official IPC driver |
 | Network | outbound HTTPS + WSS to `bridge.nexusverse.space` (no inbound ports, firewall friendly) |
 
+## Restricted networks (proxy)
+
+If your network's direct route to the platform hangs or is blocked
+(verified 2026-11-21 on some ISPs: REST to `bridge.nexusverse.space`
+times out while a local SOCKS5 proxy answers in ~3 s), configure an
+explicit proxy — Settings → Network proxy (or `config.json`
+`network_proxy` / env `NSE_BRIDGE_NETWORK_PROXY`):
+
+```
+socks5://127.0.0.1:10808        # local SOCKS5 (v2rayN/Clash default port)
+http://proxy.example.org:3128   # HTTP CONNECT proxy
+```
+
+The proxy routes BOTH the platform REST traffic and the outbound WSS
+channel. It is always a deliberate configuration — the ambient system
+proxy environment is never trusted for API-key-bearing traffic. A
+change needs a Bridge restart.
+
 ## Upgrading
 
 - Desktop installer: run the new setup exe — upgrades in place.

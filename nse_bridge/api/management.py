@@ -100,6 +100,7 @@ async def get_settings(request: Request) -> dict[str, Any]:
         "data": {
             "server_url": s.server_url,
             "server_base_url": s.server_base_url,
+            "network_proxy": s.network_proxy,
             "environment": s.environment,
             "server_token_masked": _mask(s.server_token),
             "server_token_set": bool(s.server_token),

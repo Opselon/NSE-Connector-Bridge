@@ -6,6 +6,8 @@ merged to Platform main via PR #102). Nothing here is invented; where
 the contract is silent, the gap is named, not filled.
 
 Base URLs (production defaults; dev/staging/prod via configuration
+
+All platform traffic (REST + WS) uses the explicit `settings.network_proxy` route when configured (socks5/socks5h/socks4/http/https) and is otherwise direct; the ambient proxy environment is never trusted for API-key-bearing traffic.
 only — no hardcoded dev endpoints):
 
 - REST: `https://bridge.nexusverse.space`

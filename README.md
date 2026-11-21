@@ -130,6 +130,7 @@ screen / `PUT /api/v1/settings`. Key fields:
 | `local_api_key` | (secret store) | mandatory `X-API-Key` for /api/v1, auto-generated on first run |
 | `server_base_url` | `https://bridge.nexusverse.space` | REST base; WS is derived (`wss://…/api/v1/connector/ws`) |
 | `server_url` | empty | explicit WS URL override (empty = derived from base; must be `wss://`) |
+| `network_proxy` | empty | explicit proxy URL for ALL platform traffic — `socks5://host:port`, `socks5h://`, `socks4://`, `http://`, `https://`; empty = direct. Needed on networks whose direct route to the platform hangs (verified 2026-11-21). Change needs a restart. |
 | `device_id` | auto | persistent bridge identity |
 | `magic` | none | NO default magic — stamped only when supplied per command or set explicitly |
 | `bot_symbol` | (empty) | NO default symbol — callers pass it per command |

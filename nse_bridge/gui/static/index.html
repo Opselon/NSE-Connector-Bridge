@@ -819,6 +819,10 @@ pre.report{
               <input id="setServerUrl" placeholder="wss://…" spellcheck="false" autocomplete="off">
             </div>
             <div class="field">
+              <label for="setProxy">Network proxy <small>— socks5://host:port or http://host:port; empty = direct. Routes ALL platform traffic; needed on networks whose direct route to the platform hangs. Change needs a restart.</small></label>
+              <input id="setProxy" placeholder="socks5://127.0.0.1:10808" spellcheck="false" autocomplete="off">
+            </div>
+            <div class="field">
               <label for="setToken">API key <small>— stored in the secret store, never displayed</small></label>
               <input id="setToken" type="password" placeholder="paste a new key (leave empty to keep the stored one)" spellcheck="false" autocomplete="off">
             </div>
@@ -2080,6 +2084,7 @@ async function loadSettings(){
   const st = model.settings;
   $('setBaseUrl').value = st.server_base_url || '';
   $('setServerUrl').value = st.server_url || '';
+  $('setProxy').value = st.network_proxy || '';
   $('setEnv').value = st.environment || 'production';
   $('setToken').placeholder = st.server_token_set
     ? ('stored: ' + (st.server_token_masked || '••••') + ' — paste a new key to replace it')
@@ -2120,6 +2125,7 @@ $('saveSettings').addEventListener('click', async () => {
   const body = {
     server_base_url: $('setBaseUrl').value.trim(),
     server_url: $('setServerUrl').value.trim(),
+    network_proxy: $('setProxy').value.trim(),
     environment: $('setEnv').value,
     log_level: $('setLogLevel').value,
     gui_mode: $('setGuiMode').value,
