@@ -194,7 +194,9 @@ def main(argv=None) -> None:
     # failure after the 10 s boot wait.
     from .single_instance import acquire_single_instance
 
-    instance_lock, acquired = acquire_single_instance()
+    # Keep the handle referenced for the process lifetime: the OS
+    # releases the mutex when the owning process exits.
+    _instance_lock, acquired = acquire_single_instance()
     if not acquired:
         print(
             "error: NSE MT5 Bridge is already running on this machine "
