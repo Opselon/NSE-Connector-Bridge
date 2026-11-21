@@ -77,8 +77,6 @@ ENROLMENT_JITTER_MAX_S = 0.1
 #: NOT_CONFIGURED (a key entered at runtime via Settings applies
 #: without a bridge restart).
 NOT_CONFIGURED_POLL_S = 5.0
-#: Poll cadence for the state-wait helpers (not a hot path).
-_STATE_POLL_S = 0.1
 
 
 class EnrolmentState(str):
@@ -149,6 +147,13 @@ class EnrolmentManager:
         self._status = EnrolmentStatus(configured=self.is_configured)
         self._transient_failures = 0
         self.backoff_delays: list[float] = []
+        # Per-waiter state events: every state transition wakes all
+        # current waiters (the WS channel gate, the supervisor's park
+        # loop). The old 100 ms state polls burned ~40k wakeups/hour
+        # while idle; events wake exactly on transition. Per-waiter
+        # (not one shared Event) so a clearing waiter can never swallow
+        # another's wake — _set_state is sync and can signal safely.
+        self._state_waiters: set[asyncio.Event] = set()
 
     # ------------------------------------------------------------------
     @property
@@ -193,6 +198,8 @@ class EnrolmentManager:
         previous = self._status.state
         self._status.state = state
         self._status.configured = self.is_configured
+        for waiter in list(self._state_waiters):
+            waiter.set()
         if last_error is not None or state in (
             EnrolmentState.REGISTERED,
             EnrolmentState.VALIDATING,
@@ -385,12 +392,31 @@ class EnrolmentManager:
         logger.info("[ENROL] new API key configured — re-enrolling from scratch")
 
     # ------------------------------------------------------------------
+    def _register_state_waiter(self) -> asyncio.Event:
+        waiter = asyncio.Event()
+        self._state_waiters.add(waiter)
+        return waiter
+
+    async def _wait_state_change(self, stop: asyncio.Event) -> None:
+        """Sleep until the state changes or ``stop`` is set (no polling)."""
+        waiter = self._register_state_waiter()
+        wait_task = asyncio.create_task(waiter.wait())
+        stop_task = asyncio.create_task(stop.wait())
+        try:
+            await asyncio.wait({wait_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (wait_task, stop_task):
+                task.cancel()
+            await asyncio.gather(wait_task, stop_task, return_exceptions=True)
+            self._state_waiters.discard(waiter)
+
     async def wait_until_registered(self, stop: asyncio.Event) -> bool:
         """Block until REGISTERED (True) or FAILED_AUTH / stop (False).
 
         Used by the WS channel gate (§5.1): the channel must not open
         until enrolment succeeded; while enrolment is still retrying
-        this waits; on FAILED_AUTH the channel stays down.
+        this waits (woken by state events, not a 100 ms poll); on
+        FAILED_AUTH the channel stays down.
         """
         while True:
             state = self._status.state
@@ -400,7 +426,7 @@ class EnrolmentManager:
                 return False
             if stop.is_set():
                 return False
-            await asyncio.sleep(_STATE_POLL_S)
+            await self._wait_state_change(stop)
 
     async def run(self, stop: asyncio.Event) -> None:
         """Supervise enrolment until FAILED_AUTH or ``stop``.
@@ -419,11 +445,12 @@ class EnrolmentManager:
                 continue
             state = self._status.state
             if state in (EnrolmentState.REGISTERED, EnrolmentState.VALIDATING):
-                # Park until the state moves (re-auth, new key, stop).
+                # Park until the state moves (re-auth, new key, stop) —
+                # woken by state events, no polling.
                 while (
                     self._status.state in (EnrolmentState.REGISTERED, EnrolmentState.VALIDATING) and not stop.is_set()
                 ):
-                    await asyncio.sleep(_STATE_POLL_S)
+                    await self._wait_state_change(stop)
                 continue
             if state == EnrolmentState.FAILED_AUTH:
                 return

@@ -724,6 +724,7 @@ class Updater:
         self.staging_dir.mkdir(parents=True, exist_ok=True)
         version = _sanitize_version(rel.version or "unknown")
         final = self.staging_dir / f"nse-bridge-{version}.exe"
+        self._prune_stale_staged_artifacts(keep=final)
         tmp = self.staging_dir / f".{final.name}.tmp-{os.getpid()}"
         tmp.write_bytes(data)
         os.replace(tmp, final)
@@ -750,6 +751,27 @@ class Updater:
         )
         self.write_apply_script()
         return final
+
+    def _prune_stale_staged_artifacts(self, *, keep: Path) -> None:
+        """Remove previously staged exes + temp files (each verified
+        download used to accumulate a full exe per version — every
+        staged artifact except the incoming one is obsolete, and a
+        stale one is NEVER installed: the apply script only ever copies
+        the file recorded in update-state.json, which this call
+        invalidates below via the fresh state write)."""
+        try:
+            for entry in self.staging_dir.iterdir():
+                if entry.is_dir():
+                    continue
+                if entry == keep:
+                    continue
+                if entry.name == "update-state.json" or entry.name.startswith("apply_update"):
+                    continue
+                if entry.name.startswith("nse-bridge-") and (entry.name.endswith(".exe") or ".tmp-" in entry.name):
+                    entry.unlink(missing_ok=True)
+                    logger.info("[UPDATER] pruned stale staged artifact {}", entry.name)
+        except OSError as exc:  # pruning is housekeeping, never fatal
+            logger.debug("[UPDATER] staged-artifact pruning skipped: {}", type(exc).__name__)
 
     def write_apply_script(self) -> Path:
         """Write the staged restart-installer script (our own code).
