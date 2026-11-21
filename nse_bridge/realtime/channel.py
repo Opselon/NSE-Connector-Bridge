@@ -657,6 +657,10 @@ class ServerChannel:
                     additional_headers=headers,
                     ping_interval=None,  # §5: no ping frames — the 15 s app heartbeat is liveness
                     max_size=16 * 1024 * 1024,
+                    # Explicit proxy route (settings.network_proxy):
+                    # same sanctioned route the REST client uses. SOCKS
+                    # proxies require the python-socks extra (bundled).
+                    proxy=self.ctx.settings.network_proxy or None,
                 ) as ws:
                     self._ws = ws
                     self._last_server_frame_at = time.monotonic()

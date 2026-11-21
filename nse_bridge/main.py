@@ -181,6 +181,13 @@ def main(argv=None) -> None:
     except ValueError as exc:
         print(f"error: refusing to start: {exc}", file=sys.stderr)
         raise SystemExit(2)
+    from .config import validate_network_proxy
+
+    try:
+        validate_network_proxy(settings.network_proxy)
+    except ValueError as exc:
+        print(f"error: refusing to start: {exc}", file=sys.stderr)
+        raise SystemExit(2)
     # Mandatory local API key (auto-generated on first run, stored in
     # the secret store). Fail closed before serving anything.
     ensure_local_api_key(settings)

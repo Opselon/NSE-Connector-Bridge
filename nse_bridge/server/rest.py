@@ -54,7 +54,7 @@ import httpx
 from loguru import logger
 
 from .. import BRIDGE_VERSION
-from ..config import validate_server_base_url
+from ..config import validate_network_proxy, validate_server_base_url
 from .errors import ServerError, ServerErrorCode, parse_error_response
 
 if TYPE_CHECKING:
@@ -183,6 +183,7 @@ class RestClient:
         enrolment: Any | None = None,
     ) -> None:
         validate_server_base_url(settings.server_base_url, environment=settings.environment)
+        validate_network_proxy(settings.network_proxy)
         self.settings = settings
         self.device_id = device_id
         self.api_key = api_key if api_key is not None else settings.server_token
@@ -228,14 +229,18 @@ class RestClient:
             # ambient env proxy. (Also: some hosts export a NO_PROXY
             # with bare IPv6 literals that httpx cannot parse at
             # construction time — the client must not fail to construct
-            # because of the ambient environment.) Proxy support, if
-            # ever needed, must come from explicit Bridge config.
+            # because of the ambient environment.) Proxy support comes
+            # ONLY from explicit Bridge config (settings.network_proxy)
+            # — never the ambient environment.
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 transport=self._transport,
                 # Granular timeouts: a dead host fails on CONNECT in
                 # seconds instead of hanging the full 30 s read budget.
                 timeout=httpx.Timeout(30.0, connect=10.0),
+                # Explicit proxy only: the sanctioned route on networks
+                # whose direct path to the Platform is blocked/degraded.
+                proxy=self.settings.network_proxy or None,
                 trust_env=False,
             )
         return self._client

@@ -438,8 +438,8 @@ def test_updates_latest_reports_newer_version(client):
     ctx.settings.server_token = "sk-test-secret-abcdef123456"
     ctx.rest_client = FakeRestClient(
         release=ReleaseInfo(
-            version="1.2.0",
-            download_url="https://example.invalid/bridge-1.2.0.exe",
+            version="99.99.99",
+            download_url="https://example.invalid/bridge-99.99.99.exe",
             sha256="ab" * 32,
             size_bytes=12_345_678,
             min_connector_version="1.0.0",
@@ -455,7 +455,7 @@ def test_updates_latest_reports_newer_version(client):
     from nse_bridge import BRIDGE_VERSION
 
     assert data["installed_version"] == BRIDGE_VERSION
-    assert data["latest"]["version"] == "1.2.0"
+    assert data["latest"]["version"] == "99.99.99"
     assert data["update_available"] is True
     assert data["status"] == "update_available"
     assert data["latest"]["signature_present"] is True

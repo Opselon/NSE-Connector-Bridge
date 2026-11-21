@@ -105,6 +105,27 @@ def validate_server_base_url(url: str, *, environment: str = "production") -> No
     )
 
 
+PROXY_SCHEMES = ("socks5", "socks5h", "socks4", "http", "https")
+
+
+def validate_network_proxy(url: str) -> None:
+    """Validate the explicit network proxy URL (empty = direct connect).
+
+    Accepts ``socks5://`` / ``socks5h://`` / ``socks4://`` / ``http://``
+    / ``https://`` with host[:port]. Anything else is a ValueError — a
+    mis-typed proxy would otherwise silently disable Platform traffic.
+    """
+    if not url:
+        return
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in PROXY_SCHEMES:
+        raise ValueError(
+            f"network_proxy {url!r} must be a socks5://, socks5h://, socks4://, http:// or https:// proxy URL"
+        )
+    if not parsed.hostname:
+        raise ValueError(f"network_proxy {url!r} is missing a host")
+
+
 class BridgeSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="NSE_BRIDGE_", env_file=".env", extra="ignore")
 
@@ -133,6 +154,17 @@ class BridgeSettings(BaseSettings):
     # Runtime-only secret (from the secret store, never config.json).
     server_token: str = ""  # auth token issued by the platform
     device_id: str = ""  # auto-generated + persisted when empty
+    # Explicit network proxy for ALL Platform traffic (REST + WS).
+    # Empty = direct connection (default; the ambient environment is
+    # deliberately NOT trusted — see RestClient). When set, it must be
+    # an explicit proxy URL: ``socks5://host:port`` (or ``socks5h``,
+    # ``http://``, ``https://``). Needed on networks whose direct
+    # route to the Platform is blocked/degraded (verified
+    # 2026-11-21: direct REST to the production host hangs while a
+    # local SOCKS5 proxy answers in ~3 s). Secrets never travel in
+    # the proxy URL — proxy AUTH URLs are stored via the secret-store
+    # migration only if a user pastes one; they are never logged.
+    network_proxy: str = ""
     # CONTRACT v1 §5.4: initial backoff 500 ms, doubling, capped at 30 s.
     reconnect_initial_ms: int = 500
     reconnect_max_ms: int = 30000
@@ -282,6 +314,7 @@ def persist_settings(settings: BridgeSettings) -> None:
         "host",
         "port",
         "allow_non_loopback",
+        "network_proxy",
         "magic",
         "bot_symbol",
         "mt5_terminal_path",

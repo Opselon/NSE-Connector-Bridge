@@ -1,6 +1,6 @@
 [project]
 name = "nse-bridge"
-version = "1.1.0"
+version = "1.2.0"
 description = "NSE MT5 Bridge - secure local bridge between MetaTrader 5 terminal and the NSE Platform server"
 requires-python = ">=3.12"
 dependencies = [
@@ -15,6 +15,11 @@ dependencies = [
     "loguru==0.8.0",
     "numpy==2.5.5",
     "pywebview==6.2.1",
+    # Explicit-proxy support for restricted networks (settings.network_proxy):
+    # python-socks backs the websockets `proxy=` route, socksio backs
+    # httpx socks5:// routes. Pure-Python, both platforms.
+    "python-socks==3.2.2",
+    "socksio==1.0.0",
     # keyring provides Windows Credential Manager on win32; on Linux the
     # dev-only file fallback is used instead (never required for tests).
     "keyring==25.7.0; sys_platform == 'win32'",

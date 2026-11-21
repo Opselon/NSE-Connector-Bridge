@@ -19,7 +19,12 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from .. import BRIDGE_VERSION
-from ..config import persist_settings, validate_server_base_url, validate_server_url
+from ..config import (
+    persist_settings,
+    validate_network_proxy,
+    validate_server_base_url,
+    validate_server_url,
+)
 from ..engine.common import BridgeContext, datetime_now_iso
 from ..errors import BridgeError, ErrorCode
 from ..logging_setup import redact_text
@@ -51,6 +56,15 @@ class SettingsUpdate(BaseModel):
     )
     server_base_url: str | None = Field(
         None, description="NSE server REST base URL (https://...; changing it needs a bridge restart)"
+    )
+    network_proxy: str | None = Field(
+        None,
+        description=(
+            "Explicit proxy URL for ALL Platform traffic — socks5://host:port, "
+            "socks5h://, socks4://, http:// or https://; empty = direct connect. "
+            "Use on networks whose direct route to the Platform is blocked/degraded. "
+            "Changing it needs a bridge restart."
+        ),
     )
     magic: int | None = Field(None, ge=0, le=2**31 - 1)
     # Empty string = clear the configured value (no default symbol /
@@ -149,10 +163,16 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict[str,
             validate_server_base_url(values["server_base_url"], environment=values.get("environment", s.environment))
         except ValueError as exc:
             raise BridgeError(ErrorCode.VALIDATION, str(exc), http_status=422)
-    # environment / server_base_url are baked into the REST client at
-    # construction — they take effect after a bridge restart (never a
-    # silent mid-flight switch). The response flags that honestly.
-    restart_required = "environment" in values or "server_base_url" in values
+    if "network_proxy" in values:
+        try:
+            validate_network_proxy(values["network_proxy"])
+        except ValueError as exc:
+            raise BridgeError(ErrorCode.VALIDATION, str(exc), http_status=422)
+    # environment / server_base_url / network_proxy are baked into the
+    # REST client at construction — they take effect after a bridge
+    # restart (never a silent mid-flight switch). The response flags
+    # that honestly.
+    restart_required = "environment" in values or "server_base_url" in values or "network_proxy" in values
     for field, value in values.items():
         if field not in EDITABLE_KEYS or getattr(s, field) == value:
             continue

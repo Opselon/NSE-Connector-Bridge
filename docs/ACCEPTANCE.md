@@ -130,3 +130,29 @@ Blocked on the Platform: item 22 (D1), and the wire halves of items
 13/15 (D5), 14 (D4), 19 (D6), 20 (D8), 32 (D9) — see
 docs/PLATFORM-GAPS.md. No real-terminal pass is claimed anywhere in
 this document.
+
+---
+
+## 2026-11-21 — nextgen client workstream acceptance
+
+Dated record for the nextgen client-platform workstream (branch
+`feat/bridge-nextgen-client-platform`). Same rules as above:
+**Pass** = executed in this session or pinned by an executed test;
+**Partial** = implemented + proven where it can be, named remainder;
+**Not-proven / Blocked-by-environment** = the evidence that would
+prove it is named. Nothing here is inflated; every count below was
+measured in the 2026-11-21 verification session.
+
+| Area | Verdict | Evidence |
+|---|---|---|
+| Unit + mock-integration suite | **Pass** | `.venv/Scripts/python.exe -m pytest tests/unit tests/integration -q` → **655 passed, 1 skipped**, exit 0 (measured 2026-11-21 on this tree; includes concurrent in-flight tests landing alongside this workstream). |
+| Lint / format / types / security | **Pass** | `.venv/Scripts/python.exe -m ruff check .` → clean; `python -m mypy nse_bridge` → clean (70 files); `python -m bandit -r nse_bridge --skip B101,B110,B311,B404 -q` → exit 0; `python -m pip_audit -r requirements.txt -r requirements-dev.txt` → "No known vulnerabilities found". `ruff format --check .` reported one pre-existing formatting drift in `nse_bridge/config.py` introduced by concurrent in-flight work in the same tree (not this workstream's files — this session changed docs only). |
+| Local-processing benchmark baselines | **Pass (recorded)** | Measured baselines and the before/after table live in docs/PERFORMANCE.md (committed 2026-11-21, `6aa4e96`); the CI `bench` job runs `scripts/bench_local_api.py` on main/dispatch to keep the regression signal. |
+| Real-MT5 E2E | **Partial — 91/104, environmental remainder** | 2026-11-21 run on the live demo terminal: **91 passed, 13 failed**. Every failure is retcode `10018` (`MARKET_CLOSED`) or a stale tick from the same cause — 2026-11-21 was a **Saturday**, the market is closed, so the trade/tick suites are calendar-blocked. Classified **environmental, not code defects**; re-run owed during market hours (Sun 22:00 GMT – Fri 22:00 GMT). |
+| CLI JSON contract | **Pass** | `tests/unit/test_cli_contract.py` runs the real uvicorn app and asserts the query subcommand JSON contract (`status|health|diagnostics|mt5 list --json`), single-instance refusal (exit 2), and `--console` semantics — verified against a live bridge, not mocks. |
+| Platform contract compat (PR #144 behaviors) | **Pass** | `tests/unit/test_platform_contract_compat.py`: demo fail-closed type-omission (§7.4 Bug A), uuidv7 batch ids (§3.3), heartbeat-REPLY liveness (§5.3 Bug C — session survives other frames, dies without replies), replay dedup (§6.6 Bug B). |
+| /ws/ui authentication | **Pass** | `tests/unit/test_local_api_auth.py`: missing/wrong key rejected on the WS upgrade (1008), `X-API-Key` header and loopback cookie paths accepted; dashboard cookie carriage widened to `path=/` (`nse_bridge/gui/dashboard.py:52`) with name/HttpOnly/SameSite unchanged. |
+| GUI rebuild (Control Center → nextgen client) | **Pass — 3 honestly-rendered API gaps** | Rebuild commit `cdfa022`: nine screens, Overview landing, live /ws/ui feed with 30 s REST fallback, onboarding flow, dark/light themes. The three API gaps are rendered honestly, not invented: diagnostic mode is shown read-only — *"not editable via the local API — current value on the Diagnostics screen"* (`gui/static/index.html:893`); no release-channel concept exists, so the Updates screen renders no stable/prerelease selector; release notes display *"not provided by the release metadata"* (`gui/static/index.html:777`). |
+| Platform REST reachability / live enrolment | **Partial (D11, measured)** | Verified 2026-11-21: `subscribe.nexusverse.space` answered 200 while `bridge.nexusverse.space` hung — a server-side vhost outage (see docs/TROUBLESHOOTING.md §3). This blocks the live enrolment/sync/command round-trip: docs/PLATFORM-GAPS.md D11 stays partial, measured rather than assumed. |
+| Installer install/upgrade E2E on a disposable Windows VM | **Not-proven — Blocked-by-environment** | NOT executed. CI compiles the installer on every PR (`iscc` in `build-windows`) and `scripts/install.ps1` ships with triple SHA-256 verification + exit codes 0–7, but mission H6 requires the install/upgrade E2E on a disposable Windows VM, which was not available. Classified Blocked-by-environment; the only honest claim is: installer COMPILES, installer behavior on a clean VM UNPROVEN. |
+| GitHub Pages landing page | **Pass (ships with merge)** | `docs/index.html` was rewritten in this workstream (`327a1b6`) and the Pages deploy auto-runs on push to `main` via the `pages-build-deployment` workflow — the new landing page ships with the merge; link integrity is gated by `scripts/check_docs.py` (docs.yml) rather than verified live before merge. |
