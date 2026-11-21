@@ -43,6 +43,12 @@ def prepare_console() -> bool:
         # only as a fallback (double-clicked exe).
         if kernel32.GetConsoleWindow() == 0 and not kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
             kernel32.AllocConsole()
+        # UTF-8 codepage: the streams we bind below WRITE utf-8, and
+        # the default codepage (e.g. CP850) renders that as mojibake
+        # (box-drawing → "ΓòÉ…"). 65001 makes the console read it back
+        # correctly; SetConsoleCP covers typed input the same way.
+        kernel32.SetConsoleOutputCP(65001)
+        kernel32.SetConsoleCP(65001)
         _rebind_stream("stdin", "CONIN$", "r")
         _rebind_stream("stdout", "CONOUT$", "w")
         _rebind_stream("stderr", "CONOUT$", "w")

@@ -251,13 +251,17 @@ def main(argv=None) -> None:
     if not args.no_connect:
         threading.Thread(target=_auto_connect, args=(driver,), daemon=True, name="mt5-boot").start()
 
+    # ASCII-only banner: consoles without a UTF-8 codepage render
+    # box-drawing characters as mojibake; plain ASCII is unambiguous
+    # everywhere (the console codepage is still set to 65001 on
+    # attach, but never rely on it).
     logger.info(
-        "╔══════════════════════════════════════════════════╗\n"
-        "║  NSE MT5 Bridge v{} — RUNNING                    ║\n"
-        "║  Dashboard : {}/ui                               ║\n"
-        "║  Swagger   : {}/docs                             ║\n"
-        "║  Device ID : {}                  ║\n"
-        "╚══════════════════════════════════════════════════╝",
+        "======================================================\n"
+        "  NSE MT5 Bridge v{} — RUNNING\n"
+        "  Dashboard : {}/ui\n"
+        "  Swagger   : {}/docs\n"
+        "  Device ID : {}\n"
+        "======================================================",
         BRIDGE_VERSION,
         base_url,
         base_url,
