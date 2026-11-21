@@ -9,12 +9,12 @@ intelligence, orchestration, and decisions. This is infrastructure, not a
 trading product: there is no local AI, no autonomous trading, no backtest,
 and no indicator/risk engine in the client.
 
-- **Local capability:** 90 commands over a loopback REST API (see
+- **Local capability:** 91 commands over a loopback REST API (see
   [docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md)).
 - **Server channel:** exactly 3 operations in CONTRACT v1
   (`close_position`, `modify_sl_tp`, `modify_pending` — the last
   capability-gated) — see [docs/API_PROTOCOL.md](docs/API_PROTOCOL.md).
-  The full 90-command registry stays available **locally**; the server
+  The full 91-command registry stays available **locally**; the server
   channel enforces the 3-op allowlist at the boundary. Never the reverse.
 - **Packaged as a single-file Windows `.exe`** (x64), built by CI.
 
@@ -127,7 +127,7 @@ with guidance instead.
 
 ## Command surface
 
-Local capability (90 commands, `POST /api/v1/{name}`) vs server channel
+Local capability (91 commands, `POST /api/v1/{name}`) vs server channel
 (3 ops, CONTRACT v1 §6.1) — listed separately, never mixed, in
 [docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md). Every local
 response: `{"ok": true, "data": …}` or

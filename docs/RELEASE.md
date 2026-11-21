@@ -153,7 +153,7 @@ Run after committing, from the committed tree:
 ## 6. Acceptance
 
 The verdict per acceptance criterion (§15 of the user spec) is in
-[docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) — pass / partial /
+[docs/ACCEPTANCE.md](ACCEPTANCE.md) — pass / partial /
 not-proven, honestly, with no inflation. Summary: the client-only
 separation, security, protocol, telemetry, self-healing, docs, and
 Linux test gates pass; Windows CI, real-MT5 e2e, live Platform, and
