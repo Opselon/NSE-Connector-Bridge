@@ -1715,12 +1715,19 @@ $('btnAcRefresh').addEventListener('click', async () => {
    ========================================================================== */
 let symData = [];
 const symVal = v => v == null ? 'not reported' : String(v);
+const SYM_RENDER_CAP = 300; // brokers report 10k+ symbols — rendering them all bloats the DOM
 function renderSymbols(){
   const q = ($('symFilter').value || '').trim().toLowerCase();
-  const rows = symData.filter(s => s && s.metadata && s.metadata.name.toLowerCase().includes(q));
+  const matches = symData.filter(s => s && s.metadata && s.metadata.name.toLowerCase().includes(q));
+  const rows = matches.slice(0, SYM_RENDER_CAP);
+  const capNote = matches.length > SYM_RENDER_CAP
+    ? '<tr><td colspan="11"><div class="note">showing ' + SYM_RENDER_CAP + ' of ' + matches.length
+      + ' matching symbols — refine the filter to narrow the list (the filter searches all '
+      + symData.length + ').</div></td></tr>'
+    : '';
   $('symRows').innerHTML = rows.length === 0
     ? '<tr><td colspan="11"><div class="empty">' + (symData.length === 0 ? 'No symbols reported by this broker.' : 'No symbols match the filter.') + '</div></td></tr>'
-    : rows.map(s => {
+    : capNote + rows.map(s => {
       const m = s.metadata, a = s.availability || {};
       const cur = [m.currency_base, m.currency_profit].filter(Boolean).join(' / ') || 'not reported';
       const vol = [m.volume_min, m.volume_max, m.volume_step].map(v => v == null ? '—' : v).join(' / ');
