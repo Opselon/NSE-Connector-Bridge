@@ -153,7 +153,14 @@ class _InterceptHandler(logging.Handler):
 def setup_logging(log_dir: Path, level: str = "INFO", extra_sink=None) -> None:
     redact = make_redaction_filter()
     logger.remove()
-    logger.add(sys.stderr, level=level.upper(), format=_FMT, colorize=True, filter=redact)
+    # The console sink is best-effort: a windowed (console=False)
+    # PyInstaller exe has sys.stderr = None when no console is attached
+    # (double-click launch, default GUI mode) and loguru refuses None
+    # sinks with a TypeError that kills the app before its window can
+    # open. --console/--diagnostic rebind stderr to a real console
+    # first; everywhere else the file + JSONL sinks carry the logs.
+    if sys.stderr is not None:
+        logger.add(sys.stderr, level=level.upper(), format=_FMT, colorize=True, filter=redact)
     log_dir.mkdir(parents=True, exist_ok=True)
     logger.add(
         Path(log_dir) / "bridge.log",
