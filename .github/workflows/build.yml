@@ -254,8 +254,12 @@ jobs:
               $cliName = $cli -join '-'
               $outFile = Join-Path $env:TEMP "cli-$cliName.json"
               $errFile = Join-Path $env:TEMP "cli-$cliName.err.txt"
+              # Explicit command-LINE string (pwsh Start-Process mangles
+              # element-boundaries of ArgumentList arrays — observed:
+              # "status" + "--json" arrived as one token "status--json").
+              $argStr = ($cli -join ' ') + ' --json'
               $cp = Start-Process -FilePath "dist/NSE-MT5-Bridge.exe" `
-                -ArgumentList ($cli + "--json") -Wait -PassThru `
+                -ArgumentList $argStr -Wait -PassThru `
                 -RedirectStandardOutput $outFile -RedirectStandardError $errFile
               if ($cp.ExitCode -ne 0) {
                 Write-Host "--- cli stderr ---"; Get-Content $errFile | Write-Host
