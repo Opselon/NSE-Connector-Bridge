@@ -369,6 +369,39 @@ class EnrolmentManager:
         self._transient_failures = 0
         self._set_state(EnrolmentState.REGISTERED)
         logger.info("[ENROL] re-enrolment succeeded — device registered again")
+        # The §3.2 recovery path registers the device WITHOUT running
+        # validate-key, so the cached user_id / subscription /
+        # entitlements stayed empty and the Account & Subscription
+        # screen read "Not validated yet" forever after a mid-session
+        # 401 recovery (observed 2026-11-21). Refresh the validation
+        # cache now — best-effort: a failure here is surfaced by the
+        # next manual refresh, never breaks the recovery.
+        asyncio.get_running_loop().create_task(self._refresh_validation_cache())
+
+    async def _refresh_validation_cache(self) -> None:
+        """Run validate-key once after a re-auth so the GUI's cached
+        entitlements match the freshly-registered state."""
+        try:
+            result = await self._rest.validate_key()
+            self._ctx.validate_key_result = {
+                "valid": True,
+                "user_id": result.user_id,
+                "subscription": dict(result.subscription or {}),
+                "entitlements": {
+                    "history_sync": result.entitlements.history_sync,
+                    "ai_coach": result.entitlements.ai_coach,
+                    "position_manager": result.entitlements.position_manager,
+                    "auto_trade": result.entitlements.auto_trade,
+                    "max_devices": result.entitlements.max_devices,
+                    "max_accounts": result.entitlements.max_accounts,
+                },
+            }
+            logger.info(
+                "[ENROL] post-reauth validate-key OK — entitlements cached (user={})",
+                result.user_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — cache refresh is best-effort
+            logger.warning("[ENROL] post-reauth validate-key failed: {}", type(exc).__name__)
 
     def note_reauth_failed(self, exc: ServerError) -> None:
         """The re-enrolment's register-device failed."""
