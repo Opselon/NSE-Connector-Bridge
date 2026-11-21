@@ -175,3 +175,53 @@ def test_put_settings_rejects_non_wss_server_url(client):
     )
     assert resp.status_code == 422
     assert resp.json()["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# /ws/ui authentication (audit High#2): the mandatory-key boundary must
+# not stop at HTTP endpoints — the dashboard socket carries account /
+# position / tick events to any local process otherwise.
+# ---------------------------------------------------------------------------
+
+
+def test_ws_ui_rejects_missing_key(client):
+    http, _ = client
+    with pytest.raises(Exception):  # starlette raises WebSocketDisconnect on close
+        with http.websocket_connect("/ws/ui"):
+            pass
+
+
+def test_ws_ui_rejects_wrong_key(client):
+    http, _ = client
+    with pytest.raises(Exception):
+        with http.websocket_connect("/ws/ui", headers={"X-API-Key": "wrong-key-12345678"}):
+            pass
+
+
+def test_ws_ui_accepts_header_key(client):
+    from nse_bridge.realtime.bus import EventBus
+
+    http, ctx = client
+    # The lifespan owns the real bus; without it, provide the minimum
+    # the accepted socket needs (auth happens before any state access).
+    http.app.state.bus = EventBus()
+    key = ctx.settings.local_api_key
+    with http.websocket_connect("/ws/ui", headers={"X-API-Key": key}) as ws:
+        first = ws.receive_json()
+        assert first["type"] == "status"
+        assert first["data"]["bridge_version"]
+        assert "mt5_state" in first["data"]
+
+
+def test_ws_ui_accepts_cookie_key(client):
+    from nse_bridge.gui.dashboard import LOCAL_API_KEY_COOKIE
+    from nse_bridge.realtime.bus import EventBus
+
+    http, ctx = client
+    http.app.state.bus = EventBus()
+    key = ctx.settings.local_api_key
+    # Same-origin GUI auth path: the HttpOnly cookie set by /ui.
+    http.cookies.set(LOCAL_API_KEY_COOKIE, key)
+    with http.websocket_connect("/ws/ui") as ws:
+        first = ws.receive_json()
+        assert first["type"] == "status"

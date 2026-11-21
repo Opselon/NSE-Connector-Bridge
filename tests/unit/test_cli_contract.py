@@ -31,7 +31,6 @@ pytestmark = pytest.mark.unit
 from nse_bridge import cli as bridge_cli
 from nse_bridge.config import BridgeSettings
 
-
 # ---------------------------------------------------------------------------
 # Single instance
 # ---------------------------------------------------------------------------
