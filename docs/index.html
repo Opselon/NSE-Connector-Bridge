@@ -3,43 +3,139 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NSE MT5 Bridge — API Reference (Swagger)</title>
-<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+<title>NSE MT5 Bridge — documentation</title>
 <style>
-  body { margin: 0; background: #0a0e14; }
-  #topbar { background: linear-gradient(135deg,#111823,#0d1220); border-bottom: 1px solid #1c2634;
-            padding: 14px 24px; display: flex; align-items: center; gap: 14px; }
-  #topbar .mark { width: 34px; height: 34px; border-radius: 10px;
-            background: linear-gradient(135deg,#2563eb,#7c3aed); display: flex; align-items: center;
-            justify-content: center; font-weight: 800; color: #fff; font-family: system-ui; }
-  #topbar h1 { font: 700 16px system-ui; color: #dde6f2; margin: 0; }
-  #topbar .s { font: 12px system-ui; color: #7f93ac; }
-  #topbar a { margin-left: auto; font: 600 13px system-ui; color: #60a5fa; text-decoration: none;
-            border: 1px solid #1c2634; padding: 7px 13px; border-radius: 8px; }
-  #swagger { background: #fff; }
+  :root {
+    --bg: #0a0e14; --bg2: #0d1220; --panel: #111823; --line: #1c2634;
+    --text: #dde6f2; --muted: #7f93ac; --accent: #2dd4bf; --link: #60a5fa;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header { background: linear-gradient(135deg,#111823,#0d1220); border-bottom: 1px solid var(--line);
+           padding: 18px 24px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  header .mark { width: 40px; height: 40px; border-radius: 11px; background: linear-gradient(135deg,#2563eb,#7c3aed);
+           display: flex; align-items: center; justify-content: center; font-weight: 800; color: #fff; }
+  header h1 { font-size: 17px; margin: 0; }
+  header .s { font-size: 12.5px; color: var(--muted); }
+  header nav { margin-left: auto; display: flex; gap: 10px; flex-wrap: wrap; }
+  header nav a { border: 1px solid var(--line); padding: 7px 13px; border-radius: 8px; font-weight: 600; font-size: 13px; }
+  main { max-width: 980px; margin: 0 auto; padding: 28px 20px 60px; }
+  .hero { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 26px; margin-bottom: 26px; }
+  .hero h2 { margin: 0 0 10px; font-size: 24px; }
+  .hero p { color: var(--muted); margin: 0 0 14px; max-width: 62ch; }
+  code, pre { font-family: ui-monospace, Consolas, "Cascadia Code", monospace; }
+  code { background: var(--bg2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 13px; }
+  pre { background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+        overflow-x: auto; font-size: 13px; line-height: 1.55; color: #c9d7e8; }
+  pre code { background: none; border: none; padding: 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .card h3 { margin: 0 0 8px; font-size: 15px; }
+  .card p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  h2.section { font-size: 19px; margin: 34px 0 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  .pill { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px;
+          font-size: 12px; color: var(--muted); margin-right: 6px; }
+  footer { border-top: 1px solid var(--line); margin-top: 44px; padding: 18px 24px; color: var(--muted); font-size: 12.5px; }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f5f7fa; --bg2:#eef2f7; --panel:#ffffff; --line:#dbe3ec; --text:#1a2534; --muted:#5a6b80; }
+  }
 </style>
 </head>
 <body>
-<div id="topbar">
+<header>
   <div class="mark">N</div>
   <div>
-    <h1>NSE MT5 Bridge — API Reference</h1>
-    <div class="s">Secure client-side bridge between MetaTrader 5 and the NSE Platform · 90 commands · Opselon/NSE-Connector-Bridge</div>
+    <h1>NSE MT5 Bridge</h1>
+    <div class="s">The official local client for NSE Platform · MetaTrader 5 ↔ Platform, secure by construction</div>
   </div>
-  <a href="https://github.com/Opselon/NSE-Connector-Bridge" target="_blank">GitHub repo ↗</a>
-</div>
-<div id="swagger"></div>
-<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js" crossorigin></script>
-<script>
-window.addEventListener('load', () => {
-  window.ui = SwaggerUIBundle({
-    url: './openapi.json',
-    dom_id: '#swagger',
-    docExpansion: 'none',
-    tagsSorter: 'alpha',
-    tryItOutEnabled: true,
-  });
-});
-</script>
+  <nav>
+    <a href="https://github.com/Opselon/NSE-Connector-Bridge/releases/latest">Download ↗</a>
+    <a href="swagger.html">API reference</a>
+    <a href="https://github.com/Opselon/NSE-Connector-Bridge" target="_blank">GitHub ↗</a>
+  </nav>
+</header>
+
+<main>
+  <section class="hero">
+    <h2>One file. Your terminal. The Platform.</h2>
+    <p>The Bridge is a self-contained Windows executable that attaches to your MetaTrader 5
+       terminal and communicates securely with NSE Platform over an outbound-only, authenticated
+       WebSocket — no inbound ports, no admin rights, no runtime dependencies. All trading
+       intelligence stays server-side; the Bridge is a thin, verified execution client.</p>
+    <p>
+      <span class="pill">91 local commands</span>
+      <span class="pill">3 server-channel ops</span>
+      <span class="pill">X-API-Key mandatory</span>
+      <span class="pill">secrets in Credential Manager</span>
+      <span class="pill">SHA-256 verified releases</span>
+    </p>
+  </section>
+
+  <h2 class="section">Install</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>Installer (per-user, no UAC)</h3>
+      <p>Download <a href="https://github.com/Opselon/NSE-Connector-Bridge/releases/latest">NSE-MT5-Bridge-Setup-*.exe</a>
+      and run it. Upgrades in place; configuration and credentials are preserved.</p>
+    </div>
+    <div class="card">
+      <h3>Direct from GitHub (PowerShell)</h3>
+      <pre><code>$script = "$env:TEMP\nse-bridge-install.ps1"
+Invoke-WebRequest "https://raw.githubusercontent.com/Opselon/NSE-Connector-Bridge/main/scripts/install.ps1" -OutFile $script
+&amp; $script -Channel Stable</code></pre>
+    </div>
+    <div class="card">
+      <h3>Portable</h3>
+      <p>Grab <code>NSE-MT5-Bridge.exe</code> from the release page, put it anywhere, run it.
+      Everything (runtime, dependencies, UI) is inside the file.</p>
+    </div>
+  </div>
+
+  <h2 class="section">Automation &amp; service operation</h2>
+  <pre><code>NSE-MT5-Bridge.exe                     # desktop application (default)
+NSE-MT5-Bridge.exe --console           # foreground console service, no GUI
+NSE-MT5-Bridge.exe --gui none          # headless service mode
+
+# Machine-readable status of the RUNNING bridge (loopback API):
+NSE-MT5-Bridge.exe status --json
+NSE-MT5-Bridge.exe health --json
+NSE-MT5-Bridge.exe diagnostics --json
+NSE-MT5-Bridge.exe mt5 list --json</code></pre>
+  <p>One JSON document per command — stable envelope, UTC timestamps, predictable exit codes.
+     See <a href="https://github.com/Opselon/NSE-Connector-Bridge/blob/main/docs/CLI_REFERENCE.md">CLI_REFERENCE.md</a>.</p>
+
+  <h2 class="section">Documentation</h2>
+  <table>
+    <tr><th>Guide</th><th>Contents</th></tr>
+    <tr><td><a href="https://github.com/Opselon/NSE-Connector-Bridge/blob/main/docs/INSTALLATION.md">Installation</a></td><td>installer, direct GitHub install, portable, verification, troubleshooting</td></tr>
+    <tr><td><a href="https://github.com/Opselon/NSE-Connector-Bridge/blob/main/docs/DESKTOP_APPLICATION.md">Desktop application</a></td><td>Control Center screens, push updates, onboarding, lifecycle</td></tr>
+    <tr><td><a href="https://github.com/Opselon/NSE-Connector-Bridge/blob/main/docs/CLI_REFERENCE.md">CLI reference</a></td><td>serve modes, JSON contract, exit codes</td></tr>
+    <tr><td><a href="swagger.html">Local API reference</a></td><td>the Bridge's own OpenAPI schema in Swagger UI</td></tr>
+    <tr><td><a href="https://github.com/Opselon/NSE-Connector-Bridge/blob/main/docs/ARCHITECTURE.md">Architecture</a></td><td>components, data flow, state machines</td></tr>
+    <tr><td><a href="https://github.com/Opselon/NSE-Connector-Bridge/blob/main/docs/SECURITY.md">Security</a></td><td>secret store, auth boundaries, redaction, threat model</td></tr>
+    <tr><td><a href="https://github.com/Opselon/NSE-Connector-Bridge/blob/main/docs/COMPATIBILITY.md">Compatibility</a></td><td>Windows/x64, MT5 builds, broker notes</td></tr>
+    <tr><td><a href="https://github.com/Opselon/NSE-Connector-Bridge/blob/main/docs/TROUBLESHOOTING.md">Troubleshooting</a></td><td>structured diagnostics codes and fixes</td></tr>
+    <tr><td><a href="https://github.com/Opselon/NSE-Connector-Bridge/blob/main/docs/PERFORMANCE.md">Performance</a></td><td>measured baselines and methodology</td></tr>
+    <tr><td><a href="https://github.com/Opselon/NSE-Connector-Bridge/blob/main/docs/RELEASE.md">Releases</a></td><td>release process and verified status</td></tr>
+  </table>
+
+  <h2 class="section">Security posture</h2>
+  <ul>
+    <li>Loopback-only local API by default; the mandatory <code>X-API-Key</code> protects every HTTP endpoint <em>and</em> the dashboard WebSocket.</li>
+    <li>API keys live in Windows Credential Manager (DPAPI fallback) — never in plaintext config, never in logs (redaction layer).</li>
+    <li>The MT5 password is never requested or stored — sign in through the terminal itself.</li>
+    <li>Outbound-only WSS with TLS enforced; updates verify SHA-256 (+ Ed25519 when the release-signing key is provisioned — fail-closed until then).</li>
+    <li>Demo-only execution: live/unknown account types are refused by both the Platform and the Bridge's contract tests.</li>
+  </ul>
+</main>
+
+<footer>
+  Opselon · NSE-Connector-Bridge — this site is generated from the repository's docs; the executable and its checksums live in GitHub Releases.
+</footer>
 </body>
 </html>

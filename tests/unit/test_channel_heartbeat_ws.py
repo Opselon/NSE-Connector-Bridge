@@ -115,7 +115,10 @@ async def test_heartbeat_pending_commands_ignored_when_ws_live(tmp_path: Path):
     wake_calls: list[bool] = []
     channel._request_ws_open = lambda: wake_calls.append(True) or True  # type: ignore[method-assign]
     await _run_heartbeat_loop(channel)
-    assert rest.heartbeats >= 1
+    # WS live → the REST heartbeat SKIPS the send entirely (§3.4: it is
+    # the keep-alive when the WS is DOWN; the WS application heartbeat
+    # owns liveness while a session is up) and nothing needs opening.
+    assert rest.heartbeats == 0
     assert wake_calls == []  # WS already live: nothing to open
 
 

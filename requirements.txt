@@ -12,6 +12,8 @@ cryptography==50.0.2
 loguru==0.8.0
 numpy==2.5.5
 pywebview==6.2.1
+python-socks==3.2.2
+socksio==1.0.0
 keyring==25.7.0; sys_platform == "win32"
 MetaTrader5==5.0.6231; sys_platform == "win32"
 pyinstaller==6.22.3

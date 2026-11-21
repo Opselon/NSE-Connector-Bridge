@@ -16,9 +16,15 @@ from typing import Any, Literal
 from fastapi import APIRouter, Request
 from loguru import logger
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from .. import BRIDGE_VERSION
-from ..config import persist_settings, validate_server_base_url, validate_server_url
+from ..config import (
+    persist_settings,
+    validate_network_proxy,
+    validate_server_base_url,
+    validate_server_url,
+)
 from ..engine.common import BridgeContext, datetime_now_iso
 from ..errors import BridgeError, ErrorCode
 from ..logging_setup import redact_text
@@ -50,6 +56,15 @@ class SettingsUpdate(BaseModel):
     )
     server_base_url: str | None = Field(
         None, description="NSE server REST base URL (https://...; changing it needs a bridge restart)"
+    )
+    network_proxy: str | None = Field(
+        None,
+        description=(
+            "Explicit proxy URL for ALL Platform traffic — socks5://host:port, "
+            "socks5h://, socks4://, http:// or https://; empty = direct connect. "
+            "Use on networks whose direct route to the Platform is blocked/degraded. "
+            "Changing it needs a bridge restart."
+        ),
     )
     magic: int | None = Field(None, ge=0, le=2**31 - 1)
     # Empty string = clear the configured value (no default symbol /
@@ -85,6 +100,7 @@ async def get_settings(request: Request) -> dict[str, Any]:
         "data": {
             "server_url": s.server_url,
             "server_base_url": s.server_base_url,
+            "network_proxy": s.network_proxy,
             "environment": s.environment,
             "server_token_masked": _mask(s.server_token),
             "server_token_set": bool(s.server_token),
@@ -148,10 +164,16 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict[str,
             validate_server_base_url(values["server_base_url"], environment=values.get("environment", s.environment))
         except ValueError as exc:
             raise BridgeError(ErrorCode.VALIDATION, str(exc), http_status=422)
-    # environment / server_base_url are baked into the REST client at
-    # construction — they take effect after a bridge restart (never a
-    # silent mid-flight switch). The response flags that honestly.
-    restart_required = "environment" in values or "server_base_url" in values
+    if "network_proxy" in values:
+        try:
+            validate_network_proxy(values["network_proxy"])
+        except ValueError as exc:
+            raise BridgeError(ErrorCode.VALIDATION, str(exc), http_status=422)
+    # environment / server_base_url / network_proxy are baked into the
+    # REST client at construction — they take effect after a bridge
+    # restart (never a silent mid-flight switch). The response flags
+    # that honestly.
+    restart_required = "environment" in values or "server_base_url" in values or "network_proxy" in values
     for field, value in values.items():
         if field not in EDITABLE_KEYS or getattr(s, field) == value:
             continue
@@ -196,7 +218,7 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict[str,
     discovery: dict[str, Any] | None = None
     driver_disconnected = False
     if terminals_rediscovered:
-        discovery = _discover_terminals(ctx)
+        discovery = await run_in_threadpool(_discover_terminals, ctx)
         if "mt5_terminal_path" in changed and ctx.driver.connected:
             ctx.driver.disconnect()
             driver_disconnected = True
@@ -264,8 +286,8 @@ async def run_connection_checks(request: Request) -> dict[str, Any]:
             "Run connect_mt5 (or restart the bridge) — check the terminal is running.",
         )
 
-    # 2. terminal link
-    terminal = ctx.driver.refresh_terminal() or {}
+    # 2. terminal link (MT5 IPC round-trip — never on the event loop)
+    terminal = await run_in_threadpool(ctx.driver.refresh_terminal) or {}
     if terminal.get("connected"):
         add("terminal_connected", "Terminal connected to broker", "ok", f"{terminal.get('name') or 'MetaTrader 5'}")
     elif ctx.driver.connected:
@@ -858,10 +880,14 @@ async def post_updates_download(request: Request) -> dict[str, Any]:
 async def list_mt5_terminals(request: Request) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
     state = ctx.driver.connection_state_dict()
+    # Discovery enumerates processes/registry/PE versions — blocking
+    # work that must not run on the event loop (the GUI polls this
+    # endpoint; a slow disk or AV scan would freeze every other route).
+    discovered = await run_in_threadpool(_discover_terminals, ctx)
     return {
         "ok": True,
         "data": {
-            **_discover_terminals(ctx),
+            **discovered,
             "driver_state": state["state"],
             "connected": ctx.driver.connected,
             "diagnostic_code": state.get("diagnostic_code"),
@@ -882,7 +908,8 @@ class TerminalOpenRequest(BaseModel):
 )
 async def open_mt5_terminal(request: Request, body: TerminalOpenRequest) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
-    allowed = {t["path"] for t in _discover_terminals(ctx)["terminals"]}
+    discovered = await run_in_threadpool(_discover_terminals, ctx)
+    allowed = {t["path"] for t in discovered["terminals"]}
     if body.path not in allowed:
         raise BridgeError(
             ErrorCode.VALIDATION,
@@ -923,7 +950,11 @@ async def diagnostics_summary(request: Request) -> dict[str, Any]:
     from ..engine.system import get_bridge_status
 
     ctx: BridgeContext = request.app.state.ctx
-    terminals = _discover_terminals(ctx)
+    # Discovery + the MT5-backed health probes are blocking (process
+    # enumeration + IPC round-trips); the GUI polls this endpoint every
+    # refresh — everything heavy runs in the threadpool so the event
+    # loop (and the WS channel heartbeat on it) never stalls.
+    terminals = await run_in_threadpool(_discover_terminals, ctx)
     code, severity = _derive_mt5_diagnostic(ctx, terminals["terminals"])
     diagnostic = None
     if code is not None:
@@ -992,13 +1023,20 @@ async def diagnostics_summary(request: Request) -> dict[str, Any]:
             for scenario in SCENARIOS
         }
     state = ctx.driver.connection_state_dict()
+    bridge_health, bridge_status, mt5_status = await run_in_threadpool(
+        lambda: (
+            get_bridge_health(ctx, None),
+            get_bridge_status(ctx, None),
+            get_mt5_connection_status(ctx, None),
+        )
+    )
     return {
         "ok": True,
         "data": {
             "generated_at": datetime_now_iso(),
-            "bridge": get_bridge_health(ctx, None),
-            "bridge_status": get_bridge_status(ctx, None),
-            "mt5": get_mt5_connection_status(ctx, None),
+            "bridge": bridge_health,
+            "bridge_status": bridge_status,
+            "mt5": mt5_status,
             "terminals": terminals,
             "network": network,
             "websocket": channel,
@@ -1043,7 +1081,8 @@ def _gui_resolver(ctx: BridgeContext):  # type: ignore[no-untyped-def]
 )
 async def get_symbols_inventory(request: Request) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
-    resolver = _gui_resolver(ctx)
+    # _gui_resolver may attach to MT5 (ensure_connected) — threadpool.
+    resolver = await run_in_threadpool(_gui_resolver, ctx)
     inventory = resolver.inventory
     symbols = [
         {"metadata": asdict(meta), "availability": asdict(inventory.availability(meta.name))}
@@ -1078,9 +1117,10 @@ class SymbolResolveRequest(BaseModel):
 )
 async def resolve_symbol(request: Request, body: SymbolResolveRequest) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
-    resolver = _gui_resolver(ctx)
+    # Resolution can trigger the MT5 symbols read (blocking IPC).
+    resolver = await run_in_threadpool(_gui_resolver, ctx)
     try:
-        result = resolver.resolve(body.symbol.strip(), expected=body.expected)
+        result = await run_in_threadpool(lambda: resolver.resolve(body.symbol.strip(), expected=body.expected))
     except ValueError as exc:
         raise BridgeError(ErrorCode.VALIDATION, str(exc), http_status=422) from exc
     return {
@@ -1105,8 +1145,8 @@ async def resolve_symbol(request: Request, body: SymbolResolveRequest) -> dict[s
 )
 async def refresh_symbols(request: Request) -> dict[str, Any]:
     ctx: BridgeContext = request.app.state.ctx
-    resolver = _gui_resolver(ctx)
-    resolver.refresh()
+    resolver = await run_in_threadpool(_gui_resolver, ctx)
+    await run_in_threadpool(resolver.refresh)  # fresh symbols_get() IPC
     return {
         "ok": True,
         "data": {

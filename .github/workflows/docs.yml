@@ -1,0 +1,50 @@
+# NSE MT5 Bridge — docs-only change gate.
+#
+# The main build workflow paths-ignores docs (an exe build gives a
+# docs-only PR no signal), which previously meant docs-only changes
+# had NO validation at all. This workflow is the docs counterpart:
+# it runs ONLY when markdown/docs change and validates what can be
+# checked cheaply — link integrity, command-count drift against the
+# parsed registry, and OpenAPI freshness (scripts/check_docs.py).
+
+name: Docs check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.md"
+      - "docs/**"
+      - "scripts/check_docs.py"
+  pull_request:
+    branches: [main]
+    paths:
+      - "**.md"
+      - "docs/**"
+      - "scripts/check_docs.py"
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install runtime dependencies
+        # check_docs imports the bridge registry + OpenAPI exporter —
+        # runtime deps suffice (fastapi/pydantic), no test tooling.
+        run: pip install -r requirements.txt
+
+      - name: Validate documentation
+        run: python scripts/check_docs.py

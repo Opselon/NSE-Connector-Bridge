@@ -55,7 +55,8 @@ before running the e2e trade suites.
 |---|---|---|
 | `key_invalid` / `key_revoked` (401) | Dead API key | Enter a **new** key in Settings. Re-enrolment cannot fix these; the Bridge never retries with the same key. |
 | `subscription_expired` / `device_limit_exceeded` / `account_not_authorized` / `feature_not_enabled` (403) | Server-side entitlement problem | Fix it on the Platform side (subscription, device allowance, account authorization, feature flag). The Bridge will not evict another device or fall back to unauthenticated mode. |
-| `rate_limited` (429) / 5xx | Server busy/down | Wait — the client backs off (max 3 retries, 0.5 s doubling, honours `Retry-After`). If it persists, the Platform is down; see self-healing scenario `platform_down`. |
+| `rate_limited` (429) / 5xx | Server busy/down | Wait — the client backs off (max 3 retries, 0.5 s doubling with ±15% jitter, honours `Retry-After`). If it persists, the Platform is down; see self-healing scenario `platform_down`. |
+| Enrolment (`validate-key`) hangs or fails with a transport error while the server itself is up | **Possible server-side vhost outage.** Verified 2026-11-21: `subscribe.nexusverse.space` answered 200 while `bridge.nexusverse.space` hung — the two hostnames are served independently, so a bridge-vhost outage can look like a dead key or a local network problem | First check the vhost directly (e.g. `curl -m 10 https://bridge.nexusverse.space/` vs another NSE host). If the bridge vhost hangs while others answer, it is a Platform-side outage — report it; the Bridge's own backoff and self-healing (`platform_down`) keep retrying meanwhile. |
 | WS never connects, REST works | WS endpoint down or URL wrong | Check `server_base_url` (production default `https://bridge.nexusverse.space`) and that `server_url`, if set, is `wss://`. The REST heartbeat keeps liveness while WS is down. |
 | WS connects, then drops repeatedly | Network / server restart | Expected handling: fresh session, 500 ms doubling → 30 s + jitter; pending results re-sent on reconnect; the server re-sends only `pending` commands. Check Diagnostics → self-healing `ws_drop` / `server_restart`. |
 | `session_expired` | Session lapsed | Automatic: re-enrol via `register-device`. If the state is `failed_auth`, a new key is required (see above). |
@@ -70,8 +71,17 @@ before running the e2e trade suites.
 |---|---|
 | `401 Missing or invalid X-API-Key` | Present the key from the secret store (Settings screen shows its status masked; the key itself is never displayed). The key is auto-generated on first run — if it was lost, delete it from the secret store (`NSEBridge` service) and restart the Bridge to generate a new one. |
 | Bridge refuses to start: `refusing non-loopback bind host` | Either bind loopback (default `127.0.0.1`) or set `allow_non_loopback=true` explicitly (config or `NSE_BRIDGE_ALLOW_NON_LOOPBACK=1`) — the mandatory `X-API-Key` still applies. |
-| `GET /health` works but everything else 401s | Normal: `/health` is the unauthenticated liveness probe; all API routes require the key. |
+| `GET /health` works but everything else 401s | Normal: `/health` is the unauthenticated liveness probe; all API routes (and the `/ws/ui` upgrade — header or loopback cookie) require the key. |
+| `/health` says `broker_connected: null` where it used to give true/false | Expected since the light-probe change: `/health` is a light probe by default (cached driver state only, `probe: "light"`) — an MT5 IPC round-trip in a liveness probe made the endpoint slow and could 500. The full IPC probe is opt-in: `/health?probe=full`. `broker_connected: null` means honestly unknown, not disconnected. |
 | Settings changes do not apply | `PUT /settings` applies live; a bad value is skipped, not fatal (check the response for what was applied). Secrets are never accepted in plaintext via config.json — they are migrated to the store. |
+
+## 4a. Launching and querying the Bridge (single instance + CLI)
+
+| Symptom | Meaning / fix |
+|---|---|
+| A new Bridge launch exits immediately with code **2** and prints guidance about an instance already running | Expected — single-instance. The process holds a Windows named mutex (`Local\NSE-MT5-Bridge-SingleInstance`, `nse_bridge/single_instance.py:25`) acquired BEFORE MT5 attach and port bind, so the second copy can never race a live one for the port or the terminal. To inspect the running instance instead of launching a duplicate: `NSE-MT5-Bridge.exe status --json` (or `health --json`, `diagnostics --json`, `mt5 list --json`). Close the running instance first if you really want a second one (e.g. a different `--host/--port` — the mutex is machine-wide regardless of port). |
+| `status --json` exits with code **3** and a structured `BRIDGE_NOT_RUNNING` envelope (`{"ok": false, "error": {"code": "BRIDGE_NOT_RUNNING", ...}}`) | The CLI queried the loopback API and found no live Bridge (`nse_bridge/cli.py:90`). Nothing is wrong with the CLI — start the Bridge, then re-run. Exit-code map (`cli.py:36–41`): 0 ok · 1 usage · 2 another instance already running · 3 bridge not running · 4 operation failed / auth refused · 5 server error. |
+| Query subcommands "boot a second bridge" | They never do: `main.py` dispatches `status|health|diagnostics|mt5 list` BEFORE any serve setup (`main.py:145–149`), so a query cannot acquire the mutex, touch MT5, or bind the port. If you see a boot from a query, you are running an outdated build. |
 
 ## 5. Updates
 

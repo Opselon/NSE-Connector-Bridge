@@ -43,5 +43,11 @@ def register_dashboard(app) -> None:  # type: ignore[no-untyped-def]
         ctx = getattr(request.app.state, "ctx", None)
         key = getattr(getattr(ctx, "settings", None), "local_api_key", "") or ""
         if key:
-            response.set_cookie(LOCAL_API_KEY_COOKIE, key, httponly=True, samesite="strict", path="/api/v1")
+            # Path must cover /ws/ui too: page JS cannot set headers on a
+            # WebSocket upgrade, so the cookie is the only carriage for the
+            # authenticated live feed. Scoped to the loopback origin (the
+            # only place this app is reachable) and still HttpOnly +
+            # SameSite=Strict; the /api/v1 middleware accepts it exactly
+            # as before.
+            response.set_cookie(LOCAL_API_KEY_COOKIE, key, httponly=True, samesite="strict", path="/")
         return response

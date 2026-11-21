@@ -6,6 +6,82 @@ refreshed by the Phase E acceptance verification on branch
 (merged 2026-11-18T10:05:35Z, merge commit `4f01068`, head `aae5075`).
 Dependency IDs D1–D13 are from `docs/GAP-ANALYSIS.md` §4.
 
+## 2026-11-21 refresh (Platform source audit, Bridge nextgen work)
+
+Facts below were verified against the current NSE-Platform `main`
+connector source (`backend/src/modules/connector/`, latest contract
+commit `9f27432` PR #144, 2026-11-21) — not from vendored snapshots:
+
+- **The connector gateway is merged and partly deployed.** Platform
+  PR #107 merged as `aec951c` (2026-11-18) with follow-ups through
+  #144/#146; §1's migration-0054 collision is resolved on Platform
+  main. Live probe from a client machine, 2026-11-21: the WS upgrade
+  endpoint `wss://bridge.nexusverse.space/api/v1/connector/ws`
+  answers with the contract's 401 (auth runs — the connector is
+  serving), while REST `GET /api/v1/connector/releases/latest` timed
+  out twice (15 s / 20 s). D11 is therefore PARTIAL: the WS surface
+  is live, the REST surface is unverified/hanging from the probed
+  network. Re-verify before any live proof run.
+- **New Platform behaviors the Bridge must track (all fixed in
+  #144, 2026-11-21):** (a) `account.type` MUST be present and exactly
+  `"demo"` — missing/live/unknown refused 403 `account_not_authorized`
+  with no binding; the Bridge already omits `type` when MT5 does not
+  report `trade_mode` (`nse_bridge/server/sync.py:664-698`) — contract
+  tests now pin this. (b) Unexpired `delivered`-but-unacked commands
+  are replayed on reconnect (oldest-first, LIMIT 128, non-blocking) —
+  the Bridge's replay cache (§6.2) must dedup them; tested.
+  (c) Server liveness counts ONLY client-originated frames.
+  (d) `batch_id` must parse as a UUID (`Uuid::parse_str`); the Bridge
+  sends uuidv7 (`server/uuid7.py`) — compatible.
+- **§4 update (modify_pending):** the Platform now enforces its own
+  §17.4 gate AND ships it disabled (`MODIFY_PENDING_MIN_VERSION = ""`,
+  `commands.rs:38`) — no minimum connector version is published, so
+  the Bridge gate stays closed exactly as stated below.
+- **§3 update (allowlist widening preconditions):** the §6.4
+  server-side risk gate chain (kill switch, entitlement, signal,
+  positions-batch sanity) is now IMPLEMENTED (`risk_gate.rs`, PR #129)
+  and runs before the grant charge — one of the three "prove the
+  gates" bullets is done; live terminal proof is still owed.
+- **New Platform-side gaps (recorded for the next amendment):**
+  - **D14 — §7.3 account switch is not implemented server-side:**
+    only the FIRST `account` batch binds a device; later account
+    batches with a different login are attributed to the stale
+    binding (`gateway.rs:261-269`). The Bridge detects the switch,
+    resets its checkpoint and re-syncs (§7.3 client half), but the
+    Platform will not re-bind — until the server implements
+    transactional re-binding, an account switch requires manual
+    unbind/re-enrol to attribute correctly.
+  - **D15 — chart frames are accepted and dropped:** §17.1
+    `chart.data`/`chart.tick`/`chart.error` are consumed and ignored
+    ("cache ingestion staged", `ws.rs:387-392`). The Bridge's chart
+    service remains contract-correct; subscribers get no server-side
+    value from these frames today.
+  - **D16 — §2.5 rate-limit budgets are not enforced** (no 429 from
+    connector routes today; the Bridge's 429 handling stays
+    defensive).
+  - **D17 — §10 minimum-connector-version enforcement at
+    validate-key/register-device is not implemented** (consistent
+    with §4 above).
+  - **D18 — `expire_stale` runs only on WS replay**; REST heartbeat
+    never expires stale commands and `pending_commands` counts
+    `pending` only, not `delivered` (`gateway.rs:443-468`).
+  - **D19 — §3.5 release signatures are not published:**
+    `releases/latest` hardcodes `signature: null` until the signing
+    pipeline lands (`management.rs:810-812`). The Bridge updater and
+    `scripts/install.ps1` verify SHA-256 now and report the missing
+    signature honestly; neither fabricates a key.
+  - **D20 — sync batches are stored raw** (`connector_events` /
+    `account_snapshots`); the §3.3 "MUST feed the same services"
+    ingestion into `trading_import` is a staged follow-up.
+  - **D21 — `sync_request`/`ack` WS frames are documented but never
+    sent** by any server code path (contract §5.2; `ws.rs:5` only).
+    The Bridge parses them and must not depend on them.
+- **§12 update:** the "No `.ico` asset" item is CLOSED (committed
+  `assets/icon.ico` + `scripts/make_icon.py`, referenced by
+  `bridge.spec` and the installer; integrity gate
+  `tests/unit/test_icon_asset.py`).
+
+
 Status map (Phase E, refreshed): D1 open, D2 open, D3 open, D4 open (gated),
 D5 open (local side now implemented, wire still missing),
 D6 open (local collector now exists AND is wired in production, upload

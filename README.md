@@ -9,12 +9,12 @@ intelligence, orchestration, and decisions. This is infrastructure, not a
 trading product: there is no local AI, no autonomous trading, no backtest,
 and no indicator/risk engine in the client.
 
-- **Local capability:** 90 commands over a loopback REST API (see
+- **Local capability:** 91 commands over a loopback REST API (see
   [docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md)).
 - **Server channel:** exactly 3 operations in CONTRACT v1
   (`close_position`, `modify_sl_tp`, `modify_pending` — the last
   capability-gated) — see [docs/API_PROTOCOL.md](docs/API_PROTOCOL.md).
-  The full 90-command registry stays available **locally**; the server
+  The full 91-command registry stays available **locally**; the server
   channel enforces the 3-op allowlist at the boundary. Never the reverse.
 - **Packaged as a single-file Windows `.exe`** (x64), built by CI.
 
@@ -90,14 +90,32 @@ py -3.13 -m venv .venv          # Python 3.12/3.13
 ```bash
 .venv/Scripts/python -m PyInstaller bridge.spec --noconfirm --clean
 # → dist/NSE-MT5-Bridge.exe  (CI also builds it on every push — see Actions)
-dist\NSE-MT5-Bridge.exe                  # GUI (native window, browser fallback)
+dist\NSE-MT5-Bridge.exe                  # desktop application (default experience)
+dist\NSE-MT5-Bridge.exe --console        # foreground console service (no GUI)
 dist\NSE-MT5-Bridge.exe --gui none       # headless service mode
 dist\NSE-MT5-Bridge.exe --diagnostic     # diagnostic console mode (DEBUG telemetry + logs)
+
+# Machine-readable operations against the RUNNING bridge (loopback API,
+# never a second instance):
+dist\NSE-MT5-Bridge.exe status --json
+dist\NSE-MT5-Bridge.exe health --json
+dist\NSE-MT5-Bridge.exe diagnostics --json
+dist\NSE-MT5-Bridge.exe mt5 list --json
 ```
 
+Full CLI contract (envelope, exit codes): [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
+
 Releases are cut from tags only (`v1.2.3` stable, `v1.2.3-rc.1`
-prerelease) and ship the exe + `.sha256` + `release-manifest.json`.
-See [docs/BUILD.md](docs/BUILD.md) and [docs/RELEASE.md](docs/RELEASE.md).
+prerelease) and ship the installer + exe + `.sha256` + `release-manifest.json`.
+Direct install from GitHub Releases (SHA-256 verified, idempotent):
+
+```powershell
+$script = "$env:TEMP\nse-bridge-install.ps1"
+Invoke-WebRequest "https://raw.githubusercontent.com/Opselon/NSE-Connector-Bridge/main/scripts/install.ps1" -OutFile $script
+& $script -Channel Stable
+```
+
+See [docs/INSTALLATION.md](docs/INSTALLATION.md), [docs/BUILD.md](docs/BUILD.md) and [docs/RELEASE.md](docs/RELEASE.md).
 
 ## Configuration
 
@@ -112,6 +130,7 @@ screen / `PUT /api/v1/settings`. Key fields:
 | `local_api_key` | (secret store) | mandatory `X-API-Key` for /api/v1, auto-generated on first run |
 | `server_base_url` | `https://bridge.nexusverse.space` | REST base; WS is derived (`wss://…/api/v1/connector/ws`) |
 | `server_url` | empty | explicit WS URL override (empty = derived from base; must be `wss://`) |
+| `network_proxy` | empty | explicit proxy URL for ALL platform traffic — `socks5://host:port`, `socks5h://`, `socks4://`, `http://`, `https://`; empty = direct. Needed on networks whose direct route to the platform hangs (verified 2026-11-21). Change needs a restart. |
 | `device_id` | auto | persistent bridge identity |
 | `magic` | none | NO default magic — stamped only when supplied per command or set explicitly |
 | `bot_symbol` | (empty) | NO default symbol — callers pass it per command |
@@ -127,7 +146,7 @@ with guidance instead.
 
 ## Command surface
 
-Local capability (90 commands, `POST /api/v1/{name}`) vs server channel
+Local capability (91 commands, `POST /api/v1/{name}`) vs server channel
 (3 ops, CONTRACT v1 §6.1) — listed separately, never mixed, in
 [docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md). Every local
 response: `{"ok": true, "data": …}` or
@@ -181,7 +200,7 @@ for the honest verification status.
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, data flow, state machines |
 | [docs/API_PROTOCOL.md](docs/API_PROTOCOL.md) | REST + WS contract (§3/§5/§6/§17.1), frames, retry policy |
-| [docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md) | all 90 local commands + the 3 server ops, separately |
+| [docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md) | all 91 local commands + the 3 server ops, separately |
 | [docs/SECURITY.md](docs/SECURITY.md) | secret store, auth, redaction, threat model |
 | [docs/BUILD.md](docs/BUILD.md) | local build, PyInstaller spec, versioning |
 | [docs/RELEASE.md](docs/RELEASE.md) | release process, verification status, known gaps |
@@ -189,6 +208,10 @@ for the honest verification status.
 | [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Windows/x64, Python, MT5 builds, ARM64 |
 | [docs/PLATFORM-GAPS.md](docs/PLATFORM-GAPS.md) | what must change on the Platform side |
 | [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) | verdict per acceptance criterion (§15) |
+| [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) | serve modes, CLI JSON envelope, exit codes |
+| [docs/DESKTOP_APPLICATION.md](docs/DESKTOP_APPLICATION.md) | Control Center architecture, screens, onboarding |
+| [docs/INSTALLATION.md](docs/INSTALLATION.md) | installer, direct GitHub install, portable exe |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | measured baselines, methodology, before/after |
 | [docs/openapi.json](docs/openapi.json) | OpenAPI schema, re-exported from the registry |
 
 ## Known environment notes

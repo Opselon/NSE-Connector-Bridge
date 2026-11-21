@@ -36,6 +36,7 @@ inert fixtures and never perform a real download.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -442,6 +443,12 @@ class Updater:
         self._error: UpdateError | None = None
         self._detail = ""
         self._staged = _StagedInfo()
+        # Serialize check()/download(): both mutate the same state
+        # machine and are reachable from concurrent management calls —
+        # two interleaved downloads could double-stage or corrupt the
+        # staged-state file. asyncio.Lock (single loop, non-reentrant —
+        # download() calls the UNLOCKED internal check).
+        self._op_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     @property
@@ -541,10 +548,15 @@ class Updater:
     async def check(self) -> dict[str, Any]:
         """Poll releases/latest; report availability / incompatibility.
 
-        Never downloads anything. Mirrors the GET /updates/latest
-        semantics: no server client → ``unavailable``; no API key →
-        ``not_configured``; server failure → ``error``/``CHECK_FAILED``.
+        Serialized against download() (see _op_lock). Never downloads
+        anything. Mirrors the GET /updates/latest semantics: no server
+        client → ``unavailable``; no API key → ``not_configured``;
+        server failure → ``error``/``CHECK_FAILED``.
         """
+        async with self._op_lock:
+            return await self._check_locked()
+
+    async def _check_locked(self) -> dict[str, Any]:
         self._state = "checking"
         self._error = None
         self._detail = "checking for updates…"
@@ -595,13 +607,18 @@ class Updater:
     async def download(self) -> dict[str, Any]:
         """Download + verify + stage the latest release.
 
-        Refuses (structured error, nothing staged) when: no update was
-        found, the release needs a newer minimum connector version, no
-        public key is configured, the signature/SHA-256 is missing, or
+        Serialized against check()/download() (see _op_lock). Refuses
+        (structured error, nothing staged) when: no update was found,
+        the release needs a newer minimum connector version, no public
+        key is configured, the signature/SHA-256 is missing, or
         verification fails. A failed download never leaves a staged file.
         """
+        async with self._op_lock:
+            return await self._download_locked()
+
+    async def _download_locked(self) -> dict[str, Any]:
         if self._latest is None:
-            await self.check()
+            await self._check_locked()
         if self._state == "incompatible":
             return self.status()  # error already recorded by check()
         if self._state not in ("update_available", "staged"):
@@ -707,6 +724,7 @@ class Updater:
         self.staging_dir.mkdir(parents=True, exist_ok=True)
         version = _sanitize_version(rel.version or "unknown")
         final = self.staging_dir / f"nse-bridge-{version}.exe"
+        self._prune_stale_staged_artifacts(keep=final)
         tmp = self.staging_dir / f".{final.name}.tmp-{os.getpid()}"
         tmp.write_bytes(data)
         os.replace(tmp, final)
@@ -733,6 +751,27 @@ class Updater:
         )
         self.write_apply_script()
         return final
+
+    def _prune_stale_staged_artifacts(self, *, keep: Path) -> None:
+        """Remove previously staged exes + temp files (each verified
+        download used to accumulate a full exe per version — every
+        staged artifact except the incoming one is obsolete, and a
+        stale one is NEVER installed: the apply script only ever copies
+        the file recorded in update-state.json, which this call
+        invalidates below via the fresh state write)."""
+        try:
+            for entry in self.staging_dir.iterdir():
+                if entry.is_dir():
+                    continue
+                if entry == keep:
+                    continue
+                if entry.name == "update-state.json" or entry.name.startswith("apply_update"):
+                    continue
+                if entry.name.startswith("nse-bridge-") and (entry.name.endswith(".exe") or ".tmp-" in entry.name):
+                    entry.unlink(missing_ok=True)
+                    logger.info("[UPDATER] pruned stale staged artifact {}", entry.name)
+        except OSError as exc:  # pruning is housekeeping, never fatal
+            logger.debug("[UPDATER] staged-artifact pruning skipped: {}", type(exc).__name__)
 
     def write_apply_script(self) -> Path:
         """Write the staged restart-installer script (our own code).

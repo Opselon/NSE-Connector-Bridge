@@ -44,7 +44,7 @@ from nse_bridge.updates import (
 
 pytestmark = pytest.mark.unit
 
-ARTIFACT = b"NSE-BRIDGE-FAKE-ARTIFACT-v1.2.0" + b"\x00" * 64
+ARTIFACT = b"NSE-BRIDGE-FAKE-ARTIFACT-v99.99.99" + b"\x00" * 64
 OTHER_BYTES = bytes([ARTIFACT[0] ^ 0xFF]) + ARTIFACT[1:]  # same length, different bytes
 
 
@@ -76,10 +76,10 @@ def _public_key(pub_b64):
     return Ed25519PublicKey.from_public_bytes(base64.b64decode(pub_b64))
 
 
-def _release(priv, data, *, version="1.2.0", min_version="1.0.0", signature=True, sha=True, size=None):
+def _release(priv, data, *, version="99.99.99", min_version="1.0.0", signature=True, sha=True, size=None):
     return ReleaseInfo(
         version=version,
-        download_url="https://example.invalid/bridge-1.2.0.exe",
+        download_url="https://example.invalid/bridge-99.99.99.exe",
         sha256=hashlib.sha256(data).hexdigest() if sha else None,
         size_bytes=len(data) if size is None else size,
         min_connector_version=min_version,
@@ -206,7 +206,7 @@ async def test_check_reports_update_available(settings, keypair):
     status = await updater.check()
     assert status["state"] == "update_available"
     assert status["update_available"] is True
-    assert status["latest"]["version"] == "1.2.0"
+    assert status["latest"]["version"] == "99.99.99"
     assert status["latest"]["signature_present"] is True
     assert status["error"] is None
 
@@ -223,7 +223,7 @@ async def test_check_incompatible_min_version(settings, keypair):
     priv, _ = keypair
     updater = _updater(
         settings,
-        FakeRestClient(release=_release(priv, ARTIFACT, version="1.2.0", min_version="9.9.9")),
+        FakeRestClient(release=_release(priv, ARTIFACT, version="99.99.99", min_version="9.9.9")),
     )
     status = await updater.check()
     assert status["state"] == "incompatible"
@@ -263,7 +263,7 @@ async def test_download_stages_verified_file(settings, keypair):
     status = await updater.download()
     assert status["state"] == "staged", status
     assert status["restart_required"] is True
-    assert status["staged_version"] == "1.2.0"
+    assert status["staged_version"] == "99.99.99"
     assert status["verified"] is True
     staged = _staged_files(settings)
     assert len(staged) == 1
@@ -333,7 +333,7 @@ async def test_download_refuses_min_version_without_downloading(settings, keypai
 
     updater = _updater(
         settings,
-        FakeRestClient(release=_release(priv, ARTIFACT, version="1.2.0", min_version="9.9.9")),
+        FakeRestClient(release=_release(priv, ARTIFACT, version="99.99.99", min_version="9.9.9")),
         transport=httpx.MockTransport(handler),
     )
     status = await updater.download()
@@ -624,12 +624,12 @@ def test_status_reports_persisted_staged_update(settings, keypair):
     # A staged update from a previous process shows up via update-state.json.
     staging = settings.data_dir / "updates"
     staging.mkdir(parents=True)
-    staged = staging / "nse-bridge-1.2.0.exe"
+    staged = staging / "nse-bridge-99.99.99.exe"
     staged.write_bytes(ARTIFACT)
     (staging / "update-state.json").write_text(
         json.dumps(
             {
-                "version": "1.2.0",
+                "version": "99.99.99",
                 "staged_path": str(staged),
                 "sha256": hashlib.sha256(ARTIFACT).hexdigest(),
                 "size_bytes": len(ARTIFACT),
@@ -640,7 +640,7 @@ def test_status_reports_persisted_staged_update(settings, keypair):
     updater = Updater(settings, rest_client_getter=lambda: None)
     status = updater.status()
     assert status["state"] == "staged"
-    assert status["staged_version"] == "1.2.0"
+    assert status["staged_version"] == "99.99.99"
     assert status["restart_required"] is True
 
 
@@ -699,7 +699,7 @@ def test_updates_check_download_status_endpoints(client, keypair):
     resp = http.get("/api/v1/updates/status", headers=_auth(ctx))
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
-    assert data["staged_version"] == "1.2.0"
+    assert data["staged_version"] == "99.99.99"
     assert data["update_public_key_configured"] is True
     assert _staged_files(settings) != []
 

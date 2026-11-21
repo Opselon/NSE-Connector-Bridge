@@ -77,7 +77,14 @@ class DisconnectResponse(BaseModel):
 )
 def get_mt5_connection_status(ctx: BridgeContext, params: None) -> dict[str, Any]:
     state = ctx.driver.connection_state_dict()
-    terminal_raw = ctx.driver.refresh_terminal() or {}
+    try:
+        terminal_raw = ctx.driver.refresh_terminal() or {}
+    except Exception as exc:  # noqa: BLE001 — the liveness probe is best-effort:
+        # a host with MT5 installed but not attachable (dead IPC, half-
+        # initialized terminal) must report an honest degraded status,
+        # never turn the status endpoint itself into an HTTP 500.
+        logger.debug("[CONN] terminal liveness probe degraded: {}", type(exc).__name__)
+        terminal_raw = {}
     code = state.get("diagnostic_code")
     return {
         "terminal": {

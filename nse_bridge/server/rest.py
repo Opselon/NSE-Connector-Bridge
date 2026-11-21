@@ -44,6 +44,7 @@ policy: 429 and 5xx are retryable with backoff (bounded attempts);
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -53,7 +54,7 @@ import httpx
 from loguru import logger
 
 from .. import BRIDGE_VERSION
-from ..config import validate_server_base_url
+from ..config import validate_network_proxy, validate_server_base_url
 from .errors import ServerError, ServerErrorCode, parse_error_response
 
 if TYPE_CHECKING:
@@ -182,6 +183,7 @@ class RestClient:
         enrolment: Any | None = None,
     ) -> None:
         validate_server_base_url(settings.server_base_url, environment=settings.environment)
+        validate_network_proxy(settings.network_proxy)
         self.settings = settings
         self.device_id = device_id
         self.api_key = api_key if api_key is not None else settings.server_token
@@ -227,12 +229,18 @@ class RestClient:
             # ambient env proxy. (Also: some hosts export a NO_PROXY
             # with bare IPv6 literals that httpx cannot parse at
             # construction time — the client must not fail to construct
-            # because of the ambient environment.) Proxy support, if
-            # ever needed, must come from explicit Bridge config.
+            # because of the ambient environment.) Proxy support comes
+            # ONLY from explicit Bridge config (settings.network_proxy)
+            # — never the ambient environment.
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 transport=self._transport,
-                timeout=httpx.Timeout(30.0),
+                # Granular timeouts: a dead host fails on CONNECT in
+                # seconds instead of hanging the full 30 s read budget.
+                timeout=httpx.Timeout(30.0, connect=10.0),
+                # Explicit proxy only: the sanctioned route on networks
+                # whose direct path to the Platform is blocked/degraded.
+                proxy=self.settings.network_proxy or None,
                 trust_env=False,
             )
         return self._client
@@ -276,6 +284,12 @@ class RestClient:
         await self.close()
 
     # ------------------------------------------------------------------
+    def _jittered_backoff(self, attempt: int) -> float:
+        """Exponential backoff with ±15% jitter (rate-limit storms from
+        many bridges must de-synchronize; deterministic backoff
+        re-aligns every retry onto the same wall-clock window)."""
+        return self.retry_base_s * (2**attempt) * random.uniform(0.85, 1.15)
+
     @staticmethod
     def _retry_after(headers: httpx.Headers) -> float | None:
         raw = headers.get("Retry-After")
@@ -300,6 +314,7 @@ class RestClient:
         json_body: dict[str, Any] | None,
         *,
         allow_reauth: bool = True,
+        timeout: httpx.Timeout | None = None,
         _reattempted: bool = False,
     ) -> Any:
         """Register the awaiting task for cancellation, then run it.
@@ -307,17 +322,19 @@ class RestClient:
         ``asyncio.current_task()`` is the task that owns this request;
         ``cancel_all()`` cancels it, and ``CancelledError`` propagates
         out of ``_request_inner`` untouched (never converted to a
-        ``ServerError``, never retried).
+        ``ServerError``, never retried). ``timeout`` overrides the
+        client default per call (e.g. a tighter budget for sync
+        batches, which hold the flush loop while they run).
         """
         task = asyncio.current_task()
         if task is None:
             return await self._request_inner(
-                method, path, json_body, allow_reauth=allow_reauth, _reattempted=_reattempted
+                method, path, json_body, allow_reauth=allow_reauth, timeout=timeout, _reattempted=_reattempted
             )
         self._inflight.add(task)
         try:
             return await self._request_inner(
-                method, path, json_body, allow_reauth=allow_reauth, _reattempted=_reattempted
+                method, path, json_body, allow_reauth=allow_reauth, timeout=timeout, _reattempted=_reattempted
             )
         finally:
             self._inflight.discard(task)
@@ -329,11 +346,14 @@ class RestClient:
         json_body: dict[str, Any] | None,
         *,
         allow_reauth: bool = True,
+        timeout: httpx.Timeout | None = None,
         _reattempted: bool = False,
     ) -> Any:
         """One request with the contract retry/reauth policy (§3.6, §3.2).
 
-        - 429 / 5xx / transport errors: bounded retries with backoff.
+        - 429 / 5xx / transport errors: bounded retries with backoff
+          (exponential, ±15% jitter so a fleet of bridges does not
+          re-synchronize its retries onto the server's outage window).
         - 401 on a non-auth endpoint: re-enrol via register-device ONCE,
           then retry once. If register-device itself 401s, the error
           propagates (the user must issue a new key).
@@ -343,7 +363,7 @@ class RestClient:
         last_error: ServerError | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                response = await client.request(method, path, json=json_body, headers=self._headers())
+                response = await client.request(method, path, json=json_body, headers=self._headers(), timeout=timeout)
             except httpx.TransportError as exc:
                 last_error = ServerError(
                     ServerErrorCode.TRANSPORT_ERROR,
@@ -352,7 +372,7 @@ class RestClient:
                 )
                 logger.warning("[REST] transport error on {} (attempt {}): {}", path, attempt, type(exc).__name__)
                 if attempt < self.max_retries:
-                    await self._sleep(self.retry_base_s * (2**attempt))
+                    await self._sleep(self._jittered_backoff(attempt))
                     continue
                 raise last_error from exc
             if response.status_code == 401 and allow_reauth and path not in _NO_REAUTH_PATHS and not _reattempted:
@@ -370,7 +390,9 @@ class RestClient:
                     self.enrolment.note_reauth_succeeded()
                 else:
                     await self.register_device()  # raises if the key itself is bad
-                return await self._request(method, path, json_body, allow_reauth=False, _reattempted=True)
+                return await self._request(
+                    method, path, json_body, allow_reauth=False, timeout=timeout, _reattempted=True
+                )
             if response.status_code in (429,) or response.status_code >= 500:
                 err = parse_error_response(
                     response.status_code,
@@ -379,7 +401,7 @@ class RestClient:
                 )
                 last_error = err
                 if attempt < self.max_retries:
-                    delay = err.retry_after_s if err.retry_after_s is not None else self.retry_base_s * (2**attempt)
+                    delay = err.retry_after_s if err.retry_after_s is not None else self._jittered_backoff(attempt)
                     logger.warning(
                         "[REST] {} on {} (attempt {}) — backing off {:.1f}s",
                         response.status_code,
@@ -449,8 +471,14 @@ class RestClient:
         The REST 200 ack is authoritative (§5.2: the WS ``ack`` frame
         is informational only). ``accepted: false`` MUST carry an error
         object — a missing one is malformed.
+
+        A TIGHTER per-request timeout than the client default: the
+        flush loop holds its lock for the whole send (worst case =
+        attempts × timeout + backoff), so a half-dead server must not
+        stretch one batch to the full 30 s read budget. Batches are
+        idempotent (batch_id), so the bounded retries stay safe.
         """
-        payload = await self._request("POST", PATH_SYNC_BATCH, batch)
+        payload = await self._request("POST", PATH_SYNC_BATCH, batch, timeout=httpx.Timeout(15.0, connect=5.0))
         if not isinstance(payload, dict):
             raise ServerError(ServerErrorCode.MALFORMED_RESPONSE, "sync/batch returned a non-object response")
         accepted = bool(payload.get("accepted", False))
@@ -502,10 +530,13 @@ class RestClient:
     async def releases_latest(self) -> ReleaseInfo:
         """§3.5 — signed artifact metadata for the updater (read-only).
 
-        The download/install + SHA-256/Ed25519 verification belong to
-        the updater (Phase 5); nothing is downloaded here.
+        A TIGHT per-request budget: this small metadata read backs
+        GET /updates/latest — when the Platform dial hangs (half-
+        deployed gateway, dead uplink), a full default budget × the
+        bounded retries would stall the endpoint for minutes. The
+        updater's artifact download has its own, separate timeout.
         """
-        payload = await self._request("GET", PATH_RELEASES_LATEST, None)
+        payload = await self._request("GET", PATH_RELEASES_LATEST, None, timeout=httpx.Timeout(10.0, connect=5.0))
         if not isinstance(payload, dict):
             raise ServerError(ServerErrorCode.MALFORMED_RESPONSE, "releases/latest returned a non-object response")
         return ReleaseInfo(

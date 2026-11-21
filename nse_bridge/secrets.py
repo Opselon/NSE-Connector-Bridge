@@ -26,8 +26,11 @@ import base64
 import json
 import secrets as _secrets
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from loguru import logger
 
 if TYPE_CHECKING:
     from .config import BridgeSettings
@@ -217,7 +220,33 @@ class DpapiSecretStore(SecretStore):
         try:
             return dict(json.loads(self._path.read_text(encoding="utf-8")))
         except Exception as exc:
+            # Structural damage (truncated/duplicated write, disk error):
+            # quarantine the file BEFORE any caller regenerates over it,
+            # so the bytes are preserved for inspection and the reset is
+            # loud instead of a silent credential loss. A store that is
+            # valid JSON but fails DPAPI per-entry is NOT quarantined —
+            # that usually means a different Windows user/profile and
+            # the file may still be decryptable by its owner.
+            quarantined = self._quarantine_corrupt_file()
+            if quarantined is not None:
+                logger.error(
+                    "[SECRETS] {} was unreadable ({}) — quarantined as {}; "
+                    "a fresh store will be created and the previous local API "
+                    "key will stop working",
+                    self._path.name,
+                    exc,
+                    quarantined.name,
+                )
             raise SecretStoreError(f"cannot read DPAPI secret file: {exc}") from exc
+
+    def _quarantine_corrupt_file(self) -> Path | None:
+        """Rename the damaged store aside (best-effort, timestamped)."""
+        try:
+            target = self._path.with_name(f"{self._path.name}.corrupt-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}")
+            self._path.rename(target)
+            return target
+        except OSError:
+            return None
 
     def _write_all(self, values: dict[str, str]) -> None:
         self._path.write_text(json.dumps(values, indent=2), encoding="utf-8")
@@ -415,9 +444,13 @@ def initialize_secrets(settings: BridgeSettings, *, strict: bool = False) -> lis
         load_secrets_into_settings(settings, store)
         ensure_local_api_key(settings, store)
         return migrated
-    except SecretStoreError:
+    except SecretStoreError as exc:
         if strict:
             raise
+        # Never silent: a swallowed store failure means a fresh local
+        # API key is about to be generated and the old credential will
+        # stop working — the operator must see why.
+        logger.error("[SECRETS] secret store unavailable: {} — continuing with an empty store", exc)
         return []
 
 

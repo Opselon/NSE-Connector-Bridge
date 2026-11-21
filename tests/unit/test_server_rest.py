@@ -44,6 +44,11 @@ def _record_sleep(sleeps: list[float]):
     return _sleep
 
 
+def _sleep_in_band(delay: float, base: float) -> bool:
+    """True when ``delay`` is the base backoff within the ±15% jitter band."""
+    return base * 0.85 <= delay <= base * 1.15
+
+
 def _ok_validate(request: httpx.Request) -> httpx.Response:
     assert request.headers["Authorization"] == "Bearer tok-SECRET"
     assert request.headers["X-NSE-Device-Id"] == "dev-1"
@@ -165,7 +170,9 @@ async def test_send_batch_429_then_success_backs_off():
     ack = await client.send_batch({"batch_id": "b1", "kind": "account", "items": {}, "count": 1})
     assert ack.accepted is True and ack.batch_id == "b1"
     assert len(calls) == 2
-    assert client._sleeps == [0.5]  # retry_base_s, first backoff step
+    # retry_base_s first backoff step, ±15% jitter (de-synchronized
+    # retries — exact-value assertions would pin a synchronized fleet).
+    assert _sleep_in_band(client._sleeps[0], base=0.5)
     await client.close()
 
 
@@ -185,7 +192,9 @@ async def test_send_batch_5xx_retried_then_gives_up():
     assert excinfo.value.code is ServerErrorCode.SERVER_UNAVAILABLE
     assert excinfo.value.retryable is True
     assert len(calls) == 4  # initial + 3 retries
-    assert client._sleeps == [0.5, 1.0, 2.0]  # doubling backoff
+    # Doubling backoff (±15% jitter): each step stays within its band
+    # and strictly within the doubling envelope of the previous one.
+    assert [_sleep_in_band(s, base=0.5 * 2**i) for i, s in enumerate(client._sleeps)] == [True, True, True]
     await client.close()
 
 

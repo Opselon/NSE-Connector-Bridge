@@ -28,6 +28,12 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+
+#: Bound on the serialized worker's pending jobs. Far above any
+#: legitimate burst (all pollers, the GUI, and the server-command path
+#: are themselves bounded); a full queue means the worker is stalled —
+#: callers must fail fast instead of queuing unbounded work.
+MT5_JOB_QUEUE_MAX = 256
 from typing import Any
 
 from loguru import logger
@@ -596,7 +602,10 @@ class Mt5Driver:
 
     def __init__(self, settings: BridgeSettings) -> None:
         self.settings = settings
-        self._jobs: queue.Queue[tuple[Callable[[Any], Any], Future]] = queue.Queue()
+        # Bounded job queue (see MT5_JOB_QUEUE_MAX): a stalled worker
+        # produces fast, clear failures instead of unbounded queued
+        # work while every caller waits out its own future timeout.
+        self._jobs: queue.Queue[tuple[Callable[[Any], Any], Future]] = queue.Queue(maxsize=MT5_JOB_QUEUE_MAX)
         self._thread = threading.Thread(name="mt5-worker", target=self._work, daemon=True)
         self._mt5: Any = None
         self._connected = False
@@ -642,7 +651,17 @@ class Mt5Driver:
         """Execute job(mt5) on the worker thread; record diagnostics + metrics."""
         name: str = op or str(getattr(job, "__name__", "unnamed_job"))
         fut: Future = Future()
-        self._jobs.put((job, fut))
+        try:
+            self._jobs.put_nowait((job, fut))
+        except queue.Full as exc:
+            # Backpressure, not silent waiting: the worker is stalled
+            # or hopelessly behind — fail in milliseconds rather than
+            # queue behind 60 s timeouts.
+            error = f"MT5 job queue full ({MT5_JOB_QUEUE_MAX}) — the serialized worker is stalled or overloaded"
+            self._record(name, False, 0.0, context=context, error=error)
+            from ..errors import BridgeError, ErrorCode
+
+            raise BridgeError(ErrorCode.MT5_CALL_FAILED, error) from exc
         t0 = time.perf_counter()
         try:
             result = fut.result(timeout=timeout)

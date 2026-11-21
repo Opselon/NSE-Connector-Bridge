@@ -37,6 +37,22 @@
    # must equal the .sha256 sidecar and the manifest entry
    ```
 
+Users on Windows can install/upgrade directly from GitHub Releases
+with `scripts/install.ps1` (documented in docs/INSTALLATION.md): it
+resolves the latest release of the requested channel (`-Channel
+Stable|Prerelease`, or pin `-Version`), verifies SHA-256 three ways
+(manifest entry + `.sha256` sidecar + recomputed file hash), and
+installs the setup exe (default, `-Silent` supported) or just the
+standalone exe (`-Portable`), with `-InstallDir`, `-Force`,
+`-VerifyOnly` and honest exit codes 0–7 (0 success or verified ·
+1 usage error · 2 unsupported Windows version/arch · 3 GitHub
+unreachable · 4 expected artifact missing · 5 checksum mismatch ·
+6 installer failed · 7 post-install verification failed — see the
+header of `scripts/install.ps1`). A release published without a
+signature is reported as such, not silently accepted: the
+signature-gap is stated in the script output where the verification
+summary prints.
+
 Stable and prerelease are separate by tag name: any tag containing
 `-` (e.g. `v1.2.3-rc.1`) is published as a prerelease; `v1.2.3` is
 stable. The two are never mixed in one release. No release is ever
@@ -57,6 +73,11 @@ cut from an untested build — the `release` job needs
   (version, download_url, sha256, size_bytes, min_connector_version,
   Ed25519 signature, released_at); GitHub Releases remains the
   artifact host behind that endpoint.
+
+Consumers of that artifact set: `scripts/install.ps1` is the
+documented one-command installer/upgrader over GitHub Releases
+(SHA-256 manifest + sidecar + file triple verification; see §1
+step 6 above and docs/INSTALLATION.md).
 
 ## 3. Verification status (honest)
 
@@ -81,12 +102,12 @@ aspirational — it states what was actually executed.
 | OpenAPI re-export | **PROVEN** | `scripts/export_openapi.py docs/openapi.json` → 105 paths (was 104 — the committed file was stale; the re-export adds the close-by endpoint plus B2's terminal-discovery description updates); export is deterministic (`diff` clean) |
 | Version files | **PROVEN** | `scripts/write_version_info.py --check` clean |
 | Release manifest script | **PROVEN (logic)** | exercised against a dummy file; checksum matches `sha256sum` |
-| Windows CI (lint + tests + exe build) | **NOT PROVEN HERE** | No Windows runner on this VM. Proven only when the `build-windows` job runs on GitHub (PR CI). The spec + workflow are written for it; the build has not executed. |
+| Windows CI (lint + tests + exe build) | **NOT PROVEN HERE** (this VM; runs on GitHub) | No Windows runner on this VM. Proven when the `build-windows` job runs on GitHub (PR CI). The job now smoke-tests the frozen exe far beyond `--help`: `scripts/smoke_exe_local.ps1` boots it headless and asserts `/health` ready, `/ui` 200, CLI JSON parse + exit 0, and a second launch exiting 2 (single-instance). |
 | Windows installer (Inno Setup) | **NOT PROVEN HERE** | `.iss` added in this PR; compiles only on the Windows runner (`build-windows` job). Proven when the PR's CI builds the setup exe. |
-| Real-MT5 e2e (104 tests) | **NOT PROVEN HERE** | Windows-with-MT5-only, manual. On Linux they fail loudly by design (104 errors, 0 passes). The earlier "104/104 e2e" claim in Platform PR #107 was never verified by this team. |
-| Live Platform verification | **NOT PROVEN HERE** | `bridge.nexusverse.space` is unverified from this VM; integration tests run against the CONTRACT-v1 mock server. Blocked on the Platform side (PR #103 vs #107 migration-0054 duplication, docs/PLATFORM-GAPS.md §1). |
+| Real-MT5 e2e (104 tests) | **91/104 PROVEN (live demo terminal, 2026-11-21)** | Run on the live demo MT5 terminal on Windows: **91 passed, 13 failed — every failure is retcode `10018` (`MARKET_CLOSED`) or a stale tick from the same cause.** 2026-11-21 was a Saturday: the market is closed, so the trade/tick suites are calendar-blocked, environmental — classified **NOT code defects**. The 13 market-gated tests are to be re-run during market hours (Sun 22:00 GMT – Fri 22:00 GMT); see docs/ACCEPTANCE.md for the dated record. On Linux they still fail loudly by design (104 errors, 0 passes) — that proves test honesty, not e2e success. The earlier "104/104 e2e" claim in Platform PR #107 was never verified by this team. |
+| Live Platform verification | **PARTIAL (2026-11-21)** | CLI JSON contract (`status/health/mt5 list --json`) verified against a live bridge; real-MT5 e2e ran against the live demo terminal (row above). Platform REST reachability is intermittent server-side — verified 2026-11-21: `subscribe.nexusverse.space` answered 200 while `bridge.nexusverse.space` hung (see docs/TROUBLESHOOTING.md §3), which blocks a live enrolment round-trip (docs/PLATFORM-GAPS.md D11, partial). |
 | ARM64 | **UNSUPPORTED** | No ARM64 build is published (docs/COMPATIBILITY.md). |
-| Icon | **MISSING** | No `.ico` asset in the repo; no binary icon fabricated. |
+| Icon | **PROVEN** | `assets/icon.ico` generated by `scripts/make_icon.py`; wired into `bridge.spec` + Inno `SetupIconFile`; integrity gate `tests/unit/test_icon_asset.py`. The previous "no .ico asset" gap is CLOSED. |
 
 ## 4. Final suite run (Phase 6 commit)
 
@@ -106,8 +127,12 @@ Run after committing, from the committed tree:
 
 ## 5. Known gaps (explicit, not hidden)
 
-1. **No icon.** No `.ico` asset exists in the repo. The exe ships
-   with PyInstaller's default icon until a real one is supplied.
+1. **Icon — CLOSED.** The original NSE-branded `.ico` is generated
+   by `scripts/make_icon.py` into `assets/icon.ico`, wired into both
+   the exe (`bridge.spec:65`) and the installer
+   (`SetupIconFile=..\assets\icon.ico`), and gated by
+   `tests/unit/test_icon_asset.py`. Regenerate via the script; never
+   hand-edit the binary.
 2. **Release-signing public key missing.** `NSE_BRIDGE_UPDATE_PUBLIC_KEY`
    is unprovisioned and no bundled `update_public_key.b64` exists.
    The updater checks but can never install until the operator
@@ -153,7 +178,7 @@ Run after committing, from the committed tree:
 ## 6. Acceptance
 
 The verdict per acceptance criterion (§15 of the user spec) is in
-[docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) — pass / partial /
+[docs/ACCEPTANCE.md](ACCEPTANCE.md) — pass / partial /
 not-proven, honestly, with no inflation. Summary: the client-only
 separation, security, protocol, telemetry, self-healing, docs, and
 Linux test gates pass; Windows CI, real-MT5 e2e, live Platform, and

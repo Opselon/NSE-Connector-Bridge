@@ -30,8 +30,17 @@ compute (§7) — but no engine is implemented now.
                                   ▲  outbound only
                                   │  Bearer + X-NSE-Device-Id
 ┌──────────────────── NSE-MT5-Bridge.exe ────────────────────────┐
-│ main.py ── entrypoint, CLI (--host/--port/--gui/--no-connect/   │
-│              --diagnostic), boot, uvicorn thread, GUI window    │
+│ main.py ── entrypoint, CLI: serve flags (--host/--port/--gui/   │
+│              --no-connect/--diagnostic/--console), query        │
+│              subcommands (status|health|diagnostics|mt5 list,   │
+│              --json; dispatched BEFORE any serve setup — they   │
+│              query the RUNNING instance and never boot a second │
+│              one, see nse_bridge/cli.py), boot, uvicorn thread, │
+│              GUI window; single-instance named mutex            │
+│              (Local\NSE-MT5-Bridge-SingleInstance,              │
+│              nse_bridge/single_instance.py) is acquired before  │
+│              MT5 attach / port bind — a second instance exits   │
+│              with code 2 + guidance instead                     │
 │                                                                 │
 │  server/  CONTRACT v1 client (Phase 2)                          │
 │    rest.py       validate-key / register-device / sync/batch /   │
@@ -39,9 +48,13 @@ compute (§7) — but no engine is implemented now.
 │                  manifest; §3.6 error mapping; retry/backoff   │
 │    enrolment.py  state machine: not_configured → validating →    │
 │                  registered | failed_auth | failed_transient;   │
-│                  re-enrolment is the recovery path after 401   │
+│                  state waits are event-driven (per-waiter        │
+│                  asyncio Events, enrolment.py:156/395) — no     │
+│                  polling; re-enrolment is the recovery path     │
+│                  after 401                                     │
 │    commands.py   §6.2 envelope, §6.3 validation order, §6.1     │
-│                  3-op allowlist, replay cache (10,000),         │
+│                  allowlist (3 sendable ops + closed §17.5       │
+│                  open_order gate), replay cache (10,000),       │
 │                  lifecycle, action.result (§6.5), reconcile    │
 │    chart.py      §17.1 chart request/subscribe, rate limit      │
 │                  60 frames/min, max 20 subscriptions           │
@@ -60,12 +73,30 @@ compute (§7) — but no engine is implemented now.
 │    errors.py     §3.6 ServerErrorCode + parse_error_response    │
 │  realtime/                                                       │
 │    channel.py    ServerChannel: WS session, 15 s heartbeat,     │
-│                  45 s dead-after, reconnect 500 ms doubling →  │
-│                  30 s + jitter, outbound bound 128 (results    │
-│                  first, chart frames second)                   │
-│    bus.py        local pollers (tick 250 ms, account 1 s,       │
+│                  §5.3 liveness is HEARTBEAT-REPLY based — 45 s  │
+│                  without a server heartbeat reply = dead         │
+│                  (channel.py:796); other server frames do NOT   │
+│                  keep the session alive (mirrors Platform PR    │
+│                  #144 Bug C). Lifecycle start/stop/restart is   │
+│                  serialized under `_lifecycle_lock` with a      │
+│                  running-guard (no duplicate supervisors);      │
+│                  reconnect 500 ms doubling → 30 s + jitter;     │
+│                  outbound `_OutboundQueue`: two FIFO deques +   │
+│                  one wake event sharing the 128 bound (results  │
+│                  first, chart frames second — a chart frame is  │
+│                  never lost to a racing waiter), account-switch │
+│                  runs a single in-flight sync, chart polls are  │
+│                  per-subscription in-flight guarded             │
+│    bus.py        local pollers (tick adaptive, account 1 s,     │
 │                  positions 2 s, orders 3 s, status 10 s) —     │
-│                  feeds REST sync + WS chart frames             │
+│                  feeds REST sync + WS chart frames. The tick    │
+│                  poller sleeps until the next subscription is   │
+│                  due (idle wake 1 s — no 50 ms spin, zero MT5   │
+│                  calls with no subscriptions); orders/status    │
+│                  pollers skip work entirely when                │
+│                  `bus.subscriber_count == 0` (bus.py:207,240);  │
+│                  slow-consumer drops are counted on the bus     │
+│                  (bus.py:62), never silent                      │
 │  reliability/ (Phase 5/6, ARCHITECTURE-CONTRACT §8)             │
 │    telemetry.py  structured JSON events, exactly 9 fields;      │
 │                  ERROR immediate / WARN queued / INFO local-    │
@@ -78,7 +109,10 @@ compute (§7) — but no engine is implemented now.
 │    result_store.py  persisted unacknowledged results            │
 │  mt5/driver.py  official MetaTrader5 package, serialized worker │
 │                  thread (process-global IPC, not thread-safe); │
-│                  lazy import (collection works without MT5);   │
+│                  bounded job queue (256, MT5_JOB_QUEUE_MAX —   │
+│                  a stalled worker fails fast with structured   │
+│                  MT5_CALL_FAILED instead of piling up); lazy   │
+│                  import (collection works without MT5);        │
 │                  discovery: env → standard paths → App Paths → │
 │                  custom/portable dirs → running processes      │
 │  symbols/  broker-aware symbol discovery + resolution (spec §4, │
@@ -111,7 +145,15 @@ compute (§7) — but no engine is implemented now.
 │           diagnostics, updates, terminals, subscription,      │
 │           symbols inventory/resolve/refresh, execution recent,│
 │           journal events) + /ui, /docs, /ws/ui. Mandatory     │
-│           X-API-Key (§4).                                      │
+│           X-API-Key (§4) on API routes AND the /ws/ui upgrade │
+│           (X-API-Key header or the loopback GUI cookie,        │
+│           app.py:420–436). All blocking MT5/discovery/symbol  │
+│           work in the management router is threadpool-wrapped │
+│           (run_in_threadpool — the event loop never blocks on │
+│           MT5 IPC or discovery). /health is a light probe by  │
+│           default (cached driver state; `broker_connected` is │
+│           honestly `None` when unknown); the full IPC probe   │
+│           is opt-in via `/health?probe=full` (app.py:362–391).│
 │  gui/      Connector Control Center: 7 sections (Connection,    │
 │           MetaTrader, Account & Subscription read-only,        │
 │           Symbols, Execution, Diagnostics, Updates & Releases;│
@@ -121,10 +163,19 @@ compute (§7) — but no engine is implemented now.
 │           "NSEBridge") / DPAPI file store; dev-only file       │
 │           fallback on non-Windows (never required for tests).  │
 │           Legacy plaintext keys migrated + deleted on first run.│
+│           A corrupt DPAPI store file is quarantined as          │
+│           `secrets.dpapi.json.corrupt-<ts>` with a loud ERROR   │
+│           log before regeneration (per-entry DPAPI failures    │
+│           are NOT quarantined — the different-user case keeps  │
+│           its store, secrets.py:224–242).                      │
 │  updates.py  verified updater (§3.5): SHA-256 + Ed25519 before  │
 │           any install; download-only staging; install on       │
 │           restart via a staged script (our code, never the     │
-│           artifact). Fail-closed without a public key (§5).    │
+│           artifact). check()/download() are serialized by one  │
+│           asyncio op lock (updates.py:451,556,616); staging a │
+│           new artifact prunes stale staged ones                │
+│           (updates.py:727,755). Fail-closed without a public  │
+│           key (§5).                                            │
 │  config.py   JSON + NSE_BRIDGE_* env; production default        │
 │           https://bridge.nexusverse.space; no hardcoded dev    │
 │           endpoints; secrets never persisted here.             │
@@ -202,7 +253,8 @@ it does not own the server-side lifecycle.
 
 ```
 malformed → expired → wrong-device → wrong-account → allowlist
-(→ modify_pending capability gate §17.4) → entitlement
+(→ modify_pending capability gate §17.4 → open_order activation
+gate §17.5, both CLOSED by default) → entitlement
 (position_manager + auto_trade) → replay
 ```
 
@@ -278,6 +330,30 @@ callback is wired, the entry records "awaiting <action>" and stays
 fallbacks: an unsupported fallback is an explicit structured error,
 never a silent success. `ok` means "the fault was detected AND the
 correct handling ran", not "everything is fine".
+
+## 7. Boot, process model, and honest local status
+
+Boot order (`nse_bridge/main.py`): query subcommands dispatch FIRST
+(`main.py:147` — `status|health|diagnostics|mt5 list --json` talk to
+the RUNNING bridge over the loopback API and never boot a second
+instance), then the single-instance named mutex
+`Local\NSE-MT5-Bridge-SingleInstance` (`nse_bridge/single_instance.py:25`)
+is acquired BEFORE MT5 attach and port bind — a second launch exits
+with code 2 and guidance instead of racing a live one — then uvicorn,
+then MT5 auto-connect starts only AFTER the API is ready
+(`main.py:233–237`; the old 0.5 s sleep raced uvicorn boot). On a
+frozen console=False exe, `--console` runs the Bridge as a foreground
+console service (`nse_bridge/console_mode.py`): attach or allocate a
+console, no GUI window, clean Ctrl+C shutdown.
+
+The status command `get_mt5_connection_status`
+(`engine/connection.py:74`) runs a live terminal liveness probe that
+is best-effort by design (`connection.py:82`): a host with MT5
+installed but not attachable reports an honest degraded status with a
+structured diagnostic code — the status endpoint itself never
+becomes an HTTP 500. Executor crashes outside the handler table emit
+a rejection-shaped `action.result` (`channel.py:1064–1084`) so a
+command can never expire silently with no wire outcome.
 
 ## 8. Symbols — discovery and resolution (spec §4, gap C1)
 
