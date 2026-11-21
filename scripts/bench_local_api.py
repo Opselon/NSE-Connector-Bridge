@@ -143,18 +143,19 @@ def _bench_sync_positions(iterations: int) -> dict[str, float]:
 
 
 def _bench_json_batch(iterations: int) -> dict[str, float]:
-    from nse_bridge.server.sync import SyncEngine
+    from nse_bridge.server.sync import SyncEngine, build_batch
 
     positions = [{"ticket": 100000 + i, "symbol": "EUR/USD", "volume": 0.01} for i in range(500)]
-    batch = build = SyncEngine.build_batch if hasattr(SyncEngine, "build_batch") else None
+    items = SyncEngine.positions_items(positions, [])
+    # The REAL §3.3 wire shape (flat batch envelope, not an ad-hoc dict).
+    batch = build_batch("positions", items)
     timings: list[float] = []
-    payload: dict[str, Any] = {"positions": positions, "orders": []}
     for _ in range(iterations):
         t0 = time.perf_counter()
-        _ = json.dumps(payload)
+        json.dumps(batch)
         timings.append((time.perf_counter() - t0) * 1000.0)
     result = _percentiles(timings)
-    assert build is not None or True  # keep the import honest; wire-shape cost is json.dumps here
+    result["wire_bytes"] = len(json.dumps(batch))
     return result
 
 
