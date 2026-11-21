@@ -85,7 +85,7 @@ def test_health_reports_broker_down_when_ipc_is_up(client, monkeypatch):
         "refresh_terminal",
         lambda: {"connected": False, "name": "MetaTrader 5", "trade_allowed": False, "login": 10011755849},
     )
-    body = http.get("/health").json()
+    body = http.get("/health", params={"probe": "full"}).json()
     assert body["mt5_connected"] is True
     assert body["broker_connected"] is False
     assert body["broker"]["login"] == 10011755849
@@ -99,7 +99,7 @@ def test_health_reports_broker_up_when_terminal_connected(client, monkeypatch):
         "refresh_terminal",
         lambda: {"connected": True, "name": "MetaTrader 5", "trade_allowed": True, "login": 10011755849},
     )
-    body = http.get("/health").json()
+    body = http.get("/health", params={"probe": "full"}).json()
     assert body["broker_connected"] is True
 
 
@@ -108,10 +108,32 @@ def test_health_reports_broker_unknown_when_ipc_down(client):
     # never invented as healthy or unhealthy.
     http, ctx = client
     assert ctx.driver.connected is False
-    body = http.get("/health").json()
+    body = http.get("/health", params={"probe": "full"}).json()
     assert body["mt5_connected"] is False
     assert body["broker_connected"] is None
     assert body["broker"] is None
+
+
+def test_health_default_is_light_no_ipc_probe(client, monkeypatch):
+    # /health is unauthenticated; probing MT5 IPC on every call let any
+    # local process cheaply starve the serialized MT5 worker. The
+    # default probe is LIGHT: cached driver state only, broker state
+    # honestly unknown (never false-healthy) — the full IPC probe is
+    # opt-in via ?probe=full.
+    http, ctx = client
+    probed: list[bool] = []
+
+    def _fail_if_called():
+        probed.append(True)
+        raise AssertionError("light probe must not touch MT5 IPC")
+
+    monkeypatch.setattr(ctx.driver, "refresh_terminal", _fail_if_called)
+    body = http.get("/health").json()
+    assert body["ok"] is True
+    assert body["probe"] == "light"
+    assert body["broker_connected"] is None  # unknown, not fabricated
+    assert body["broker"] is None
+    assert probed == []
 
 
 def test_put_settings_routes_secrets_to_store_not_config_json(client, tmp_path):

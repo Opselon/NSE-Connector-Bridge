@@ -267,7 +267,7 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         description=(
             "**NSE Platform secure local bridge** — one endpoint per command. "
             "The bridge attaches to the client's local MetaTrader 5 terminal through the "
-            "official native C++ IPC driver and exposes exactly the 90 NSE bridge commands "
+            "official native C++ IPC driver and exposes exactly the 91 NSE bridge commands "
             "documented below. All endpoints are uniform `POST` JSON calls returning "
             "`{ok, data}` envelopes; broker rejections carry the official MT5 retcode.\n\n"
             "*Security:* bind is localhost-only by default; a mandatory `X-API-Key` gate "
@@ -360,20 +360,33 @@ def create_app(ctx: BridgeContext) -> FastAPI:
 
     # --- system endpoints -------------------------------------------------
     @app.get("/health", tags=["system"], summary="Plain liveness probe (no auth)")
-    async def health():
+    async def health(probe: str = "light"):
         # Real-MT5 defect 4 (2026-11-18): the terminal lost its broker
         # link for 4+ minutes while /health still reported
         # mt5_connected:true — that flag only measures the IPC link to
-        # the terminal. The response now also carries the terminal→
+        # the terminal. The response therefore carries the terminal→
         # broker link from the driver's live liveness probe
         # (terminal_info().connected + login), so a dead broker link
-        # can never report healthy. broker_connected is None (unknown)
-        # when the IPC link itself is down or the probe fails; ok /
-        # status stay process liveness, not broker health.
-        broker = await run_in_threadpool(ctx.driver.refresh_terminal)
+        # can never report healthy.
+        #
+        # The live probe is an MT5 IPC round-trip, and /health is
+        # unauthenticated: probing on every call let any local process
+        # cheaply starve the serialized MT5 worker. Default is the
+        # LIGHT probe — cached driver state only, broker_connected
+        # honestly ``None`` (unknown, never false-healthy) — and the
+        # full IPC probe is opt-in via /health?probe=full. ok/status
+        # stay process liveness, not broker health; the authenticated
+        # get_bridge_health command remains the authoritative check.
+        if probe == "full":
+            broker = await run_in_threadpool(ctx.driver.refresh_terminal)
+            probe_mode = "full"
+        else:
+            broker = None
+            probe_mode = "light"
         return {
             "ok": True,
             "status": "alive",
+            "probe": probe_mode,
             "mt5_connected": ctx.driver.connected,
             "broker_connected": broker["connected"] if broker else None,
             "broker": broker,
@@ -406,7 +419,22 @@ def create_app(ctx: BridgeContext) -> FastAPI:
     # --- local dashboard WebSocket -----------------------------------------
     @app.websocket("/ws/ui")
     async def ws_ui(websocket: WebSocket):
-        """Live feed for the local GUI: ticks, account updates, status snapshots."""
+        """Live feed for the local GUI: ticks, account updates, status snapshots.
+
+        Authenticated like every other local surface: the upgrade must
+        carry the API key via the ``X-API-Key`` header or the loopback
+        GUI's HttpOnly cookie. Without this check any local process
+        could observe account/position/tick events and inject market
+        subscriptions — the mandatory-key boundary must not stop at
+        HTTP endpoints.
+        """
+        presented = websocket.headers.get("X-API-Key") or ""
+        if not presented:
+            presented = websocket.cookies.get(LOCAL_API_KEY_COOKIE) or ""
+        expected = ctx.settings.local_api_key or ""
+        if not expected or not hmac.compare_digest(presented, expected):
+            await websocket.close(code=1008, reason="missing or invalid X-API-Key")
+            return
         await websocket.accept()
         bus: EventBus = app.state.bus
         queue = bus.subscribe()
