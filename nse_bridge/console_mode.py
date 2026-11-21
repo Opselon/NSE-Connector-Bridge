@@ -54,7 +54,10 @@ def prepare_console() -> bool:
 def _rebind_stream(name: str, device: str, mode: str) -> None:
     """Point sys.<name> at a win32 console device (windowed exe: None)."""
     try:
-        flags = (os.O_RDONLY if mode == "r" else os.O_WRONLY) | os.O_BINARY
+        # O_BINARY is Windows-only (POSIX has no binary/text split);
+        # getattr keeps this importable and type-checkable on Linux.
+        binary = getattr(os, "O_BINARY", 0)
+        flags = (os.O_RDONLY if mode == "r" else os.O_WRONLY) | binary
         fd = os.open(device, flags)
         stream = io.TextIOWrapper(
             io.FileIO(fd, mode, closefd=True),
