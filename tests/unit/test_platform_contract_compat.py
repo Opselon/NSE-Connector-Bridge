@@ -37,7 +37,6 @@ pytestmark = pytest.mark.unit
 from nse_bridge.server.sync import SyncEngine, build_batch
 from nse_bridge.server.uuid7 import new_uuid7_str
 
-
 # ---------------------------------------------------------------------------
 # §7.4 demo fail-closed — account.type reporting
 # ---------------------------------------------------------------------------

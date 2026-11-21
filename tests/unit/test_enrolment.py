@@ -219,7 +219,8 @@ async def test_enrolment_500_then_success_retries_with_backoff():
     # FAILED_TRANSIENT first, then REGISTERED; one backoff step recorded.
     assert manager.backoff_delays == [pytest.approx(0.05)]
     assert calls.count("/api/v1/connector/validate-key") == 5  # 4 failed + 1 good
-    assert sleeps == [pytest.approx(0.5), pytest.approx(1.0), pytest.approx(2.0)]  # REST internal 5xx backoff
+    # REST internal 5xx backoff: doubling within the ±15% jitter band
+    assert [0.5 * 0.85 <= s <= 0.5 * 1.15 for s in sleeps] == [True, True, True]
     await rest.close()
 
 
