@@ -185,15 +185,23 @@ def test_put_settings_rejects_non_wss_server_url(client):
 
 
 def test_ws_ui_rejects_missing_key(client):
+    from starlette.websockets import WebSocketDisconnect
+
     http, _ = client
-    with pytest.raises(Exception):  # starlette raises WebSocketDisconnect on close
-        with http.websocket_connect("/ws/ui"):
-            pass
+    # The socket is closed before accept on a rejected handshake —
+    # TestClient surfaces WebSocketDisconnect.
+    with pytest.raises(WebSocketDisconnect), http.websocket_connect("/ws/ui"):
+        pass
 
 
 def test_ws_ui_rejects_wrong_key(client):
+    from starlette.websockets import WebSocketDisconnect
+
     http, _ = client
-    with pytest.raises(Exception), http.websocket_connect("/ws/ui", headers={"X-API-Key": "wrong-key-12345678"}):
+    with (
+        pytest.raises(WebSocketDisconnect),
+        http.websocket_connect("/ws/ui", headers={"X-API-Key": "wrong-key-12345678"}),
+    ):
         pass
 
 
