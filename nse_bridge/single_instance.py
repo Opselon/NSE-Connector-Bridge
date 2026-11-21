@@ -27,12 +27,14 @@ MUTEX_NAME = r"Local\NSE-MT5-Bridge-SingleInstance"
 ERROR_ALREADY_EXISTS = 183
 
 
-def acquire_single_instance() -> tuple[Any, bool]:
+def acquire_single_instance(name: str = MUTEX_NAME) -> tuple[Any, bool]:
     """Try to become the single Bridge instance.
 
     Returns ``(handle, acquired)``. ``handle`` is the OS object to keep
     alive for the process lifetime (a win32 HANDLE, or None on
     non-Windows); ``acquired`` False means another instance owns it.
+    ``name`` is injectable so tests never contend with a REAL running
+    Bridge's production mutex.
     """
     if sys.platform != "win32":
         return None, True
@@ -40,7 +42,7 @@ def acquire_single_instance() -> tuple[Any, bool]:
         import ctypes
 
         kernel32 = ctypes.windll.kernel32
-        handle = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+        handle = kernel32.CreateMutexW(None, False, name)
         if not handle:
             return None, True  # cannot enforce — do not block startup
         already = kernel32.GetLastError() == ERROR_ALREADY_EXISTS

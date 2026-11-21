@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import sys
 import threading
 import time
@@ -42,17 +43,23 @@ def test_single_instance_mutex_refuses_second_and_releases(tmp_path: Path):
 
     from nse_bridge.single_instance import acquire_single_instance
 
-    handle, acquired = acquire_single_instance()
+    # Test-scoped mutex name: a REAL Bridge may legitimately be running
+    # on this machine holding the production mutex (observed 2026-11-21
+    # while the user's own instance was live) — the test must be
+    # hermetic against that; the production name is never touched.
+    name = rf"Local\NSE-MT5-Bridge-Test-{os.getpid()}"
+
+    handle, acquired = acquire_single_instance(name)
     assert acquired is True, "first acquire must succeed"
     assert handle is not None
     try:
-        _handle2, acquired2 = acquire_single_instance()
+        _handle2, acquired2 = acquire_single_instance(name)
         assert acquired2 is False, "second acquire in the same session must be refused"
     finally:
         # Explicit release (the OS does the same on process exit — a
         # crashed process never blocks the next start).
         assert ctypes.windll.kernel32.CloseHandle(handle) == 1
-    _handle3, acquired3 = acquire_single_instance()
+    _handle3, acquired3 = acquire_single_instance(name)
     assert acquired3 is True, "a released mutex must be acquirable again"
     if acquired3:
         import ctypes as _ctypes
