@@ -3,7 +3,7 @@
   "info": {
     "title": "NSE MT5 Bridge API",
     "description": "**NSE Platform secure local bridge** — one endpoint per command. The bridge attaches to the client's local MetaTrader 5 terminal through the official native C++ IPC driver and exposes exactly the 91 NSE bridge commands documented below. All endpoints are uniform `POST` JSON calls returning `{ok, data}` envelopes; broker rejections carry the official MT5 retcode.\n\n*Security:* bind is localhost-only by default; a mandatory `X-API-Key` gate protects every /api/v1/ endpoint (auto-generated on first run, stored in the OS secret store); the platform talks to this bridge over an outbound-authenticated WebSocket channel (no inbound ports).\n\n*Real-time:* the local Control Center polls the local API; `/ws/ui` also streams ticks + account updates for local tooling.",
-    "version": "1.2.0"
+    "version": "1.2.2"
   },
   "paths": {
     "/api/v1/settings": {

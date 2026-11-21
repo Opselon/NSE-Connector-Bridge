@@ -1007,6 +1007,17 @@ class Mt5Driver:
             return None
         if info and not info["connected"]:
             self._set_state("TERMINAL_ERROR", "terminal reports disconnected")
+        elif info and info["connected"] and self._state == "TERMINAL_ERROR":
+            # Symmetric healing: a single transient probe flip used to
+            # degrade the state permanently (nothing restored CONNECTED
+            # short of a manual reconnect) — the UI then showed
+            # TERMINAL_ERROR while the account was demonstrably
+            # connected (observed 2026-11-21, terminal build 6327). A
+            # live probe proving the terminal→broker link is up is
+            # exactly the recovery evidence the degradation was waiting
+            # for; restore and log it.
+            self._set_state("CONNECTED", "terminal link recovered (live probe)")
+            logger.info("[MT5] terminal→broker link recovered — state restored to CONNECTED")
         return info
 
     # ------------------------------------------------------------------
