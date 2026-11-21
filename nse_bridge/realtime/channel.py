@@ -60,6 +60,9 @@ import asyncio
 import json
 import random
 import time
+from collections import deque
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from loguru import logger
@@ -116,52 +119,57 @@ def backoff_with_jitter(delay_s: float) -> float:
 class _OutboundQueue:
     """Priority outbound queue (§5.3): results first, chart frames second.
 
-    Two FIFO queues sharing one 128-message bound. When full, the
-    oldest unsent CHART frame is dropped with a warning (chart data is
-    re-derivable); a result is dropped from the wire only when the
-    queue holds no chart frame at all — and it stays in the pending
-    results queue for redelivery on reconnect, so it is never lost
-    silently. Heartbeats bypass this queue entirely.
+    Two FIFO deques sharing one 128-message bound, drained through a
+    single consumer wake-up event. When full, the oldest unsent CHART
+    frame is dropped with a warning (chart data is re-derivable); a
+    result is dropped from the wire only when the queue holds no chart
+    frame at all — and it stays in the pending results queue for
+    redelivery on reconnect, so it is never lost silently. Heartbeats
+    bypass this queue entirely.
+
+    The deque+event shape (instead of racing two asyncio.Queue gets
+    with FIRST_COMPLETED) makes priority draining exact: an item is
+    popped only by the consumer, so a completing waiter can never
+    silently swallow a chart frame while a result is returned.
     """
 
     def __init__(self, maxsize: int = OUTBOUND_MAX) -> None:
         self.maxsize = maxsize
-        self._results: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=maxsize)
-        self._charts: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=maxsize)
+        self._results: deque[dict[str, Any]] = deque()
+        self._charts: deque[dict[str, Any]] = deque()
+        self._item_ready = asyncio.Event()
 
     def _total(self) -> int:
-        return self._results.qsize() + self._charts.qsize()
+        return len(self._results) + len(self._charts)
 
     def put_result(self, frame: dict[str, Any]) -> None:
         if self._total() >= self.maxsize:
-            if not self._charts.empty():
-                dropped = self._charts.get_nowait()
+            if self._charts:
+                dropped = self._charts.popleft()
                 logger.warning(
                     "[CHANNEL] outbound full — dropped oldest chart frame "
                     "(symbol={}) to make room for a command result",
                     dropped.get("symbol"),
                 )
             else:
-                dropped = self._results.get_nowait()
+                dropped = self._results.popleft()
                 logger.warning(
                     "[CHANNEL] outbound full of results — dropped oldest result "
                     "frame (correlation_id={}); it stays in the pending queue "
                     "for redelivery on reconnect",
                     dropped.get("correlation_id"),
                 )
-        self._results.put_nowait(frame)
+        self._results.append(frame)
+        self._item_ready.set()
 
     def put_chart(self, frame: dict[str, Any]) -> bool:
         """Enqueue a chart frame. Returns False when the frame was
         dropped (queue full of results — chart data is re-derivable)."""
         if self._total() >= self.maxsize:
-            if not self._charts.empty():
-                dropped = self._charts.get_nowait()
-                logger.warning(
-                    "[CHANNEL] outbound full — dropped oldest chart frame (symbol={}) for a newer one",
-                    dropped.get("symbol"),
-                )
-                self._charts.put_nowait(frame)
+            if self._charts:
+                self._charts.popleft()
+                self._charts.append(frame)
+                self._item_ready.set()
                 return True
             logger.warning(
                 "[CHANNEL] outbound full of results — dropping chart frame "
@@ -169,34 +177,33 @@ class _OutboundQueue:
                 frame.get("symbol"),
             )
             return False
-        self._charts.put_nowait(frame)
+        self._charts.append(frame)
+        self._item_ready.set()
         return True
 
     def clear(self) -> None:
         """Drop everything queued. Chart frames are re-derivable; any
         result dropped here MUST still live in the pending results
         queue (callers re-enqueue from there)."""
-        while not self._results.empty():
-            self._results.get_nowait()
-        while not self._charts.empty():
-            self._charts.get_nowait()
+        self._results.clear()
+        self._charts.clear()
+        self._item_ready.clear()
 
     async def get(self) -> dict[str, Any]:
-        if not self._results.empty():
-            return self._results.get_nowait()
-        if not self._charts.empty():
-            return self._charts.get_nowait()
-        get_result = asyncio.create_task(self._results.get())
-        get_chart = asyncio.create_task(self._charts.get())
-        try:
-            done, _ = await asyncio.wait({get_result, get_chart}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            for task in (get_result, get_chart):
-                if not task.done():
-                    task.cancel()
-        if get_result in done:
-            return get_result.result()
-        return get_chart.result()
+        """Pop the highest-priority frame, waiting when empty.
+
+        Wake-up discipline: the event is cleared BEFORE the emptiness
+        check and every producer sets it after appending, so an item
+        that arrives between the check and the wait can never be
+        missed.
+        """
+        while True:
+            self._item_ready.clear()
+            if self._results:
+                return self._results.popleft()
+            if self._charts:
+                return self._charts.popleft()
+            await self._item_ready.wait()
 
 
 class ServerChannel:
@@ -227,6 +234,34 @@ class ServerChannel:
         self._ws: Any = None
         self.dead_after_s = dead_after_s
         self._outbound = _OutboundQueue()
+        # Lifecycle mutual exclusion: start()/stop() are reachable from
+        # concurrent callers (app startup, PUT /settings channel
+        # restart, POST /server_channel/restart, §3.4 wake) — without a
+        # lock two supervisors could run at once and the first would be
+        # orphaned when self._task is overwritten.
+        self._lifecycle_lock = asyncio.Lock()
+        # Set by the receive loop on the first frame of the CURRENT
+        # session (a plain attribute, not a task-stashed flag: the
+        # session can end via the sender/heartbeat while the receiver
+        # is still running, and a flag read from a not-yet-finished
+        # task reported healthy sessions as failed — backoff never
+        # reset).
+        self._session_got_frame = False
+        # One account-switch sync at a time (§7.3): the heartbeat loop
+        # detects a login change every tick — without a guard two
+        # consecutive heartbeats during a long sync each spawn a
+        # concurrent history sync (double fetch, duplicate batches).
+        self._account_switch_sync_task: asyncio.Task[None] | None = None
+        # Chart subscriptions with a poll already executing (their MT5
+        # fetch can take seconds; without this guard a slow fetch
+        # stacks a new task per 1 s scheduler tick for the same sub).
+        self._chart_poll_inflight: set[str] = set()
+        # §5.3 client-side liveness: the session is dead when the
+        # server stops REPLYING to heartbeats — any other server frame
+        # does not prove the heartbeat path is alive (contract §5.3:
+        # the server MUST reply to each client heartbeat). Updated on
+        # session start and on every server ``heartbeat`` frame.
+        self._last_heartbeat_reply_at: float = 0.0
         # Pending results are DURABLE (§6.5 + reliability phase): an
         # in-memory-only queue loses acknowledged results on a Bridge
         # restart mid-operation. The store file is created lazily on
@@ -457,6 +492,17 @@ class ServerChannel:
             self._policy = PolicyService(self.ctx, telemetry=getattr(self.ctx, "telemetry", None))
 
     def start(self) -> None:
+        """Start the supervised channel exactly once.
+
+        A second start() while a supervisor is alive is a no-op —
+        callers race (app startup, settings PUT, restart endpoint, §3.4
+        wake), and an unconditional create_task would orphan the first
+        supervisor while overwriting ``self._task`` (double connections
+        to the Platform, duplicated results).
+        """
+        if self.running:
+            logger.debug("[CHANNEL] start() while already running — no-op")
+            return
         url = self.ctx.settings.resolved_server_ws_url
         try:
             validate_server_url(url)
@@ -487,15 +533,19 @@ class ServerChannel:
         """REST heartbeat (§3.4) as the keep-alive when the WS is down.
 
         NOT a WS heartbeat substitute: it only proves REST reachability
-        and reports ``pending_commands``. It never runs unconfigured or
-        after a terminal auth failure (FAILED_AUTH — the key is dead,
-        heartbeat would just 401). While enrolment is retrying it keeps
-        running, so the server still sees liveness. If
-        ``pending_commands > 0`` and no WS is live, it wakes the WS
-        supervisor immediately via ``_request_ws_open`` (§3.4) — the
-        ``_run`` loop on its own only retries on its backoff schedule,
-        so without the wake a pending command could wait up to 30 s.
-        A 401 here re-enrols through the REST client (§3.2).
+        and reports ``pending_commands``. While a WS session is LIVE
+        the loop idles — the WS application heartbeat is the liveness
+        mechanism and the server already stamps the session row from
+        it (§5.3); the REST heartbeat would be a redundant round-trip.
+        It never runs unconfigured or after a terminal auth failure
+        (FAILED_AUTH — the key is dead, heartbeat would just 401).
+        While enrolment is retrying it keeps running, so the server
+        still sees liveness. If ``pending_commands > 0`` and no WS is
+        live, it wakes the WS supervisor immediately via
+        ``_request_ws_open`` (§3.4) — the ``_run`` loop on its own
+        only retries on its backoff schedule, so without the wake a
+        pending command could wait up to 30 s. A 401 here re-enrols
+        through the REST client (§3.2).
         """
         interval = max(1.0, self.ctx.settings.heartbeat_interval_s)
         while not self._stop.is_set():
@@ -505,6 +555,8 @@ class ServerChannel:
                 pass
             if self._stop.is_set():
                 return
+            if self._is_ws_live():
+                continue  # WS heartbeat owns liveness while a session is up
             if self._enrolment is not None and self._enrolment.to_dict()["state"] in ("not_configured", "failed_auth"):
                 continue
             rest = self._rest
@@ -531,7 +583,16 @@ class ServerChannel:
                 await self._maybe_publish_manifest_rest()
 
     async def stop(self) -> None:
-        """Clean shutdown (§5.4: close() frame; the supervisor exits)."""
+        """Clean shutdown (§5.4: close() frame; the supervisor exits).
+
+        Serialized against start()/restarts via the lifecycle lock so
+        a concurrent restart cannot interleave a stop with a fresh
+        supervisor's task creation.
+        """
+        async with self._lifecycle_lock:
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
         self._stop.set()
         heartbeat_task, self._rest_heartbeat_task = self._rest_heartbeat_task, None
         if heartbeat_task is not None:
@@ -659,6 +720,8 @@ class ServerChannel:
         """One WS session. Returns True when at least one frame was
         received from the server (a successful session, §5.4)."""
         self._last_server_frame_at = time.monotonic()
+        self._last_heartbeat_reply_at = time.monotonic()
+        self._session_got_frame = False
         # Re-send any results that never made it out (§6.5: results
         # persist in the bounded pending queue across reconnects).
         # Clear the wire queue first: anything still queued from the
@@ -685,7 +748,13 @@ class ServerChannel:
                 {receiver, heartbeat, sender, chart_poll, policy_poll},
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            got_frame = getattr(receiver, "_got_frame", False)
+            # Read the session flag from the shared attribute, not from
+            # a task-stashed value: when the session ends via the
+            # sender or heartbeat loop the receiver is still running
+            # and its finally-block has not executed — a stashed flag
+            # read at this point misreports a frame-exchanging session
+            # as failed, so the reconnect backoff never reset.
+            got_frame = self._session_got_frame
             for task in done:
                 if task is receiver:
                     exc = task.exception()
@@ -705,27 +774,28 @@ class ServerChannel:
         return got_frame
 
     async def _receive_loop(self, ws: Any) -> None:
-        got_frame = False
-        try:
-            async for raw in ws:
-                got_frame = True
-                self._last_server_frame_at = time.monotonic()
-                await self._handle_server_message(raw)
-        finally:
-            # Stash the flag on the task for _session to read.
-            current = asyncio.current_task()
-            if current is not None:
-                current._got_frame = got_frame  # type: ignore[attr-defined]
+        async for raw in ws:
+            self._session_got_frame = True
+            self._last_server_frame_at = time.monotonic()
+            await self._handle_server_message(raw)
 
     async def _heartbeat_loop(self, ws: Any) -> None:
-        """Send the 15 s app heartbeat (§5.3); detect a dead session
-        after 45 s without ANY frame from the server."""
+        """Send the 15 s app heartbeat (§5.3); declare the session dead
+        after 45 s without a server HEARTBEAT REPLY.
+
+        Reply-based, not any-frame-based (contract §5.3: the server
+        MUST reply to each client heartbeat): command/chart/policy
+        frames are server-originated pushes and do not prove the
+        heartbeat path is alive. Server-side, the mirror image holds
+        since Platform PR #144 — the server's liveness timer counts
+        only client-originated frames.
+        """
         interval = max(1.0, self.ctx.settings.heartbeat_interval_s)
         while True:
             await asyncio.sleep(interval)
-            if time.monotonic() - self._last_server_frame_at > self.dead_after_s:
+            if time.monotonic() - self._last_heartbeat_reply_at > self.dead_after_s:
                 logger.warning(
-                    "[CHANNEL] no server frame for {:.0f}s — session dead (§5.3), reconnecting",
+                    "[CHANNEL] no server heartbeat reply for {:.0f}s — session dead (§5.3), reconnecting",
                     self.dead_after_s,
                 )
                 telemetry = self._telemetry()
@@ -749,13 +819,17 @@ class ServerChannel:
                 return
             # Account-switch detection (§7.3): a changed bound login
             # invalidates pending old-account commands and triggers a
-            # fresh sync (account → positions → history).
+            # fresh sync (account → positions → history). One sync at
+            # a time: the check runs on EVERY heartbeat tick, and two
+            # ticks during a long sync must not spawn concurrent
+            # history fetches.
             login = self._bound_account_id()
             if login is not None and self._last_login is not None and login != self._last_login:
                 logger.warning("[CHANNEL] MT5 account switched {} → {} — fresh sync (§7.3)", self._last_login, login)
                 if self._sync is not None:
                     self._sync.reset_for_account_switch()
-                    asyncio.create_task(self._sync.handle_sync_request())
+                    if self._account_switch_sync_task is None or self._account_switch_sync_task.done():
+                        self._account_switch_sync_task = asyncio.create_task(self._sync.handle_sync_request())
             self._last_login = login
             # §4.1: the registry can only change mid-session if the
             # command set changes under the running bridge — check
@@ -789,14 +863,32 @@ class ServerChannel:
                     )
 
     async def _chart_poll_loop(self) -> None:
-        """Poll due chart subscriptions (§17.1) and enqueue deltas."""
+        """Poll due chart subscriptions (§17.1) and enqueue deltas.
+
+        One poll per subscription at a time: the scheduler ticks every
+        second, but an MT5 fetch can take seconds (or hit the 30 s
+        chart timeout) — without the in-flight guard a slow fetch
+        stacked a new task per tick for the same subscription.
+        """
         while True:
             await asyncio.sleep(1.0)
             if self._chart is None or self._ws is None:
                 continue
             now = time.monotonic()
             for sub in self._chart.poll_due(now):
-                asyncio.create_task(self._poll_subscription(sub))
+                if sub.subscription_id in self._chart_poll_inflight:
+                    continue
+                self._chart_poll_inflight.add(sub.subscription_id)
+                task = asyncio.create_task(self._poll_subscription(sub))
+                task.add_done_callback(self._chart_poll_done(sub.subscription_id))
+
+    def _chart_poll_done(self, subscription_id: str) -> Callable[[asyncio.Task[Any]], None]:
+        """Done-callback factory: release the subscription's in-flight slot."""
+
+        def _release(_task: asyncio.Task[Any]) -> None:
+            self._chart_poll_inflight.discard(subscription_id)
+
+        return _release
 
     async def _policy_poll_loop(self) -> None:
         """W6: evaluate the policy envelope's trailing/breakeven rules
@@ -918,6 +1010,7 @@ class ServerChannel:
             # Informational only (§5.2); the REST 200 ack is authoritative.
             logger.debug("[CHANNEL] server ack for batch {}", msg.get("batch_id"))
         elif mtype == "heartbeat":
+            self._last_heartbeat_reply_at = time.monotonic()
             self.ctx.server_channel_state["last_server_heartbeat_at"] = time.time()
         elif mtype == "chart.request":
             await self._handle_chart_request(msg)
@@ -970,11 +1063,35 @@ class ServerChannel:
     async def _handle_command(self, msg: dict[str, Any]) -> None:
         if self._executor is None:
             return
+        command_id = str(msg.get("command_id") or "")
+        started = datetime.now(UTC)
         try:
             _, result = await run_in_threadpool(self._executor.execute, msg)
         except Exception as exc:  # noqa: BLE001 — a command must never kill the channel
+            # Crash OUTSIDE the executor's own handlers: without a
+            # fallback the server would hold the command until TTL
+            # expiry with no action.result at all. Emit a
+            # rejection-shaped result (§6.5) so the outcome is
+            # terminal and auditable instead of silent.
             logger.exception("[CHANNEL] command handler crashed: {}", type(exc).__name__)
-            return
+            if not command_id:
+                return
+            from ..server.commands import SOURCE_TOOL, build_action_result
+
+            raw_operation = msg.get("operation")
+            operation: dict[str, Any] = raw_operation if isinstance(raw_operation, dict) else {}
+            op_type = str(operation.get("type") or "unknown")
+            result = build_action_result(
+                device_id=self._device_id(),
+                command_id=command_id,
+                account_id=str(msg.get("account_id") or ""),
+                status="rejected",
+                source_tool=SOURCE_TOOL.get(op_type, op_type),
+                started_at=started,
+                completed_at=datetime.now(UTC),
+                error={"code": "HANDLER_CRASHED", "message": f"command handler crashed: {type(exc).__name__}"},
+                user_id=self._rest.user_id if self._rest is not None else None,
+            )
         self._enqueue_result(result)
 
     # ------------------------------------------------------------------

@@ -36,6 +36,14 @@ class EventBus:
     def __init__(self, max_queue: int = 500) -> None:
         self._subscribers: set[asyncio.Queue] = set()
         self._max_queue = max_queue
+        # Slow-consumer drops are counted, not silent: the diagnostics
+        # summary can report a saturated dashboard feed instead of the
+        # bug hiding as "everything looks fine".
+        self.dropped = 0
+
+    @property
+    def subscriber_count(self) -> int:
+        return len(self._subscribers)
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=self._max_queue)
@@ -46,20 +54,30 @@ class EventBus:
         self._subscribers.discard(q)
 
     def publish(self, event_type: str, data: Any) -> None:
-        payload = {"type": event_type, "ts": time.time(), "data": data}
+        payload = {"type": event_type, "data": data, "ts": time.time()}
         for q in list(self._subscribers):
             try:
                 q.put_nowait(payload)
             except asyncio.QueueFull:
-                pass  # slow consumer: drop rather than block the bus
+                self.dropped += 1  # slow consumer: drop rather than block the bus
+                if self.dropped % 100 == 1:
+                    logger.debug("[BUS] queue full — dropped event {} (total drops {})", event_type, self.dropped)
 
 
 async def tick_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) -> None:
-    """Push fresh ticks for every subscription (per-symbol min interval)."""
+    """Push fresh ticks for every subscription (per-symbol min interval).
+
+    Sleeps until the EARLIEST due subscription instead of a fixed
+    50 ms wake-up: with no subscribers the loop costs no MT5 IPC and
+    no CPU beyond one event wait per idle second (the old 20 wakes/s
+    hammered the serialized MT5 worker for nothing).
+    """
     last_sent: dict[str, float] = {}
     from ..mt5.types import build_tick_model
 
+    idle_wake_s = 1.0  # re-check subscription changes at most 1×/s when idle
     while not stop.is_set():
+        polled = 0.0
         try:
             subs = ctx.subscriptions.snapshot()
             now = time.monotonic()
@@ -86,10 +104,20 @@ async def tick_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) ->
                     last_sent[symbol] = time.monotonic()
                     ctx.subscriptions.record_tick(symbol, payload)
                     bus.publish("tick", payload)
+                polled = 0.05  # yield briefly after work before recomputing dues
         except Exception as exc:  # noqa: BLE001 — a poller must never die on a stray MT5 error
             logger.debug("[STREAM] tick poll skipped: {}", exc)
+        # Sleep until the next symbol comes due (bounded), or idle_wake
+        # when nothing is subscribed — never a fixed hot 50 ms spin.
+        subs_now = ctx.subscriptions.snapshot()
+        if subs_now:
+            now = time.monotonic()
+            next_due = min(last_sent.get(s.symbol, 0.0) + s.interval_ms / 1000.0 for s in subs_now)
+            timeout = max(polled, min(next_due - now, idle_wake_s))
+        else:
+            timeout = idle_wake_s
         try:
-            await asyncio.wait_for(stop.wait(), timeout=0.05)
+            await asyncio.wait_for(stop.wait(), timeout=max(0.01, timeout))
         except TimeoutError:
             pass
 
@@ -164,14 +192,21 @@ async def positions_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Even
 
 
 async def orders_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) -> None:
-    """Push pending-order snapshots to the server (3s interval)."""
+    """Push pending-order snapshots to the dashboard (3s interval).
+
+    Dashboard-only (pending orders reach the server inside the §3.3
+    ``positions`` batch), so the MT5 IPC round-trip is skipped while
+    no /ws/ui consumer is attached — a headless bridge pays nothing.
+    """
     from ..errors import BridgeError
     from ..mt5.types import build_order_model
 
     interval = 3.0
     while not stop.is_set():
         try:
-            if ctx.driver.connected:
+            if bus.subscriber_count == 0:
+                pass  # nobody is listening — skip the MT5 call entirely
+            elif ctx.driver.connected:
 
                 def job(mt5: Any):
                     raw = mt5.orders_get()
@@ -191,13 +226,21 @@ async def orders_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) 
 
 
 async def status_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) -> None:
-    """Push periodic bridge status to the server (10s interval)."""
+    """Push periodic bridge status to the dashboard (10s interval).
+
+    Dashboard-only: the old ``status_update`` server frame does not
+    exist in v1 (§5.3), so the payload is skipped while no /ws/ui
+    consumer is attached.
+    """
     import os
 
     interval = 10.0
     while not stop.is_set():
         try:
-            ops = ctx.driver.metrics_dict()
+            if bus.subscriber_count == 0:
+                pass  # nobody is listening
+            else:
+                ops = ctx.driver.metrics_dict()
             slowest = max(ops.items(), key=lambda kv: kv[1]["avg_ms"]) if ops else None
             bus.publish(
                 "status_update",

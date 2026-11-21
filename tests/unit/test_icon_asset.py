@@ -14,6 +14,10 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ICON_PATH = REPO_ROOT / "assets" / "icon.ico"
 EXPECTED_SIZES = (256, 128, 64, 48, 32, 24, 16)
