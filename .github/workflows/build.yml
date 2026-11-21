@@ -244,10 +244,24 @@ jobs:
             }
             $ui = Invoke-WebRequest -Uri "http://127.0.0.1:8799/ui" -UseBasicParsing -TimeoutSec 15
             if ($ui.StatusCode -ne 200) { throw "/ui (bundled GUI asset) answered HTTP $($ui.StatusCode)" }
+            # CLI JSON contract — via Start-Process -Wait with redirected
+            # output: a GUI-SUBSYSTEM exe is NOT awaited by `&` (pwsh
+            # returns immediately, $LASTEXITCODE empty, stdout lost);
+            # Start-Process waits and the redirected stdout handle also
+            # gives the windowed process a valid sys.stdout so the CLI
+            # can emit its one JSON document.
             foreach ($cli in @(("status"), ("health"), ("mt5","list"))) {
-              $out = & dist/NSE-MT5-Bridge.exe @cli --json 2>$null
-              if ($LASTEXITCODE -ne 0) { throw "CLI '$cli' exited with $LASTEXITCODE" }
-              ($out -join "`n") | ConvertFrom-Json > $null
+              $cliName = $cli -join '-'
+              $outFile = Join-Path $env:TEMP "cli-$cliName.json"
+              $errFile = Join-Path $env:TEMP "cli-$cliName.err.txt"
+              $cp = Start-Process -FilePath "dist/NSE-MT5-Bridge.exe" `
+                -ArgumentList ($cli + "--json") -Wait -PassThru `
+                -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+              if ($cp.ExitCode -ne 0) {
+                Write-Host "--- cli stderr ---"; Get-Content $errFile | Write-Host
+                throw "CLI '$cli' exited with $($cp.ExitCode)"
+              }
+              Get-Content $outFile -Raw | ConvertFrom-Json > $null
             }
             # Single instance: a second launch must refuse fast (exit 2).
             $second = Start-Process -FilePath "dist/NSE-MT5-Bridge.exe" -ArgumentList "--gui","none","--port","8799" -Wait -PassThru
