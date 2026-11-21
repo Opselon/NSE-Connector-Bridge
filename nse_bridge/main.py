@@ -231,11 +231,19 @@ def main(argv=None) -> None:
     server_thread.start()
 
     base_url = f"http://{settings.host}:{settings.port}"
-    deadline = __import__("time").time() + 10
+    # Boot deadline: a COLD frozen start (PyInstaller onefile extraction
+    # + first-launch Defender scan of a fresh unsigned exe) measured
+    # >10 s on hosted Windows runners — the old 10 s deadline declared
+    # boot failure and exited the process while uvicorn was still
+    # starting, which read as "serve never comes up" in CI. 90 s
+    # covers extraction + AV + import + bind; genuine bind failures
+    # (port taken) still surface as an error exit, just later.
+    boot_deadline_s = 90 if getattr(sys, "frozen", False) else 15
+    deadline = __import__("time").time() + boot_deadline_s
     while not server.started and __import__("time").time() < deadline:
         __import__("time").sleep(0.05)
     if not server.started:
-        logger.error("[BOOT] uvicorn failed to start — exiting")
+        logger.error("[BOOT] uvicorn failed to start within {:.0f}s — exiting", boot_deadline_s)
         return
     # MT5 auto-connect starts AFTER the API is up (the old 0.5 s sleep
     # raced uvicorn boot): status endpoints are answerable from the
