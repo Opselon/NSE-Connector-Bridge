@@ -90,14 +90,32 @@ py -3.13 -m venv .venv          # Python 3.12/3.13
 ```bash
 .venv/Scripts/python -m PyInstaller bridge.spec --noconfirm --clean
 # → dist/NSE-MT5-Bridge.exe  (CI also builds it on every push — see Actions)
-dist\NSE-MT5-Bridge.exe                  # GUI (native window, browser fallback)
+dist\NSE-MT5-Bridge.exe                  # desktop application (default experience)
+dist\NSE-MT5-Bridge.exe --console        # foreground console service (no GUI)
 dist\NSE-MT5-Bridge.exe --gui none       # headless service mode
 dist\NSE-MT5-Bridge.exe --diagnostic     # diagnostic console mode (DEBUG telemetry + logs)
+
+# Machine-readable operations against the RUNNING bridge (loopback API,
+# never a second instance):
+dist\NSE-MT5-Bridge.exe status --json
+dist\NSE-MT5-Bridge.exe health --json
+dist\NSE-MT5-Bridge.exe diagnostics --json
+dist\NSE-MT5-Bridge.exe mt5 list --json
 ```
 
+Full CLI contract (envelope, exit codes): [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
+
 Releases are cut from tags only (`v1.2.3` stable, `v1.2.3-rc.1`
-prerelease) and ship the exe + `.sha256` + `release-manifest.json`.
-See [docs/BUILD.md](docs/BUILD.md) and [docs/RELEASE.md](docs/RELEASE.md).
+prerelease) and ship the installer + exe + `.sha256` + `release-manifest.json`.
+Direct install from GitHub Releases (SHA-256 verified, idempotent):
+
+```powershell
+$script = "$env:TEMP\nse-bridge-install.ps1"
+Invoke-WebRequest "https://raw.githubusercontent.com/Opselon/NSE-Connector-Bridge/main/scripts/install.ps1" -OutFile $script
+& $script -Channel Stable
+```
+
+See [docs/INSTALLATION.md](docs/INSTALLATION.md), [docs/BUILD.md](docs/BUILD.md) and [docs/RELEASE.md](docs/RELEASE.md).
 
 ## Configuration
 
@@ -181,7 +199,7 @@ for the honest verification status.
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, data flow, state machines |
 | [docs/API_PROTOCOL.md](docs/API_PROTOCOL.md) | REST + WS contract (§3/§5/§6/§17.1), frames, retry policy |
-| [docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md) | all 90 local commands + the 3 server ops, separately |
+| [docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md) | all 91 local commands + the 3 server ops, separately |
 | [docs/SECURITY.md](docs/SECURITY.md) | secret store, auth, redaction, threat model |
 | [docs/BUILD.md](docs/BUILD.md) | local build, PyInstaller spec, versioning |
 | [docs/RELEASE.md](docs/RELEASE.md) | release process, verification status, known gaps |
@@ -189,6 +207,10 @@ for the honest verification status.
 | [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Windows/x64, Python, MT5 builds, ARM64 |
 | [docs/PLATFORM-GAPS.md](docs/PLATFORM-GAPS.md) | what must change on the Platform side |
 | [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) | verdict per acceptance criterion (§15) |
+| [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) | serve modes, CLI JSON envelope, exit codes |
+| [docs/DESKTOP_APPLICATION.md](docs/DESKTOP_APPLICATION.md) | Control Center architecture, screens, onboarding |
+| [docs/INSTALLATION.md](docs/INSTALLATION.md) | installer, direct GitHub install, portable exe |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | measured baselines, methodology, before/after |
 | [docs/openapi.json](docs/openapi.json) | OpenAPI schema, re-exported from the registry |
 
 ## Known environment notes
