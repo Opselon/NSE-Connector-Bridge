@@ -102,13 +102,13 @@ def _dispatch_query(argv: list[str]) -> int | None:
     if args.subcommand == "mt5" and args.mt5_command != "list":
         parser.error("mt5 requires a subcommand: list")
     from .cli import (
+        CliError,
         emit_cli_error,
         run_diagnostics,
         run_health,
         run_mt5_list,
         run_status,
     )
-    from .cli import CliError
 
     settings = load_settings()
     as_json = bool(getattr(args, "json", False))
