@@ -1,12 +1,17 @@
-"""Unit tests for the Phase 4 GUI — Connector Control Center (7 screens).
+"""Unit tests for the GUI — Connector Control Center (nextgen, 9 screens).
 
-Covers: exactly 7 screens (spec §17: Connection, MetaTrader, Account,
-Symbols, Execution, Diagnostics, Updates — settings live on the
-Connection screen, not as a separate screen) + no forbidden
-trading-dashboard content, every local API path the GUI's JS calls
-exists in the route table, the Account & Subscription endpoint never
-leaks the secret, the cookie auth carriage for the loopback GUI, the
-guided MT5 diagnostic codes, the updates check, and terminal discovery.
+Covers: exactly 9 screens (Overview landing + Platform, MetaTrader,
+Account, Symbols, Execution, Diagnostics, Updates, Settings), no
+forbidden trading-dashboard content, every local API path the GUI's JS
+calls exists in the route table, the Account & Subscription endpoint
+never leaks the secret, the cookie auth carriage for the loopback GUI
+(now covering /ws/ui too — page JS cannot set headers on a WebSocket
+upgrade), the guided MT5 diagnostic codes, the updates check, terminal
+discovery, and the nextgen structure invariants: theme toggle with
+persistence + prefers-color-scheme, live /ws/ui feed usage with the
+30 s poll fallback (no 10 s polling loop), masked secrets with password
+inputs confined to API-key re-entry (no MT5 password field anywhere),
+and the first-run onboarding stepper with its 9 real-result steps.
 Label: unit.
 """
 
@@ -29,20 +34,33 @@ from nse_bridge.server.rest import Entitlements, ReleaseInfo, ValidateKeyResult
 
 pytestmark = pytest.mark.unit
 
+#: Trading-dashboard content the bridge GUI must never grow. "Overview"
+#: and "bot_symbol" were removed from this list deliberately: Overview
+#: is now the sanctioned landing screen (a status surface, not a trading
+#: dashboard), and bot_symbol is a legitimate Settings configuration
+#: field the server reads — neither re-introduces forbidden content.
 FORBIDDEN_CONTENT = [
     "AI Agent",
     "Execute proposal",
     "Open Positions",
     "Pending Orders",
-    "Overview",
     "Backtest",
     "backtest",
     "sparkline",
     "Live Tickers",
-    "bot_symbol",
 ]
 
-EXPECTED_SCREENS = {"connection", "metatrader", "account", "symbols", "execution", "diagnostics", "updates"}
+EXPECTED_SCREENS = {
+    "overview",
+    "platform",
+    "metatrader",
+    "account",
+    "symbols",
+    "execution",
+    "diagnostics",
+    "updates",
+    "settings",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -131,7 +149,7 @@ class FakeRestClient:
 # ---------------------------------------------------------------------------
 # HTML: screens + forbidden content
 # ---------------------------------------------------------------------------
-def test_gui_html_has_exactly_seven_screens(client):
+def test_gui_html_has_exactly_nine_screens(client):
     http, _, _ = client
     resp = http.get("/ui")
     assert resp.status_code == 200, resp.text
@@ -140,18 +158,142 @@ def test_gui_html_has_exactly_seven_screens(client):
     assert pages == EXPECTED_SCREENS, pages
     sections = set(re.findall(r'id="page-([a-z]+)"', html))
     assert sections == EXPECTED_SCREENS, sections
+    # Overview is the DEFAULT landing screen (first nav item + active section).
+    assert 'data-page="overview"' in html
+    assert re.search(r'class="navitem active" data-page="overview"', html)
+    assert 'id="page-overview" aria-label="Overview"' in html
+    assert re.search(r'class="page active" id="page-overview"', html)
 
 
-def test_gui_settings_live_on_the_connection_screen(client):
-    # Spec §17: settings/credentials live under Connection — there is
-    # no separate Settings screen, and the form fields keep their IDs.
+def test_gui_settings_screen_has_all_setting_fields(client):
+    # Settings is its own screen in the nextgen layout; every field the
+    # PUT /api/v1/settings endpoint accepts (and the mission lists)
+    # keeps a stable element id the JS fills from GET /settings.
     http, _, _ = client
     html = http.get("/ui").text
-    assert 'id="page-settings"' not in html
-    assert 'data-page="settings"' not in html
-    conn = html.split('id="page-connection"')[1].split('id="page-metatrader"')[0]
-    for element_id in ("setBaseUrl", "setUrl", "setEnv", "setToken", "setLogLevel", "setGuiMode", "saveSettings"):
-        assert f'id="{element_id}"' in conn, f"settings field {element_id} missing from the Connection screen"
+    assert 'id="page-settings"' in html
+    assert 'data-page="settings"' in html
+    settings_html = html.split('id="page-settings"')[1].split("</section>")[0]
+    for element_id in (
+        "setBaseUrl",
+        "setServerUrl",
+        "setEnv",
+        "setToken",
+        "setLogLevel",
+        "setGuiMode",
+        "setBotSymbol",
+        "setTimeframe",
+        "setMagic",
+        "setStrictMagic",
+        "setTerminalPath",
+        "setTerminalDirs",
+        "setStreamInt",
+        "setBrokerOffset",
+        "saveSettings",
+    ):
+        assert f'id="{element_id}"' in settings_html, f"settings field {element_id} missing from the Settings screen"
+    # Secrets are never echoed back: the token input is a masked entry
+    # field whose placeholder carries the server-provided masked value.
+    assert re.search(r'<input id="setToken" type="password"', settings_html)
+
+
+def test_gui_overview_is_a_live_status_surface(client):
+    # The Overview is powered by /ws/ui push (status_update + account_update)
+    # with an initial REST fetch and a 30 s poll fallback — and the old
+    # 10 s poll-everything loop is gone.
+    http, _, _ = client
+    html = http.get("/ui").text
+    assert "'status_update'" in html
+    assert "'account_update'" in html
+    assert "'/ws/ui'" in html
+    assert "new WebSocket(" in html
+    assert ", 30000);" in html  # the single 30 s light-refresh interval
+    assert ", 10000)" not in html  # the old 10 s poll loop is dead
+    assert 'id="liveBanner"' in html  # visible "polling" fallback state
+
+
+def test_gui_theme_toggle_persists_and_respects_os_preference(client):
+    http, _, _ = client
+    html = http.get("/ui").text
+    assert 'id="themeToggle"' in html
+    assert "data-theme" in html
+    assert "prefers-color-scheme" in html  # OS preference decides first run
+    assert "nse-theme" in html  # persisted toggle (localStorage)
+
+
+def test_gui_password_fields_are_confined_to_secret_entry(client):
+    # The ONLY password inputs in the page are the API-key re-entry
+    # fields (Settings, Platform quick re-entry, onboarding step 4).
+    # The MetaTrader screen never grows an MT5 password field — the
+    # bridge never asks for it.
+    http, _, _ = client
+    html = http.get("/ui").text
+    token_ids = re.findall(r'<input id="([A-Za-z]+)" type="password"', html)
+    assert set(token_ids) == {"setToken", "platToken", "obToken"}, token_ids
+    mt = html.split('id="page-metatrader"')[1].split('id="page-account"')[0]
+    assert 'type="password"' not in mt
+    # The MT5 note states the honesty rule explicitly.
+    assert "never asks for your MT5 password" in mt
+
+
+def test_gui_masks_secrets_and_never_renders_raw_tokens(client):
+    # The GUI renders the server-provided MASKED values (server_token_masked /
+    # api_key_masked) — raw key material is never displayed anywhere.
+    http, _, _ = client
+    html = http.get("/ui").text
+    assert "server_token_masked" in html
+    assert "api_key_masked" in html
+    # No client-side re-entry path ever echoes a stored secret back.
+    assert 'type="text" id="setToken"' not in html
+
+
+def test_gui_onboarding_flow_present_with_real_steps(client):
+    # First-run guided setup: 9 steps, each running a REAL bridge action
+    # (no simulated success), gated by prerequisites, skippable for
+    # standalone use.
+    http, _, _ = client
+    html = http.get("/ui").text
+    assert 'id="onboardingOverlay"' in html
+    steps = set(re.findall(r'class="ob-step" data-step="([a-z0-9]+)"', html))
+    assert steps == {
+        "init",
+        "mt5",
+        "endpoint",
+        "key",
+        "validate",
+        "register",
+        "connect",
+        "sync",
+        "health",
+    }, steps
+    assert 'id="obSkip"' in html  # skippable for standalone use
+    assert 'id="obFinish"' in html
+    assert "nse_onboarding_dismissed" in html  # dismissal persists
+    # The endpoint step hydrates from the effective settings — it never
+    # invents a URL client-side.
+    assert "obHydrateEndpoint" in html
+
+
+def test_gui_platform_screen_has_channel_control_and_preflight_checks(client):
+    http, _, _ = client
+    html = http.get("/ui").text
+    plat = html.split('id="page-platform"')[1].split('id="page-metatrader"')[0]
+    assert "/api/v1/server_channel/restart" in html
+    assert "/api/v1/run_connection_checks" in html
+    assert 'id="btnRestartChannel"' in plat
+    assert 'id="btnRunChecks"' in plat
+    assert 'id="checkList"' in plat
+    assert 'id="platToken"' in plat  # masked key re-entry on Platform
+
+
+def test_gui_updates_screen_is_fail_closed_honest(client):
+    http, _, _ = client
+    html = http.get("/ui").text
+    upd = html.split('id="page-updates"')[1].split('id="page-settings"')[0]
+    assert "/api/v1/updates/check" in html
+    assert "/api/v1/updates/download" in html
+    assert 'id="upRestartBanner"' in upd  # restart-required banner
+    assert "NO_PUBLIC_KEY" in html  # updater error codes shown with meaning
 
 
 def test_gui_html_has_no_forbidden_content(client):
