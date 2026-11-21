@@ -525,10 +525,13 @@ class RestClient:
     async def releases_latest(self) -> ReleaseInfo:
         """§3.5 — signed artifact metadata for the updater (read-only).
 
-        The download/install + SHA-256/Ed25519 verification belong to
-        the updater (Phase 5); nothing is downloaded here.
+        A TIGHT per-request budget: this small metadata read backs
+        GET /updates/latest — when the Platform dial hangs (half-
+        deployed gateway, dead uplink), a full default budget × the
+        bounded retries would stall the endpoint for minutes. The
+        updater's artifact download has its own, separate timeout.
         """
-        payload = await self._request("GET", PATH_RELEASES_LATEST, None)
+        payload = await self._request("GET", PATH_RELEASES_LATEST, None, timeout=httpx.Timeout(10.0, connect=5.0))
         if not isinstance(payload, dict):
             raise ServerError(ServerErrorCode.MALFORMED_RESPONSE, "releases/latest returned a non-object response")
         return ReleaseInfo(
