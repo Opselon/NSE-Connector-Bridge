@@ -36,6 +36,7 @@ inert fixtures and never perform a real download.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -442,6 +443,12 @@ class Updater:
         self._error: UpdateError | None = None
         self._detail = ""
         self._staged = _StagedInfo()
+        # Serialize check()/download(): both mutate the same state
+        # machine and are reachable from concurrent management calls —
+        # two interleaved downloads could double-stage or corrupt the
+        # staged-state file. asyncio.Lock (single loop, non-reentrant —
+        # download() calls the UNLOCKED internal check).
+        self._op_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     @property
@@ -541,10 +548,15 @@ class Updater:
     async def check(self) -> dict[str, Any]:
         """Poll releases/latest; report availability / incompatibility.
 
-        Never downloads anything. Mirrors the GET /updates/latest
-        semantics: no server client → ``unavailable``; no API key →
-        ``not_configured``; server failure → ``error``/``CHECK_FAILED``.
+        Serialized against download() (see _op_lock). Never downloads
+        anything. Mirrors the GET /updates/latest semantics: no server
+        client → ``unavailable``; no API key → ``not_configured``;
+        server failure → ``error``/``CHECK_FAILED``.
         """
+        async with self._op_lock:
+            return await self._check_locked()
+
+    async def _check_locked(self) -> dict[str, Any]:
         self._state = "checking"
         self._error = None
         self._detail = "checking for updates…"
@@ -595,13 +607,18 @@ class Updater:
     async def download(self) -> dict[str, Any]:
         """Download + verify + stage the latest release.
 
-        Refuses (structured error, nothing staged) when: no update was
-        found, the release needs a newer minimum connector version, no
-        public key is configured, the signature/SHA-256 is missing, or
+        Serialized against check()/download() (see _op_lock). Refuses
+        (structured error, nothing staged) when: no update was found,
+        the release needs a newer minimum connector version, no public
+        key is configured, the signature/SHA-256 is missing, or
         verification fails. A failed download never leaves a staged file.
         """
+        async with self._op_lock:
+            return await self._download_locked()
+
+    async def _download_locked(self) -> dict[str, Any]:
         if self._latest is None:
-            await self.check()
+            await self._check_locked()
         if self._state == "incompatible":
             return self.status()  # error already recorded by check()
         if self._state not in ("update_available", "staged"):
