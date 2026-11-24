@@ -177,6 +177,24 @@ def test_cli_health_and_mt5_list_json(running_bridge, tmp_path: Path):
         assert doc["ok"] is True and "data" in doc
 
 
+def test_cli_diagnostics_json_against_running_bridge(running_bridge, tmp_path: Path):
+    # S2: diagnostics --json must work against the RUNNING instance,
+    # not just against unit mocks — same live fixture as status/health.
+    code, out = _run_cli_query(tmp_path, ["diagnostics", "--json"])
+    assert code == 0, out
+    lines = [ln for ln in out.strip().splitlines() if ln.strip()]
+    assert len(lines) == 1, "one-shot CLI ops must print exactly one JSON document"
+    doc = json.loads(lines[0])
+    assert doc["ok"] is True
+    data = doc["data"]
+    assert data["bridge"]["healthy"] is False  # no MT5 on this host
+    assert data["diagnostic"]["code"] == "MT5_NOT_FOUND"
+    assert data["diagnostic"]["recovery"]
+    assert "mt5" in data and "websocket" in data and "enrolment" in data
+    assert data["log_file"].endswith("bridge.log")
+    assert doc["timestamp"].endswith("Z")
+
+
 def test_cli_refuses_when_bridge_is_down(tmp_path: Path):
     code, out = _run_cli_query(tmp_path, ["status", "--json"])
     assert code == bridge_cli.EXIT_NOT_RUNNING
