@@ -191,10 +191,14 @@ async def test_enrolment_posts_manifest_once_per_hash():
     manager, rest, _ctx = _manager(handler)
     assert await manager.enrol_once() is True
     assert manager.state == "registered"
+    # The manifest POST is a background task now — wait for it before
+    # counting the recorded requests.
+    await manager.wait_for_manifest()
     assert calls.count("/api/v1/connector/manifest") == 1
     # A second enrolment (re-enrolment path) does NOT re-post the
     # unchanged manifest — the tracker remembers the hash.
     assert await manager.enrol_once() is True
+    await manager.wait_for_manifest()
     assert calls.count("/api/v1/connector/manifest") == 1
     assert calls.count("/api/v1/connector/validate-key") == 2
     assert calls.count("/api/v1/connector/register-device") == 2
@@ -219,7 +223,10 @@ async def test_enrolment_stays_registered_when_manifest_post_fails():
     assert await manager.enrol_once() is True
     assert manager.state == "registered"
     assert manager.is_registered
-    # The refused manifest was NOT marked sent, so a later enrolment
-    # retries it (once the server accepts, it stops).
+    # Wait for the background manifest POST: the refused manifest was
+    # NOT marked sent, so a later enrolment retries it (once the server
+    # accepts, it stops). Without the wait this would pass vacuously —
+    # the POST simply would not have run yet.
+    await manager.wait_for_manifest()
     assert manager.manifest_tracker.last_sent_hash is None
     await rest.close()

@@ -20,7 +20,11 @@ from nse_bridge.engine.execution import validate_pending
 from nse_bridge.engine.symbols import SymbolsListRequest, get_trading_symbols
 from nse_bridge.engine.trading import close_position, market_order
 from nse_bridge.errors import BridgeError, ErrorCode
-from nse_bridge.mt5.driver import Mt5Driver
+from nse_bridge.mt5.driver import (
+    MT5_PLATFORM_SUPPORTED,
+    MT5_WINDOWS_REQUIRED_CODE,
+    Mt5Driver,
+)
 from nse_bridge.server.commands import CommandEnvelope, CommandExecutor, CommandValidator
 from nse_bridge.server.rest import Entitlements
 from nse_bridge.server.sync import SyncCheckpoint, SyncEngine, parse_broker_time
@@ -446,6 +450,16 @@ def test_a3_close_position_zero_bid_refuses(ctx):
 def test_a4_failed_connect_with_no_last_error_returns_failure_dict(tmp_path):
     settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"), mt5_retries=1)
     driver = Mt5Driver(settings)
+    if not MT5_PLATFORM_SUPPORTED:
+        # v1.3.0 honest gate: on a platform where the IPC driver cannot
+        # load, connect() fails fast with MT5_WINDOWS_REQUIRED before
+        # any fake/real MT5 module is consulted — the A4
+        # initialize-failed path below is only reachable where a
+        # driver can load (Windows x64).
+        result = driver.connect()
+        assert result["ok"] is False
+        assert result["diagnostic_code"] == MT5_WINDOWS_REQUIRED_CODE
+        return
     fake = _FakeMt5(symbol_rows=[_symbol_row("EURUSD")], ticks={"EURUSD": _tick()})
     fake.initialize_result = False
     fake.last_error_result = None  # the broker reports no error detail

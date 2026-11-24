@@ -91,9 +91,44 @@ Spec contents:
   non-triviality are gated by `tests/unit/test_icon_asset.py`, and
   the installer carries the same asset (`SetupIconFile`, see below).
 - **Bundled data:** `nse_bridge/gui/static` (Control Center HTML).
-  Hidden imports cover `MetaTrader5`, `numpy`, `pywebview`,
-  `websockets`, `uvicorn`, `loguru`, `webview.platforms`.
+  Hidden imports cover `numpy`, `pywebview`, `websockets`, `uvicorn`,
+  `loguru`, `webview.platforms` — plus `MetaTrader5` on Windows x64
+  only (see the cross-platform section below).
   Excluded: `tkinter`, `matplotlib`, `pandas`, `pytest`.
+
+### Cross-platform builds (v1.3.0): one spec, six targets
+
+PyInstaller cannot cross-compile, so the same `bridge.spec` runs
+natively on each CI runner (`.github/workflows/build.yml`:
+`build-windows`, `build-windows-arm`, `build-unix`):
+
+| Target | Runner | Output |
+|---|---|---|
+| Windows x64 | `windows-latest` | single-file exe + Inno Setup installer (§3.1) |
+| Windows ARM64 | `windows-11-arm` | single-file exe, core-only (portable, no installer) |
+| macOS x64 | `macos-15-intel` | `.app` bundle (`BUNDLE`) → `.dmg` via `hdiutil` |
+| macOS arm64 | `macos-latest` | `.app` bundle (`BUNDLE`) → `.dmg` via `hdiutil` |
+| Linux x64 | `ubuntu-latest` | single-file binary → tarball |
+| Linux arm64 | `ubuntu-24.04-arm` | single-file binary → tarball |
+
+Windows-only pieces are gated on `sys.platform == "win32"` inside
+the spec and must never break a macOS/Linux build: the `MetaTrader5`
+package (win_amd64 wheels only — absent on macOS/Linux and on
+native-ARM64 Windows, so `collect_all` is skipped there), the
+VSVersionInfo resource + app manifest, and the `.ico` icon. macOS
+ships without a custom icon: no `.icns` asset exists yet (the
+`.app` uses the default icon until one is generated from
+`assets/icon.ico` — a known gap, not a build failure). The
+`BUNDLE` `info_plist` carries `CFBundleShortVersionString` /
+`CFBundleVersion` parsed from `BRIDGE_VERSION` at spec time.
+
+Every build job re-runs the gates (lint + format + mypy + security
++ unit/mock-integration tests) and a headless frozen-binary smoke
+(`--help`, `/health`, `/ui` 200, `status --json` parses) before
+packaging. MT5 is Windows-x64-only by design: the core builds and
+runs everywhere, terminal attach reports `MT5_WINDOWS_REQUIRED`
+(see `nse_bridge.mt5.driver.MT5_PLATFORM_SUPPORTED`).
+
 
 Smoke-check a built exe. `--help` exits before any server or GUI
 starts, so it is safe on a runner; the deeper smoke is
