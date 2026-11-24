@@ -283,11 +283,19 @@ def open_folder(path: str) -> bool:
     action). Never raises."""
     try:
         if sys.platform == "win32":
-            os.startfile(path)
+            os.startfile(path)  # nosec B606 — opens the bridge log folder in Explorer
         elif sys.platform == "darwin":
-            subprocess.Popen(["open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(  # nosec B603 B607
+                ["open", path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         else:
-            subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(  # nosec B603 B607
+                ["xdg-open", path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         return True
     except Exception:  # noqa: BLE001
         return False

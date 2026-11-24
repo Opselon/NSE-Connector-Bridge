@@ -131,7 +131,7 @@ def _try_explicit_browser(url: str) -> BrowserOpenResult:
         seen.add(path)
         attempts += 1
         try:
-            subprocess.Popen(
+            subprocess.Popen(  # nosec B603 — list argv, no shell; exe resolved, URL is the bridge's own dashboard
                 [path, url],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -178,7 +178,7 @@ def wait_for_http_ready(url: str, timeout_s: float = 5.0, interval_s: float = 0.
     deadline = time.monotonic() + timeout_s
     while True:
         try:
-            with urllib.request.urlopen(url, timeout=2) as response:
+            with urllib.request.urlopen(url, timeout=2) as response:  # nosec B310 — localhost readiness probe
                 if 200 <= response.status < 300:
                     return True
         except Exception:  # noqa: BLE001, S110 — not up yet; retry until the deadline
