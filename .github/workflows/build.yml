@@ -208,8 +208,8 @@ jobs:
         #    complete enough to boot Python).
         # 2. Headless serve smoke: the exe binds the loopback API,
         #    /health answers, /ui serves the bundled Control Center
-        #    (GUI asset integrity), and the single-instance mutex
-        #    rejects a second launch with exit code 2.
+        #    (GUI asset integrity), and a second launch brings the
+        #    running dashboard to front and exits 0 (S1).
         # 3. CLI JSON contract: status/health/mt5 list --json answer
         #    with one parseable JSON document and exit 0 against the
         #    RUNNING instance (same-user secret store provides the
@@ -258,18 +258,27 @@ jobs:
               # element-boundaries of ArgumentList arrays — observed:
               # "status" + "--json" arrived as one token "status--json").
               $argStr = ($cli -join ' ') + ' --json'
+              # -Wait has no timeout: a hung CLI would burn the whole
+              # 40-min job budget. WaitForExit(60s) fails fast instead.
               $cp = Start-Process -FilePath "dist/NSE-MT5-Bridge.exe" `
-                -ArgumentList $argStr -Wait -PassThru `
+                -ArgumentList $argStr -PassThru `
                 -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+              if (-not $cp.WaitForExit(60000)) { Stop-Process -Id $cp.Id -Force; throw "CLI '$cli' timed out after 60 s" }
               if ($cp.ExitCode -ne 0) {
                 Write-Host "--- cli stderr ---"; Get-Content $errFile | Write-Host
                 throw "CLI '$cli' exited with $($cp.ExitCode)"
               }
               Get-Content $outFile -Raw | ConvertFrom-Json > $null
             }
-            # Single instance: a second launch must refuse fast (exit 2).
-            $second = Start-Process -FilePath "dist/NSE-MT5-Bridge.exe" -ArgumentList "--gui","none","--port","8799" -Wait -PassThru
-            if ($second.ExitCode -ne 2) { throw "second instance exited $($second.ExitCode), expected 2" }
+            # Single instance (S1): a second launch brings the running
+            # dashboard to front and exits 0 — it must never hang (a
+            # modal dialog on the failure path blocked the process
+            # until the 40-min job timeout; headless runs skip the
+            # browser + dialog entirely now). Bounded wait so a future
+            # hang fails fast instead of burning the job budget.
+            $second = Start-Process -FilePath "dist/NSE-MT5-Bridge.exe" -ArgumentList "--gui","none","--port","8799" -PassThru
+            if (-not $second.WaitForExit(60000)) { Stop-Process -Id $second.Id -Force; throw "second instance did not exit within 60 s (bring-to-front hang)" }
+            if ($second.ExitCode -ne 0) { throw "second instance exited $($second.ExitCode), expected 0 (bring-to-front)" }
             Write-Host "frozen exe serve + GUI asset + CLI JSON + single-instance smoke OK"
           } finally {
             if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
