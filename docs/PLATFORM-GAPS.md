@@ -156,6 +156,23 @@ explicitly left to the Platform side to define.
   `cancel_order` are explicitly NOT sendable in v1. The full 91-command
   registry stays available **locally**; the server channel enforces the
   3-op allowlist at the channel boundary.
+- **v1.3.0 update (S4, 2026-11-24):** a client-side v2 `open_order`
+  hook now exists (`nse_bridge/engine/v2_open_order.py`) — but it is
+  BEHIND A FLAG, default DISABLED, and NOT wired into the live command
+  path. It refuses loudly (`FEATURE_DISABLED`) when the operator flag
+  (`NSE_BRIDGE_ENABLE_V2_OPEN_ORDER`) is off and when protocol v2 has
+  not been negotiated with the Platform, and it never touches the
+  driver on refusal. **The Bridge alone does not enable
+  new-position trading** — the P3 protocol (risk engine, financial
+  consent, kill-switch enforcement, negotiated `schema_version` bump)
+  remains the gate, and the §17.5 activation gate still rejects
+  server-sent `open_order` frames as `UnsupportedOperation`. The hook
+  is a tested, dormant entry point for the P3 work, not a live
+  trading surface. The v1 execution path itself was hardened in the
+  same release (bounded-backoff retries on retryable retcodes only,
+  fail-fast hard rejects, 10036 close idempotency,
+  reconcile-before-retry for `modify_pending` — see
+  `docs/API_PROTOCOL.md` §3.1b); none of that widens the allowlist.
 - Before the allowlist can widen, the Platform needs to prove, on the
   ops that are already allowed:
   - the dispatcher gate chain (validation order §6.3, replay cache,

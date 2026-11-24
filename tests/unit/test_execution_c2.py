@@ -61,6 +61,8 @@ class _FakeMt5:
         send_retcode=10009,
         send_partial_volume=None,
         check_retcode=0,
+        send_retcodes=None,
+        close_10036_keeps_position=False,
     ):
         self.positions = {p.ticket: p for p in (positions or [])}
         self.orders: dict[int, SimpleNamespace] = {}
@@ -68,6 +70,14 @@ class _FakeMt5:
         self.ticks = ticks or {}
         self.account = account
         self.send_retcode = send_retcode
+        # When set, order_send returns these retcodes in order (one per
+        # call), then falls back to ``send_retcode`` — lets retry tests
+        # stage a requote followed by a success, etc.
+        self.send_retcodes = list(send_retcodes) if send_retcodes is not None else None
+        # 10036 (POSITION_CLOSED) normally means the book no longer has
+        # the ticket; set True to simulate the broker contradicting
+        # itself (position still open after 10036).
+        self.close_10036_keeps_position = close_10036_keeps_position
         # When set, a DEAL close reduces the position by this amount
         # instead of the requested volume (simulates a partial fill).
         self.send_partial_volume = send_partial_volume
@@ -122,6 +132,11 @@ class _FakeMt5:
     def shutdown(self):
         pass
 
+    def _next_retcode(self):
+        if self.send_retcodes:
+            return self.send_retcodes.pop(0)
+        return self.send_retcode
+
     # -- dispatch -----------------------------------------------------
     def order_check(self, request):
         """Official pre-send check (W2): passes (retcode 0) unless a
@@ -143,17 +158,20 @@ class _FakeMt5:
     def order_send(self, request):
         self.sent_requests.append(dict(request))
         self.send_calls += 1
+        retcode = self._next_retcode()
         action = request.get("action")
         if action == self.TRADE_ACTION_DEAL and "position" in request:
             # close (full or partial): apply to the stored position
             pos = self.positions.get(int(request["position"]))
-            if pos is not None and self.send_retcode in (10009, 10010):
+            if pos is not None and retcode in (10009, 10010):
                 filled = self.send_partial_volume if self.send_partial_volume is not None else float(request["volume"])
                 remaining = round(float(pos.volume) - filled, 8)
                 if remaining <= 1e-9:
                     del self.positions[int(request["position"])]
                 else:
                     pos.volume = remaining
+            elif pos is not None and retcode == 10036 and not self.close_10036_keeps_position:
+                del self.positions[int(request["position"])]
         elif action == self.TRADE_ACTION_PENDING:
             ticket = self._next_order_ticket
             self._next_order_ticket += 1
@@ -173,7 +191,7 @@ class _FakeMt5:
                 comment=request.get("comment", ""),
             )
             return SimpleNamespace(
-                retcode=self.send_retcode,
+                retcode=retcode,
                 order=ticket,
                 deal=0,
                 price=request.get("price"),
@@ -183,7 +201,7 @@ class _FakeMt5:
         elif action == self.TRADE_ACTION_CLOSE_BY:
             a = self.positions.get(int(request["position"]))
             b = self.positions.get(int(request["position_by"]))
-            if a is not None and b is not None and self.send_retcode == 10009:
+            if a is not None and b is not None and retcode == 10009:
                 va, vb = float(a.volume), float(b.volume)
                 if va <= vb:
                     del self.positions[int(request["position"])]
@@ -195,7 +213,7 @@ class _FakeMt5:
                     del self.positions[int(request["position_by"])]
                     a.volume = round(va - vb, 8)
         return SimpleNamespace(
-            retcode=self.send_retcode,
+            retcode=retcode,
             order=request.get("order", 0),
             deal=8000001,
             price=request.get("price", 0.0),
@@ -1027,3 +1045,222 @@ def test_executor_partial_close_reports_partially_completed(monkeypatch, tmp_pat
     assert result["status"] == "executed"
     assert result["payload"]["partial"] is True
     assert result["payload"]["remaining_volume"] == 0.6
+
+
+# ----------------------------------------------------------------------
+# S4 (v1.3.0) — bounded retries, fail-fast hard rejects, close
+# idempotency (10036), modify_pending reconcile-before-retry
+# ----------------------------------------------------------------------
+def _recording_policy():
+    from nse_bridge.engine.retry import ExecutionRetryPolicy
+
+    sleeps: list[float] = []
+    return ExecutionRetryPolicy(sleep=sleeps.append), sleeps
+
+
+def _position_ctx(tmp_path, *, send_retcode=10009, send_retcodes=None, **fake_kw):
+    fake = _FakeMt5(
+        positions=[_position(2001, type_=0, volume=1.0)],
+        symbol_rows=[_symbol_row("EURUSD")],
+        ticks={"EURUSD": _tick()},
+        account=_account(),
+        send_retcode=send_retcode,
+        send_retcodes=send_retcodes,
+        **fake_kw,
+    )
+    ctx, driver = _ctx_with(fake, tmp_path)
+    return ctx, driver, fake
+
+
+def test_retry_policy_backoff_is_bounded():
+    from nse_bridge.engine.retry import ExecutionRetryPolicy
+
+    policy = ExecutionRetryPolicy()
+    assert policy.delay_for(1) == pytest.approx(0.10)
+    assert policy.delay_for(2) == pytest.approx(0.20)
+    assert policy.delay_for(3) == pytest.approx(0.40)
+    assert policy.delay_for(99) == pytest.approx(1.0)  # capped, never unbounded
+    sleeps: list[float] = []
+    capped = ExecutionRetryPolicy(sleep=sleeps.append)
+    assert capped.backoff(1) == pytest.approx(0.10)
+    assert capped.backoff(3) == 0.0  # no retry remains at max_attempts
+    assert sleeps == [0.10]
+
+
+def test_retryable_retcode_excludes_unverified():
+    from nse_bridge.engine.retry import retryable_retcode
+
+    assert retryable_retcode(10004) is True  # requote
+    assert retryable_retcode(10012) is True  # timeout
+    assert retryable_retcode(10020) is True  # price changed
+    assert retryable_retcode(10024) is True  # too many requests: back off, retry
+    assert retryable_retcode(10031) is False  # CONNECTION: reconcile, never blind-retry
+    assert retryable_retcode(None) is False  # no result: outcome unverified
+    assert retryable_retcode(10006) is False  # hard reject
+    assert retryable_retcode(10016) is False  # repairable, not retryable
+
+
+def test_close_retries_transient_with_backoff_then_succeeds(tmp_path):
+    policy, sleeps = _recording_policy()
+    ctx, driver, fake = _position_ctx(tmp_path, send_retcodes=[10020, 10009])
+    try:
+        out = close_position(ctx, 2001, retry_policy=policy)
+    finally:
+        driver.disconnect()
+    assert out["status"] == "done"
+    assert out["attempts"] == 2
+    assert fake.send_calls == 2
+    assert sleeps == [pytest.approx(0.10)]  # bounded exponential backoff, not fixed 25 ms
+    assert fake.positions == {}  # closed exactly once
+
+
+def test_close_hard_reject_fails_fast_without_retry(tmp_path):
+    policy, sleeps = _recording_policy()
+    ctx, driver, fake = _position_ctx(tmp_path, send_retcode=10029)  # FROZEN
+    try:
+        with pytest.raises(BridgeError) as excinfo:
+            close_position(ctx, 2001, retry_policy=policy)
+    finally:
+        driver.disconnect()
+    assert excinfo.value.code is ErrorCode.TRADE_REJECTED
+    assert excinfo.value.details["attempts"] == 1
+    assert fake.send_calls == 1  # no pointless re-sends of a frozen close
+    assert sleeps == []
+    assert 2001 in fake.positions  # nothing was closed
+
+
+def test_close_position_closed_retcode_is_idempotent_success(tmp_path):
+    """10036 POSITION_CLOSED + ticket gone from the live book = the
+    desired state already holds: done (already_closed), never a
+    failure and never a retry."""
+    ctx, driver, fake = _position_ctx(tmp_path, send_retcode=10036)
+    try:
+        out = close_position(ctx, 2001)
+    finally:
+        driver.disconnect()
+    assert out["status"] == "done"
+    assert out["already_closed"] is True
+    assert out["reconciled"] is True
+    assert out["attempts"] == 1
+    assert fake.send_calls == 1
+
+
+def test_close_position_closed_retcode_with_position_open_is_unverified(tmp_path):
+    """10036 while the position is STILL open contradicts broker state:
+    neither success nor a retry — TRADE_UNVERIFIED."""
+    ctx, driver, fake = _position_ctx(tmp_path, send_retcode=10036, close_10036_keeps_position=True)
+    try:
+        with pytest.raises(BridgeError) as excinfo:
+            close_position(ctx, 2001)
+    finally:
+        driver.disconnect()
+    assert excinfo.value.code is ErrorCode.TRADE_UNVERIFIED
+    assert fake.send_calls == 1
+    assert 2001 in fake.positions
+
+
+def test_modify_sltp_retries_transient_then_succeeds(tmp_path):
+    policy, sleeps = _recording_policy()
+    ctx, driver, fake = _position_ctx(tmp_path, send_retcodes=[10004, 10009])
+    try:
+        out = modify_position_sltp(ctx, 2001, sl=1.0900, tp=1.1100, retry_policy=policy)
+    finally:
+        driver.disconnect()
+    assert out["status"] == "done"
+    assert out["attempts"] == 2
+    assert fake.send_calls == 2
+    assert sleeps == [pytest.approx(0.10)]
+
+
+def test_modify_sltp_hard_reject_fails_fast_without_retry(tmp_path):
+    policy, sleeps = _recording_policy()
+    ctx, driver, fake = _position_ctx(tmp_path, send_retcode=10006)  # REJECTED
+    try:
+        with pytest.raises(BridgeError) as excinfo:
+            modify_position_sltp(ctx, 2001, sl=1.0900, tp=1.1100, retry_policy=policy)
+    finally:
+        driver.disconnect()
+    assert excinfo.value.code is ErrorCode.TRADE_REJECTED
+    assert excinfo.value.details["attempts"] == 1
+    assert fake.send_calls == 1
+    assert sleeps == []
+
+
+def test_modify_pending_retries_transient_then_succeeds(ctx):
+    policy, sleeps = _recording_policy()
+    ctx.driver._mt5.orders[6001] = SimpleNamespace(
+        ticket=6001,
+        symbol="EURUSD",
+        type=2,
+        price_open=1.0950,
+        price_current=1.0950,
+        volume_current=0.1,
+        volume_initial=0.1,
+        sl=0.0,
+        tp=0.0,
+        time_setup=int(time.time()),
+        type_time=0,
+        magic=0,
+        comment="",
+    )
+    ctx.driver._mt5.send_retcodes = [10004, 10009]
+    out = trade_modify_pending_order(ctx, ModifyPendingRequest(ticket=6001, sl=1.0900, tp=1.1100), retry_policy=policy)
+    assert out["status"] == "done"
+    assert out["attempts"] == 2
+    assert ctx.driver._mt5.send_calls == 2
+    assert sleeps == [pytest.approx(0.10)]
+
+
+def test_modify_pending_reconciles_before_retry_when_state_landed(ctx):
+    """A timeout retcode after the broker already applied the modify
+    must NOT re-send: the live order already holds the target state,
+    so the call returns done (reconciled) after a single send."""
+    policy, sleeps = _recording_policy()
+    ctx.driver._mt5.orders[6001] = SimpleNamespace(
+        ticket=6001,
+        symbol="EURUSD",
+        type=2,
+        price_open=1.0950,
+        price_current=1.0950,
+        volume_current=0.1,
+        volume_initial=0.1,
+        sl=1.0900,  # target state already live
+        tp=1.1100,
+        time_setup=int(time.time()),
+        type_time=0,
+        magic=0,
+        comment="",
+    )
+    ctx.driver._mt5.send_retcodes = [10012]  # TIMEOUT — outcome ambiguous
+    out = trade_modify_pending_order(ctx, ModifyPendingRequest(ticket=6001, sl=1.0900, tp=1.1100), retry_policy=policy)
+    assert out["status"] == "done"
+    assert out["reconciled"] is True
+    assert out["attempts"] == 1
+    assert ctx.driver._mt5.send_calls == 1  # never re-sent
+    assert sleeps == []
+
+
+def test_modify_pending_hard_reject_fails_fast_without_retry(ctx):
+    policy, sleeps = _recording_policy()
+    ctx.driver._mt5.orders[6001] = SimpleNamespace(
+        ticket=6001,
+        symbol="EURUSD",
+        type=2,
+        price_open=1.0950,
+        price_current=1.0950,
+        volume_current=0.1,
+        volume_initial=0.1,
+        sl=0.0,
+        tp=0.0,
+        time_setup=int(time.time()),
+        type_time=0,
+        magic=0,
+        comment="",
+    )
+    ctx.driver._mt5.send_retcode = 10006  # REJECTED
+    with pytest.raises(BridgeError) as excinfo:
+        trade_modify_pending_order(ctx, ModifyPendingRequest(ticket=6001, sl=1.0900, tp=1.1100), retry_policy=policy)
+    assert excinfo.value.code is ErrorCode.TRADE_REJECTED
+    assert excinfo.value.details["attempts"] == 1
+    assert ctx.driver._mt5.send_calls == 1
+    assert sleeps == []

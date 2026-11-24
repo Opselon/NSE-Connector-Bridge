@@ -79,6 +79,13 @@ TRADE_RETCODE_DONE_PARTIAL = 10010  # DONE_PARTIAL — request partially complet
 TRADE_RETCODE_NO_CHANGES = 10025  # NO_CHANGES — requested state already holds; idempotent success
 TRADE_RETCODE_PLACED = 10008  # PLACED — order accepted and placed (pending), not yet filled
 TRADE_RETCODE_CONNECTION = 10031  # CONNECTION — no connection with the trade server (outcome UNKNOWN)
+#: 10036 POSITION_CLOSED — the position is already closed. For a close
+#: this is an IDEMPOTENT success once the live position book confirms
+#: the ticket is gone (S4: a close that reports 10036 must not be
+#: retried or reported as a failure). ``classify_retcode`` still maps
+#: it to HARD_REJECT — the close path handles it explicitly, because
+#: only the close path can verify the idempotent state.
+TRADE_RETCODE_POSITION_CLOSED = 10036
 #: order_check pass code — the package reports 0 when the pre-send check
 #: succeeded (verified live: scripts/phase2b_probe_order_check.py, E-OC-1).
 ORDER_CHECK_RETCODE_OK = 0

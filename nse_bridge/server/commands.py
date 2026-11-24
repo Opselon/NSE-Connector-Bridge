@@ -712,6 +712,15 @@ class CommandExecutor:
                 "closed_volume": payload.get("closed_volume") if payload else None,
                 "remaining_volume": payload.get("remaining_volume") if payload else None,
                 "reconciled": payload.get("reconciled") if payload else None,
+                # S4 execution-hardening status (existing surface only):
+                # attempts spent, broker retcode, and the idempotent /
+                # reconciled outcomes, so the UI can show what actually
+                # happened without a new execution surface.
+                "retcode": payload.get("retcode") if payload else None,
+                "retcode_label": payload.get("retcode_label") if payload else None,
+                "attempts": payload.get("attempts") if payload else None,
+                "already_closed": payload.get("already_closed") if payload else None,
+                "no_changes": payload.get("no_changes") if payload else None,
                 "history": [list(step) for step in execution.history],
             }
         )
