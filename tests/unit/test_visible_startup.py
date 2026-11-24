@@ -481,6 +481,30 @@ def test_second_launch_browser_failure_shows_url_and_copies_it(monkeypatch, _pat
     assert "http://127.0.0.1:8788/ui#platform" in dialogs[0][1]
 
 
+def test_second_launch_headless_never_opens_browser_or_dialog(monkeypatch, _patch_main_boot, capsys):
+    """--gui none: the second launch prints the URL and exits 0 without
+    touching a browser or a dialog — a modal MessageBox here hung the
+    CI smoke until the 40-min job timeout (no user to dismiss it)."""
+    import nse_bridge.main as main_mod
+    import nse_bridge.single_instance as single_mod
+
+    monkeypatch.setattr(single_mod, "acquire_single_instance", lambda: (None, False))
+    opened: list[str] = []
+    dialogs: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        main_mod, "open_dashboard", lambda url: opened.append(url) or BrowserOpenResult(ok=True, method="default")
+    )
+    monkeypatch.setattr(main_mod, "show_info_dialog", lambda t, m: dialogs.append((t, m)) or True)
+    monkeypatch.setattr(main_mod, "copy_to_clipboard", lambda text: True)
+    # Returns normally (exit 0) — the running instance keeps serving.
+    main_mod.main(["--port", "8788", "--gui", "none"])
+    assert opened == []
+    assert dialogs == []
+    out = capsys.readouterr().out
+    assert "already running" in out
+    assert "http://127.0.0.1:8788/ui#platform" in out
+
+
 def test_port_taken_fails_visibly_with_exit_2(monkeypatch, _patch_main_boot):
     import nse_bridge.main as main_mod
     import nse_bridge.single_instance as single_mod

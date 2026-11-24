@@ -206,7 +206,7 @@ def _check_port_free(host: str, port: int) -> str | None:
         sock.close()
 
 
-def _bring_existing_to_front(base_url: str, *, configured: bool) -> None:
+def _bring_existing_to_front(base_url: str, *, configured: bool, gui_visible: bool = True) -> None:
     """Second launch while the bridge is already running: open the
     RUNNING instance's dashboard (bringing the UI to front) instead
     of exiting silently — the v1.2.2 behaviour that made every
@@ -214,8 +214,18 @@ def _bring_existing_to_front(base_url: str, *, configured: bool) -> None:
 
     When no browser can be opened, the URL is shown in a dialog AND
     copied to the clipboard so the user can paste it manually.
+
+    Headless runs (``--gui none`` / ``--console``) never open a browser
+    and never show a dialog: a modal MessageBox here would block the
+    process until a user dismisses it, and on a headless runner there
+    is no user — the second launch hung until the 40-min CI job
+    timeout. The URL is printed (the console IS the surface) and the
+    process exits 0 promptly.
     """
     url = dashboard_url(base_url, configured)
+    if not gui_visible:
+        print(f"NSE MT5 Bridge is already running — dashboard: {url}")
+        return
     result = open_dashboard(url)
     if result.ok:
         logger.info("[BOOT] bridge already running — dashboard opened in browser via {}", result.method)
@@ -346,7 +356,7 @@ def _run(args: argparse.Namespace, settings, gui_visible: bool) -> None:  # type
     # releases the mutex when the owning process exits.
     _instance_lock, acquired = acquire_single_instance()
     if not acquired:
-        _bring_existing_to_front(base_url, configured=configured)
+        _bring_existing_to_front(base_url, configured=configured, gui_visible=gui_visible)
         return
 
     update_splash("Checking port…")
