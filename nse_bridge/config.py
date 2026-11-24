@@ -214,6 +214,16 @@ class BridgeSettings(BaseSettings):
     # The guard applies ONLY when a magic IS configured (magic is not
     # None). With no magic configured there is nothing to guard
     # against, so the guard passes (see engine/trading._position_owns).
+    # --- v2 open_order hook (S4, v1.3.0) ------------------------------
+    # Client-side v2 open_order hook flag. DEFAULT DISABLED. Enabling
+    # it alone does NOT enable new-position trading: the Platform must
+    # also ship the P3 protocol and negotiate protocol v2 with this
+    # Bridge (see nse_bridge/engine/v2_open_order.py). The hook is not
+    # wired into the server command path, and the §17.5 activation
+    # gate still rejects server-sent open_order frames. Env:
+    # NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=1. Deliberately NOT persisted
+    # by persist_settings — an operator enables it explicitly, per run.
+    enable_v2_open_order: bool = False
 
     # --- streaming ------------------------------------------------------
     stream_account_interval_ms: int = 1000

@@ -225,6 +225,50 @@ then the wire behavior stays `UnsupportedOperation`.
 The full 91-command registry stays available **locally**; only the
 server channel enforces this allowlist, at this boundary.
 
+#### 3.1a v2 `open_order` hooks — client-side, behind a flag, NOT live (v1.3.0)
+
+The Bridge alone does **not** enable new-position trading. A
+client-side v2 hook exists (`nse_bridge/engine/v2_open_order.py`)
+so the P3 work has a tested entry point, but it is dormant:
+
+- **Two independent gates, both default CLOSED.** (1) The operator
+  flag `enable_v2_open_order` (`NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=1`,
+  default `False`; deliberately not persisted to `config.json`).
+  (2) A v2 negotiation with the Platform (`V2Negotiation`,
+  `negotiated=True` plus the negotiated `schema_version`) — there is
+  no v2 handshake in CONTRACT v1, so no production code can construct
+  a negotiated instance today.
+- **Refusal is loud:** a call with either gate closed raises
+  `FEATURE_DISABLED` naming exactly which gate is closed, and never
+  touches the driver (zero `order_send` calls).
+- **Not wired into the live command path:** `server/commands.py`
+  and `realtime/channel.py` never import the hook; the §17.5 gate
+  above still rejects server-sent `open_order` frames. The P3 work
+  owns the negotiation wire shape and the call site.
+- When both gates open, the hook dispatches through the proven local
+  primitives (`market_order` / `trade_send_pending_order`) with the
+  mandatory pre-send `order_check` + W4 reconciliation — it invents
+  no new execution path.
+
+#### 3.1b v1 execution hardening (v1.3.0)
+
+`close_position` / `modify_sl_tp` / `modify_pending` now retry only
+RETRYABLE retcodes (requote / timeout / price-changed / price-off /
+too-many-requests) with bounded exponential backoff (0.1 s → 0.2 s →
+0.4 s, capped at 1.0 s, max 3 sends; `nse_bridge/engine/retry.py`).
+Hard rejects and repairable requests fail fast on the first attempt.
+Retcode 10031 / no result is never re-sent — it raises
+`TRADE_UNVERIFIED` and reconciles against live broker state.
+`close_position` treats retcode 10036 `POSITION_CLOSED` as an
+idempotent success once the live book confirms the ticket is gone
+(`already_closed: true`); a 10036 with the position still open is
+`TRADE_UNVERIFIED`. `modify_pending` reconciles before retrying: if
+the live order already holds the target state, it returns done
+(`reconciled: true`) instead of re-sending. Payloads report
+`attempts`; the recent-executions surface additionally carries
+`retcode`, `retcode_label`, `attempts`, `already_closed`, and
+`no_changes` for the UI.
+
 ### 3.2 Envelope (§6.2)
 
 ```json

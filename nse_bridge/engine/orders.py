@@ -6,6 +6,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from ..errors import BridgeError, ErrorCode
@@ -26,6 +27,7 @@ from ..retcodes import (
 from ..timeutil import broker_dt
 from .common import BridgeContext
 from .registry import command
+from .retry import ExecutionRetryPolicy, retcode_class_label, retryable_retcode
 from .trading import reject
 
 
@@ -404,6 +406,39 @@ def trade_cancel_pending_order(ctx: BridgeContext, params: TicketRequest) -> dic
     }
 
 
+def _modify_pending_landed(ctx: BridgeContext, ticket: int, price: float, sl: float, tp: float) -> bool:
+    """Reconcile-before-retry: is the requested pending-order state
+    already live in the broker book?
+
+    A MODIFY sets absolute state (price/SL/TP), so the live order is
+    conclusive evidence. Brokers normalize prices to tick size, so the
+    comparison allows a half-tick tolerance (same rule as the command
+    layer's SL/TP reconciliation); a failed lookup is "not landed",
+    never an error here — the caller retries instead.
+    """
+    try:
+        raw = _fetch_order(ctx, ticket)
+        if raw is None:
+            return False
+        tol = 1e-9
+        try:
+            from .common import require_symbol_info
+
+            spec = require_symbol_info(ctx, str(_f(raw, "symbol", "")))
+            step = spec.trade_tick_size or spec.point
+            if step is not None and float(step) > 0:
+                tol = float(step) / 2.0 + 1e-9
+        except Exception as exc:  # noqa: BLE001 — tolerance lookup is best-effort
+            logger.debug("[MODIFY_PENDING] tick-size lookup failed, using 1e-9 tolerance: {}", type(exc).__name__)
+        return (
+            abs(float(_f(raw, "price_open", 0.0) or 0.0) - price) <= tol
+            and abs(float(_f(raw, "sl", 0.0) or 0.0) - sl) <= tol
+            and abs(float(_f(raw, "tp", 0.0) or 0.0) - tp) <= tol
+        )
+    except Exception:  # noqa: BLE001 — reconcile failure means "unknown", the caller retries
+        return False
+
+
 @command(
     "trade_modify_pending_order",
     number=62,
@@ -415,7 +450,12 @@ def trade_cancel_pending_order(ctx: BridgeContext, params: TicketRequest) -> dic
     response_model=CancelResponse,
     mutates=True,
 )
-def trade_modify_pending_order(ctx: BridgeContext, params: ModifyPendingRequest) -> dict[str, Any]:
+def trade_modify_pending_order(
+    ctx: BridgeContext,
+    params: ModifyPendingRequest,
+    *,
+    retry_policy: ExecutionRetryPolicy | None = None,
+) -> dict[str, Any]:
     """Modify a pending order (price/SL/TP/expiration, TRADE_ACTION_MODIFY).
 
     W2: the exact request runs through the official ``order_check``
@@ -424,7 +464,15 @@ def trade_modify_pending_order(ctx: BridgeContext, params: ModifyPendingRequest)
     response or retcode 10031 raises TRADE_UNVERIFIED — the command
     layer reconciles against the live order; the request is never
     re-sent while the outcome is unknown.
+
+    Retries (S4): only RETRYABLE retcodes are re-sent, with bounded
+    exponential backoff. Before a retry, the live order is re-read:
+    if the requested state already holds, the call returns done
+    (``reconciled: True``) instead of re-sending — a timeout retcode
+    may mean the broker applied the modify and the response was lost.
+    Hard rejects fail fast on the first attempt.
     """
+    policy = retry_policy or ExecutionRetryPolicy()
     raw = _fetch_order(ctx, params.ticket)
     if raw is None:
         raise BridgeError(
@@ -451,50 +499,97 @@ def trade_modify_pending_order(ctx: BridgeContext, params: ModifyPendingRequest)
         if exp is not None:
             request["type_time"] = consts["order_time_specified"]
             request["expiration"] = exp
-    # W2: official pre-send check with the exact request.
-    from .trading import order_check_send
+    last_check: dict[str, Any] | None = None
+    last_retcode: int | None = None
+    for attempt in range(1, policy.max_attempts + 1):
+        # W2: official pre-send check with the exact request.
+        from .trading import order_check_send
 
-    check = order_check_send(ctx, request, "modify_pending", no_changes_ok=True)
+        last_check = order_check_send(ctx, request, "modify_pending", no_changes_ok=True)
 
-    def job(mt5: Any, request=request):
-        return mt5.order_send(request)
+        def job(mt5: Any, request=request):
+            return mt5.order_send(request)
 
-    result = ctx.driver.run(job, op="order_send_modify", context={"ticket": params.ticket})
-    retcode = int(_f(result, "retcode", 0)) if result is not None else None
-    if result is None or retcode == TRADE_RETCODE_CONNECTION:
-        raise BridgeError(
-            ErrorCode.TRADE_UNVERIFIED,
-            f"Pending-order modify for #{params.ticket} returned "
-            + ("no result" if result is None else "retcode 10031 (no connection)")
-            + " — outcome unverified; reconcile the live order before retrying (never blind-retry).",
-            details={
+        result = ctx.driver.run(job, op="order_send_modify", context={"ticket": params.ticket})
+        retcode = int(_f(result, "retcode", 0)) if result is not None else None
+        last_retcode = retcode
+        if result is None or retcode == TRADE_RETCODE_CONNECTION:
+            raise BridgeError(
+                ErrorCode.TRADE_UNVERIFIED,
+                f"Pending-order modify for #{params.ticket} returned "
+                + ("no result" if result is None else "retcode 10031 (no connection)")
+                + " — outcome unverified; reconcile the live order before retrying (never blind-retry).",
+                details={
+                    "ticket": params.ticket,
+                    "retcode": retcode,
+                    "attempts": attempt,
+                    "order_check": last_check,
+                },
+            )
+        if retcode == TRADE_RETCODE_NO_CHANGES:
+            # Idempotent success (real-MT5 defect 1, same as modify_position_sltp):
+            # the requested price/SL/TP already hold — return success, never reject.
+            return {
+                "status": "done",
                 "ticket": params.ticket,
                 "retcode": retcode,
-                "order_check": check,
-            },
-        )
-    if retcode == TRADE_RETCODE_NO_CHANGES:
-        # Idempotent success (real-MT5 defect 1, same as modify_position_sltp):
-        # the requested price/SL/TP already hold — return success, never reject.
-        return {
-            "status": "done",
-            "ticket": params.ticket,
-            "retcode": retcode,
-            "retcode_label": translate_retcode(retcode),
-            "no_changes": True,
-            "order_check": check,
-        }
-    if retcode != TRADE_RETCODE_DONE:
+                "retcode_label": translate_retcode(retcode),
+                "no_changes": True,
+                "attempts": attempt,
+                "order_check": last_check,
+            }
+        if retcode == TRADE_RETCODE_DONE:
+            return {
+                "status": "done",
+                "ticket": params.ticket,
+                "retcode": retcode,
+                "retcode_label": translate_retcode(retcode),
+                "attempts": attempt,
+                "order_check": last_check,
+            }
+        if retryable_retcode(retcode) and attempt < policy.max_attempts:
+            # Reconcile-before-retry: the modify may have landed
+            # despite the retcode (e.g. a timeout after apply).
+            if _modify_pending_landed(ctx, params.ticket, price, sl, tp):
+                logger.info(
+                    "[MODIFY_PENDING] ticket={} target state already live after retcode={} — reconciled, not re-sent",
+                    params.ticket,
+                    retcode,
+                )
+                return {
+                    "status": "done",
+                    "ticket": params.ticket,
+                    "retcode": retcode,
+                    "retcode_label": translate_retcode(retcode),
+                    "reconciled": True,
+                    "attempts": attempt,
+                    "order_check": last_check,
+                }
+            logger.warning(
+                "[MODIFY_PENDING] ticket={} retcode={} ({}) — retryable, backing off before attempt {}/{}",
+                params.ticket,
+                retcode,
+                retcode_class_label(retcode),
+                attempt + 1,
+                policy.max_attempts,
+            )
+            policy.backoff(attempt)
+            continue
+        # Fail fast: a hard reject / repairable request can never
+        # succeed by re-sending, and the retry budget is spent.
         exc = reject(result, "modify_pending_order", symbol)
-        exc.details["order_check"] = check
+        exc.details["order_check"] = last_check
+        exc.details["attempts"] = attempt
         raise exc
-    return {
-        "status": "done",
-        "ticket": params.ticket,
-        "retcode": retcode,
-        "retcode_label": translate_retcode(retcode),
-        "order_check": check,
-    }
+    # Unreachable: every loop iteration returns, raises, or continues
+    # into the fail-fast raise — but mypy needs a terminus.
+    raise BridgeError(
+        ErrorCode.TRADE_REJECTED,
+        f"Pending-order modify failed for #{params.ticket}: retry budget exhausted "
+        f"({translate_retcode(last_retcode or 0)})",
+        retcode=last_retcode,
+        details={"ticket": params.ticket, "attempts": policy.max_attempts, "order_check": last_check},
+    )
 
 
 @command(

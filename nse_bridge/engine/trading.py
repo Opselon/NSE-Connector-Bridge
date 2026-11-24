@@ -35,9 +35,11 @@ from ..retcodes import (
     TRADE_RETCODE_DONE,
     TRADE_RETCODE_DONE_PARTIAL,
     TRADE_RETCODE_NO_CHANGES,
+    TRADE_RETCODE_POSITION_CLOSED,
     translate_retcode,
 )
 from .common import BridgeContext, account_info_model, resolve_filling_mode, resolve_order_symbol
+from .retry import ExecutionRetryPolicy, retcode_class_label, retryable_retcode
 from .symbols import _fresh_tick
 
 # ENUM_ACCOUNT_MARGIN_MODE (verified against the package constants in
@@ -416,7 +418,14 @@ def _recover_ambiguous(ctx: BridgeContext, symbol: str, side: str, magic: int) -
     return None
 
 
-def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) -> dict[str, Any]:
+def modify_position_sltp(
+    ctx: BridgeContext,
+    ticket: int,
+    sl: float,
+    tp: float,
+    *,
+    retry_policy: ExecutionRetryPolicy | None = None,
+) -> dict[str, Any]:
     """TRADE_ACTION_SLTP with pre-send order_check + ownership guard (ported modify_position).
 
     W2: the exact request runs through the official ``order_check``
@@ -426,11 +435,21 @@ def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) 
     layer reconciles against the live SL/TP; the request is NEVER
     re-sent while the outcome is unknown (TRADE_ACTION_SLTP sets an
     absolute state, so the reconciliation read is conclusive).
+
+    Retries (S4): only RETRYABLE retcodes (requote / timeout /
+    price-changed / price-off / too-many-requests) are re-sent, with
+    bounded exponential backoff from ``retry_policy``. Hard rejects
+    and repairable requests fail fast on the first attempt — re-sending
+    them could never succeed. Every attempt re-fetches the live
+    position and re-runs ``order_check`` (fresh state per attempt),
+    and the payload reports ``attempts``.
     """
     ctx.driver.ensure_connected()
+    policy = retry_policy or ExecutionRetryPolicy()
     last: Any = None
     last_check: dict[str, Any] | None = None
-    for attempt in range(1, 4):
+    last_retcode: int | None = None
+    for attempt in range(1, policy.max_attempts + 1):
         pos = fetch_position(ctx, ticket)
         if not _position_owns(ctx, pos):
             raise BridgeError(
@@ -458,10 +477,13 @@ def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) 
 
         last = ctx.driver.run(job, op="order_send_sltp", context={"ticket": ticket, "sl": sl, "tp": tp})
         retcode = int(_f(last, "retcode", 0)) if last is not None else None
+        last_retcode = retcode
         if last is None or retcode == TRADE_RETCODE_CONNECTION:
             # W4: outcome unknown — stop sending; the command layer
             # reconciles against the live SL/TP before anything else.
-            ctx.trade_metrics.record("modify_sltp", "unknown", 0.0, retcode, {"ticket": ticket, "uncertain": True})
+            ctx.trade_metrics.record(
+                "modify_sltp", "unknown", 0.0, retcode, {"ticket": ticket, "uncertain": True, "attempts": attempt}
+            )
             raise _unverified(
                 "modify_sl_tp",
                 f"SL/TP modification for #{ticket} returned "
@@ -472,6 +494,7 @@ def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) 
                     "sl": sl,
                     "tp": tp,
                     "retcode": retcode,
+                    "attempts": attempt,
                     "order_check": last_check,
                 },
             )
@@ -481,7 +504,9 @@ def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) 
             # nothing to retry. The old code retried the identical
             # request 3 times (NO_CHANGES every time) and then failed
             # the call even though the broker state was correct.
-            ctx.trade_metrics.record("modify_sltp", "done", 0.0, retcode, {"ticket": ticket, "no_changes": True})
+            ctx.trade_metrics.record(
+                "modify_sltp", "done", 0.0, retcode, {"ticket": ticket, "no_changes": True, "attempts": attempt}
+            )
             return {
                 "status": "done",
                 "ticket": ticket,
@@ -491,10 +516,11 @@ def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) 
                 "retcode": retcode,
                 "retcode_label": translate_retcode(retcode),
                 "no_changes": True,
+                "attempts": attempt,
                 "order_check": last_check,
             }
         if retcode == TRADE_RETCODE_DONE:
-            ctx.trade_metrics.record("modify_sltp", "done", 0.0, retcode, {"ticket": ticket})
+            ctx.trade_metrics.record("modify_sltp", "done", 0.0, retcode, {"ticket": ticket, "attempts": attempt})
             return {
                 "status": "done",
                 "ticket": ticket,
@@ -503,16 +529,36 @@ def modify_position_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) 
                 "tp": tp,
                 "retcode": retcode,
                 "retcode_label": translate_retcode(retcode),
+                "attempts": attempt,
                 "order_check": last_check,
             }
-        time.sleep(0.025)
-    retcode = int(_f(last, "retcode", 0)) if last is not None else 0
-    ctx.trade_metrics.record("modify_sltp", "rejected", 0.0, retcode, {"ticket": ticket})
+        if retryable_retcode(retcode) and attempt < policy.max_attempts:
+            logger.warning(
+                "[MODIFY_SLTP] ticket={} retcode={} ({}) — retryable, backing off before attempt {}/{}",
+                ticket,
+                retcode,
+                retcode_class_label(retcode),
+                attempt + 1,
+                policy.max_attempts,
+            )
+            policy.backoff(attempt)
+            continue
+        # Fail fast: a hard reject / repairable request can never
+        # succeed by re-sending, and the retry budget is spent.
+        ctx.trade_metrics.record("modify_sltp", "rejected", 0.0, retcode, {"ticket": ticket, "attempts": attempt})
+        raise BridgeError(
+            ErrorCode.TRADE_REJECTED,
+            f"SL/TP modification failed for #{ticket} after {attempt} attempt(s): {translate_retcode(retcode or 0)}",
+            retcode=retcode,
+            details={"ticket": ticket, "sl": sl, "tp": tp, "attempts": attempt, "order_check": last_check},
+        )
+    # Unreachable: every loop iteration returns, raises, or continues
+    # into the fail-fast raise — but mypy needs a terminus.
     raise BridgeError(
         ErrorCode.TRADE_REJECTED,
-        f"SL/TP modification failed for #{ticket} after 3 attempts: {translate_retcode(retcode)}",
-        retcode=retcode if retcode else None,
-        details={"ticket": ticket, "sl": sl, "tp": tp, "order_check": last_check},
+        f"SL/TP modification failed for #{ticket}: retry budget exhausted ({translate_retcode(last_retcode or 0)})",
+        retcode=last_retcode,
+        details={"ticket": ticket, "sl": sl, "tp": tp, "attempts": policy.max_attempts, "order_check": last_check},
     )
 
 
@@ -599,7 +645,13 @@ def _reconcile_uncertain_close(
     }
 
 
-def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None) -> dict[str, Any]:
+def close_position(
+    ctx: BridgeContext,
+    ticket: int,
+    volume: float | None = None,
+    *,
+    retry_policy: ExecutionRetryPolicy | None = None,
+) -> dict[str, Any]:
     """Close (fully or partially) with idempotent ambiguous-close handling (ported).
 
     Partial closes are reconciled against live broker state (spec §7):
@@ -614,11 +666,26 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
     prove the close failed — the send loop stops and the close is
     reconciled against live broker state (:func:`_reconcile_uncertain_close`);
     it is never re-sent while the outcome is unknown.
+
+    Retries (S4): only RETRYABLE retcodes are re-sent, with bounded
+    exponential backoff from ``retry_policy``; hard rejects fail fast.
+    Before a retry, the live position book is re-read — if the ticket
+    is already gone, the close landed despite the retcode and the call
+    returns done (recovered) instead of closing twice.
+
+    Idempotency (S4): retcode 10036 POSITION_CLOSED means the position
+    is already closed. The ticket is verified gone in the live book
+    and the call returns done with ``already_closed: True`` (this call
+    closed nothing) instead of a failure; if the position is STILL
+    open, broker state contradicts the retcode and the outcome is
+    TRADE_UNVERIFIED. The payload reports ``attempts`` throughout.
     """
     ctx.driver.ensure_connected()
+    policy = retry_policy or ExecutionRetryPolicy()
     last: Any = None
     last_check: dict[str, Any] | None = None
-    for attempt in range(1, 4):
+    last_retcode: int | None = None
+    for attempt in range(1, policy.max_attempts + 1):
         pos_raw = fetch_position(ctx, ticket)
         if not _position_owns(ctx, pos_raw):
             raise BridgeError(
@@ -670,6 +737,7 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
 
         last = ctx.driver.run(job, op="order_send_close", context={"ticket": ticket, "volume": close_volume})
         retcode = int(_f(last, "retcode", 0)) if last is not None else None
+        last_retcode = retcode
         if last is None or retcode == TRADE_RETCODE_CONNECTION:
             # W4: uncertain — reconcile against broker truth, never re-send.
             outcome_uncertain = _reconcile_uncertain_close(ctx, ticket, pos_volume, symbol)
@@ -681,9 +749,14 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
                     else "NO_RESPONSE - order_send returned no result object"
                 )
                 outcome_uncertain["order_check"] = last_check
-                ctx.trade_metrics.record("close_position", "done", 0.0, retcode, {"ticket": ticket, "reconciled": True})
+                outcome_uncertain["attempts"] = attempt
+                ctx.trade_metrics.record(
+                    "close_position", "done", 0.0, retcode, {"ticket": ticket, "reconciled": True, "attempts": attempt}
+                )
                 return outcome_uncertain
-            ctx.trade_metrics.record("close_position", "unknown", 0.0, retcode, {"ticket": ticket, "uncertain": True})
+            ctx.trade_metrics.record(
+                "close_position", "unknown", 0.0, retcode, {"ticket": ticket, "uncertain": True, "attempts": attempt}
+            )
             raise _unverified(
                 "close_position",
                 f"Close for #{ticket} returned "
@@ -694,6 +767,7 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
                     "ticket": ticket,
                     "volume": close_volume,
                     "retcode": retcode,
+                    "attempts": attempt,
                     "order_check": last_check,
                 },
             )
@@ -703,6 +777,7 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
                 "status": "done",
                 "ticket": ticket,
                 "closed_volume": close_volume,
+                "attempts": attempt,
                 "order_check": last_check,
             }
             requested_partial = close_volume < pos_volume - 1e-9
@@ -725,7 +800,12 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
                             ErrorCode.TRADE_UNVERIFIED,
                             f"Close for #{ticket} reported DONE_PARTIAL but the position volume is unchanged "
                             f"({remaining}) — reconcile broker state before retrying.",
-                            details={"ticket": ticket, "remaining_volume": remaining, "order_check": last_check},
+                            details={
+                                "ticket": ticket,
+                                "remaining_volume": remaining,
+                                "attempts": attempt,
+                                "order_check": last_check,
+                            },
                         )
                     payload["closed_volume"] = closed
                     payload["partial"] = remaining > 1e-9
@@ -737,37 +817,104 @@ def close_position(ctx: BridgeContext, ticket: int, volume: float | None = None)
                     payload["partial"] = True
                     payload["remaining_volume"] = None
                     payload["reconciled"] = False
-            ctx.trade_metrics.record("close_position", outcome, 0.0, retcode, {"ticket": ticket})
+            ctx.trade_metrics.record("close_position", outcome, 0.0, retcode, {"ticket": ticket, "attempts": attempt})
             return payload
-        if attempt < 3:
-            # idempotency guard: accepted server-side despite ambiguous retcode?
+        if retcode == TRADE_RETCODE_POSITION_CLOSED:
+            # Idempotent success — but only after the live book proves
+            # the ticket is actually gone. A 10036 with the position
+            # still open contradicts broker state: unverified, never
+            # reported as success.
             try:
                 fetch_position(ctx, ticket)
-            except BridgeError:
-                logger.info(
-                    "[CLOSE] ticket={} no longer open after ambiguous retcode={} — treated as closed",
-                    ticket,
-                    retcode,
-                )
-                ctx.trade_metrics.record("close_position", "done", 0.0, retcode, {"ticket": ticket, "recovered": True})
-                return {
-                    "status": "done",
-                    "ticket": ticket,
-                    "symbol": symbol,
-                    "closed_volume": close_volume,
-                    "retcode": retcode,
-                    "retcode_label": translate_retcode(retcode),
-                    "ambiguous_fill_recovered": True,
-                    "order_check": last_check,
-                }
-            time.sleep(0.025)
-    retcode = int(_f(last, "retcode", 0)) if last is not None else 0
-    ctx.trade_metrics.record("close_position", "rejected", 0.0, retcode, {"ticket": ticket})
+            except BridgeError as exc:
+                if exc.code is ErrorCode.TICKET_NOT_FOUND:
+                    logger.info("[CLOSE] ticket={} already closed (retcode 10036) — idempotent success", ticket)
+                    ctx.trade_metrics.record(
+                        "close_position",
+                        "done",
+                        0.0,
+                        retcode,
+                        {"ticket": ticket, "already_closed": True, "attempts": attempt},
+                    )
+                    return {
+                        "status": "done",
+                        "ticket": ticket,
+                        "symbol": symbol,
+                        "closed_volume": 0.0,
+                        "remaining_volume": 0.0,
+                        "partial": False,
+                        "reconciled": True,
+                        "already_closed": True,
+                        "retcode": retcode,
+                        "retcode_label": translate_retcode(retcode),
+                        "attempts": attempt,
+                        "order_check": last_check,
+                    }
+                raise
+            raise BridgeError(
+                ErrorCode.TRADE_UNVERIFIED,
+                f"Close for #{ticket} reported POSITION_CLOSED (10036) but the position is still open — "
+                "reconcile broker state before retrying.",
+                details={"ticket": ticket, "attempts": attempt, "order_check": last_check},
+            )
+        if retryable_retcode(retcode) and attempt < policy.max_attempts:
+            # Idempotency guard: accepted server-side despite the
+            # ambiguous retcode? If the ticket is gone, the close
+            # landed — report it recovered, never send again.
+            try:
+                fetch_position(ctx, ticket)
+            except BridgeError as exc:
+                if exc.code is ErrorCode.TICKET_NOT_FOUND:
+                    logger.info(
+                        "[CLOSE] ticket={} no longer open after ambiguous retcode={} — treated as closed",
+                        ticket,
+                        retcode,
+                    )
+                    ctx.trade_metrics.record(
+                        "close_position",
+                        "done",
+                        0.0,
+                        retcode,
+                        {"ticket": ticket, "recovered": True, "attempts": attempt},
+                    )
+                    return {
+                        "status": "done",
+                        "ticket": ticket,
+                        "symbol": symbol,
+                        "closed_volume": close_volume,
+                        "retcode": retcode,
+                        "retcode_label": translate_retcode(retcode),
+                        "ambiguous_fill_recovered": True,
+                        "attempts": attempt,
+                        "order_check": last_check,
+                    }
+                raise
+            logger.warning(
+                "[CLOSE] ticket={} retcode={} ({}) — retryable, backing off before attempt {}/{}",
+                ticket,
+                retcode,
+                retcode_class_label(retcode),
+                attempt + 1,
+                policy.max_attempts,
+            )
+            policy.backoff(attempt)
+            continue
+        # Fail fast: a hard reject / repairable request can never
+        # succeed by re-sending, and the retry budget is spent.
+        ctx.trade_metrics.record("close_position", "rejected", 0.0, retcode, {"ticket": ticket, "attempts": attempt})
+        raise BridgeError(
+            ErrorCode.TRADE_REJECTED,
+            f"Close failed for #{ticket} after {attempt} attempt(s): {translate_retcode(retcode or 0)}",
+            retcode=retcode,
+            details={"ticket": ticket, "attempts": attempt, "order_check": last_check},
+        )
+    # Unreachable: every loop iteration returns, raises, or continues
+    # into the fail-fast raise — but mypy needs a terminus.
     raise BridgeError(
         ErrorCode.TRADE_REJECTED,
-        f"Close failed for #{ticket} after 3 attempts: {translate_retcode(retcode)}",
-        retcode=retcode if retcode else None,
-        details={"ticket": ticket, "order_check": last_check},
+        f"Close failed for #{ticket}: retry budget exhausted ({translate_retcode(last_retcode or 0)})",
+        retcode=last_retcode,
+        details={"ticket": ticket, "attempts": policy.max_attempts, "order_check": last_check},
     )
 
 
