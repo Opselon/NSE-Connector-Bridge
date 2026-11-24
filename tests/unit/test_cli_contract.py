@@ -31,6 +31,7 @@ pytestmark = pytest.mark.unit
 
 from nse_bridge import cli as bridge_cli
 from nse_bridge.config import BridgeSettings
+from nse_bridge.mt5.driver import MT5_PLATFORM_SUPPORTED
 
 # ---------------------------------------------------------------------------
 # Single instance
@@ -188,7 +189,12 @@ def test_cli_diagnostics_json_against_running_bridge(running_bridge, tmp_path: P
     assert doc["ok"] is True
     data = doc["data"]
     assert data["bridge"]["healthy"] is False  # no MT5 on this host
-    assert data["diagnostic"]["code"] == "MT5_NOT_FOUND"
+    # v1.3.0 honest gate (S3 platform gating): on a platform that cannot
+    # load the IPC driver the code is MT5_WINDOWS_REQUIRED, not
+    # MT5_NOT_FOUND. On a supported platform (Windows x64) the old code
+    # still applies. Same pattern as test_gui_control_center.py.
+    expected = "MT5_WINDOWS_REQUIRED" if not MT5_PLATFORM_SUPPORTED else "MT5_NOT_FOUND"
+    assert data["diagnostic"]["code"] == expected
     assert data["diagnostic"]["recovery"]
     assert "mt5" in data and "websocket" in data and "enrolment" in data
     assert data["log_file"].endswith("bridge.log")
