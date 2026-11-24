@@ -76,6 +76,9 @@ def test_icon_is_a_valid_multi_size_png_ico() -> None:
 def test_icon_is_bundled_by_packaging() -> None:
     """The spec and the installer must reference the committed asset."""
     spec = (REPO_ROOT / "bridge.spec").read_text(encoding="utf-8")
-    assert 'icon="assets/icon.ico"' in spec, "bridge.spec does not embed assets/icon.ico"
+    # v1.3.0: the icon is Windows-only, set via exe_kwargs inside the
+    # IS_WINDOWS block (it is meaningless — and rejected — off Windows),
+    # not as a bare EXE() keyword.
+    assert 'exe_kwargs["icon"] = "assets/icon.ico"' in spec, "bridge.spec does not embed assets/icon.ico"
     iss = (REPO_ROOT / "windows" / "NSE-MT5-Bridge.iss").read_text(encoding="utf-8")
     assert "SetupIconFile=..\\assets\\icon.ico" in iss, "installer does not use assets/icon.ico"

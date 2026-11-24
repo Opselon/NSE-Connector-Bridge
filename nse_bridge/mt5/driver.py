@@ -19,6 +19,7 @@ Connection lifecycle ports the production fixes:
 from __future__ import annotations
 
 import os
+import platform
 import queue
 import sys
 import threading
@@ -35,6 +36,24 @@ from pathlib import Path
 #: callers must fail fast instead of queuing unbounded work.
 MT5_JOB_QUEUE_MAX = 256
 from typing import Any
+
+#: Whether THIS process can load the official MetaTrader5 IPC driver.
+#: MetaQuotes publishes win_amd64 wheels only — no win_arm64, macOS or
+#: Linux wheel exists — so a native ARM64 Windows process, a Mac, or a
+#: Linux host can never attach to a terminal, however the bridge is
+#: installed. ``platform.machine()`` is the PROCESS architecture: an
+#: x64 Python running emulated on ARM64 Windows reports AMD64 and CAN
+#: load the driver (that is the supported trading path on ARM64
+#: Windows — the native ARM64 bridge build is core-only). The bridge
+#: core (server, UI, platform channel) runs everywhere; only terminal
+#: attach is gated. Every MT5 state surface reads this constant
+#: instead of guessing from a failed import.
+MT5_PLATFORM_SUPPORTED = sys.platform == "win32" and platform.machine() in ("AMD64", "x86_64")
+
+#: Structured diagnostic code reported when the platform cannot attach
+#: (see ``MT5_DIAGNOSTICS`` in ``nse_bridge.api.management`` for the
+#: user-facing title, explanation and recovery steps).
+MT5_WINDOWS_REQUIRED_CODE = "MT5_WINDOWS_REQUIRED"
 
 from loguru import logger
 
@@ -749,10 +768,17 @@ class Mt5Driver:
             "detail": self._state_detail,
             "since": self._state_since.isoformat(),
             "connected": self._connected,
+            # Honest capability gate (v1.3.0): on a platform that cannot
+            # load the IPC driver there is no terminal to attach to, so
+            # the derived code is MT5_WINDOWS_REQUIRED whenever no more
+            # specific code was set — never a bare None that the UI
+            # would read as "unknown". An explicitly set code (e.g.
+            # MT5_ACCOUNT_NOT_READY) always wins over the fallback.
+            "platform_supported": MT5_PLATFORM_SUPPORTED,
             "pkg_version": self._pkg_version,
             "terminal_version": self._terminal_version,
             "login": self._login,
-            "diagnostic_code": self._diagnostic_code,
+            "diagnostic_code": self._diagnostic_code or (None if MT5_PLATFORM_SUPPORTED else MT5_WINDOWS_REQUIRED_CODE),
             "last_error": self._last_error,
         }
 
@@ -768,6 +794,22 @@ class Mt5Driver:
     # ------------------------------------------------------------------
     def connect(self) -> dict[str, Any]:
         """Resilient connect (runs on the worker thread). Returns a summary."""
+        if not MT5_PLATFORM_SUPPORTED:
+            # No MetaTrader5 wheel exists for this platform — attempting
+            # the import inside the worker would raise ModuleNotFoundError
+            # out of connect() and surface as a bare 500. Fail fast with
+            # the structured code the diagnostics surface already reports.
+            detail = (
+                "MetaTrader 5 IPC driver is Windows-only — this bridge runs on "
+                f"{sys.platform} ({platform.machine()}), where no MT5 terminal can attach "
+                "(MT5_WINDOWS_REQUIRED). The bridge core (server, UI, platform channel) "
+                "still runs; use the Windows x64 build for trading."
+            )
+            return {
+                "ok": False,
+                "error": detail,
+                "diagnostic_code": MT5_WINDOWS_REQUIRED_CODE,
+            }
         s = self.settings
         summary = self.run(
             self._connect_job, op="initialize", timeout=max(60.0, s.mt5_timeout_ms / 1000.0 * s.mt5_retries + 30)

@@ -4,26 +4,34 @@
 
 | Platform | Status |
 |---|---|
-| Windows 10 / 11 x64 | **Primary and only supported release target.** The packaged exe (`NSE-MT5-Bridge.exe`) is built on `windows-latest` in CI. |
-| Windows x64, other builds (8.1+) | Declared in the exe manifest (`supportedOS` 8.1/10), but **untested** — Windows 10/11 is what CI builds on. |
-| Linux / macOS | **Development + CI only.** Unit and mock-integration tests, the mock server, and the OpenAPI export all run on Linux. The Bridge itself can run from source on Linux for development, but MT5 (and therefore all trading, e2e, and the packaged exe) is Windows-only. |
-| Windows ARM64 | **Unsupported — no build is published.** See §4. |
+| Windows 10 / 11 x64 | **Primary release target — the only trading build.** The packaged exe (`NSE-MT5-Bridge.exe`) + Inno Setup installer are built on `windows-latest` in CI. |
+| Windows 10 / 11 x64, other builds (8.1+) | Declared in the exe manifest (`supportedOS` 8.1/10), but **untested** — Windows 10/11 is what CI builds on. |
+| Windows 11 ARM64 | **Core-only native build** (portable exe, no installer). The bridge runs, but the MetaTrader5 driver has no ARM64 build, so terminal attach reports `MT5_WINDOWS_REQUIRED`. **To trade on ARM64 Windows, run the x64 build** — it runs under emulation and CAN attach to the terminal. |
+| macOS 13+ x64 (Intel) / arm64 (Apple Silicon) | **Core-only.** `.app` in a `.dmg`, built on `macos-15-intel` / `macos-latest` in CI. Dashboard, platform channel, settings, diagnostics run; MT5 attach reports `MT5_WINDOWS_REQUIRED`. |
+| Linux x64 / arm64 (glibc) | **Core-only.** Tarball, built on `ubuntu-latest` / `ubuntu-24.04-arm` in CI. Same scope as macOS. Unit and mock-integration tests, the mock server, and the OpenAPI export also run on Linux. |
+| Linux / macOS (development) | The Bridge runs from source for development, but MT5 (and therefore all trading and e2e) is Windows-only. |
+
+No remote-terminal mode exists on any platform: a non-Windows build
+never pretends an MT5 terminal is attached.
 
 ## 2. CPU architecture
 
 - **x64 (amd64): primary.** The release exe is `windows-x64`
-  (see `release-manifest.json`, `platform: "windows-x64"`).
-- **ARM64: unsupported.** The full stack has not been proven on
-  ARM64: the MetaTrader5 wheel, the MT5 terminal itself, and the
-  PyInstaller/pywebview native backends are all x64-first, and none
-  of it can be proven on this VM or on GitHub-hosted runners (which
-  are x64). **No ARM64 build is published, and no ARM64 artifact
-  will be attached to a release.** If an ARM64 machine runs the
-  installer, the correct outcome is a clear "unsupported platform"
-  message — not a broken binary. Proving ARM64 (terminal + wheel +
-  frozen exe + e2e on a real ARM64 Windows machine with MT5) is a
-  separate, explicitly scoped work item; it is not part of this
-  release.
+  (see `release-manifest.json`, `platform: "windows-x64"`); macOS
+  x64 and Linux x64 ship as `macos-x64` / `linux-x64`.
+- **ARM64: core-only, never trading.** The bridge core (server, UI,
+  platform channel) builds and runs natively on Windows ARM64
+  (`windows-arm64`), macOS arm64 (`macos-arm64`), and Linux arm64
+  (`linux-arm64`) — all proven in CI on every PR. The blocker is
+  upstream, not the bridge: the official MetaTrader5 package ships
+  `win_amd64` wheels only (no `win_arm64` wheel, no macOS/Linux
+  wheel), and the MT5 terminal itself is x64. A native ARM64 process
+  cannot load the IPC driver, so terminal attach reports
+  `MT5_WINDOWS_REQUIRED` on all three ARM64 targets. On ARM64
+  Windows the supported trading path is the x64 build under
+  emulation. Proving native-ARM64 trading (terminal + wheel + frozen
+  exe + e2e on a real ARM64 Windows machine with MT5) is a separate,
+  explicitly scoped work item; it is not part of this release.
 
 ## 3. Python
 
@@ -88,6 +96,7 @@
 | `tests/integration` (mock server) | ✅ pass | ✅ (job `build-windows`) | — |
 | `tests/e2e` (104) | ❌ fail loudly by design (no MT5) | ❌ never run (no terminal on runners) | ⏳ manual, not yet executed |
 | Frozen exe build | ❌ cannot build (Windows-only deps) | ✅ (job `build-windows`) | — |
+| Frozen builds, macOS/Linux/ARM64 | ❌ cannot build on this VM | ✅ (jobs `build-unix` + `build-windows-arm`, with headless frozen-binary smoke) | — |
 | Live Platform round-trip | ❌ unverified | ❌ unverified | ⏳ blocked on Platform deploy |
 
 See docs/RELEASE.md §3 for the full honest verification status.

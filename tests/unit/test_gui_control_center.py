@@ -28,7 +28,7 @@ from fastapi.testclient import TestClient
 from nse_bridge.api.app import create_app
 from nse_bridge.config import BridgeSettings
 from nse_bridge.engine.common import BridgeContext
-from nse_bridge.mt5.driver import Mt5Driver
+from nse_bridge.mt5.driver import MT5_PLATFORM_SUPPORTED, Mt5Driver
 from nse_bridge.server.errors import ServerError, ServerErrorCode
 from nse_bridge.server.rest import Entitlements, ReleaseInfo, ValidateKeyResult
 
@@ -522,7 +522,12 @@ def _summary(http, ctx):
 def test_diagnostics_summary_mt5_not_found(client):
     http, ctx, _ = client
     data = _summary(http, ctx)
-    assert data["diagnostic"]["code"] == "MT5_NOT_FOUND"
+    # v1.3.0 honest gate: on a platform that cannot load the IPC driver
+    # (Linux/macOS/native-ARM64 Windows) there is no terminal to find —
+    # the code is MT5_WINDOWS_REQUIRED, not MT5_NOT_FOUND. On a
+    # supported platform (Windows x64) the old code still applies.
+    expected = "MT5_WINDOWS_REQUIRED" if not MT5_PLATFORM_SUPPORTED else "MT5_NOT_FOUND"
+    assert data["diagnostic"]["code"] == expected
     assert data["diagnostic"]["severity"] == "error"
     assert data["diagnostic"]["explanation"]
     assert data["diagnostic"]["recovery"]
@@ -534,7 +539,10 @@ def test_diagnostics_summary_mt5_not_running(client, tmp_path, monkeypatch):
     fake_terminal.write_bytes(b"MZ")
     monkeypatch.setenv("NSE_MT5_TERMINAL_PATH", str(fake_terminal))
     data = _summary(http, ctx)
-    assert data["diagnostic"]["code"] == "MT5_NOT_RUNNING"
+    # Same v1.3.0 gate as above: a "found but not running" terminal is
+    # only a meaningful state where a terminal CAN attach.
+    expected = "MT5_WINDOWS_REQUIRED" if not MT5_PLATFORM_SUPPORTED else "MT5_NOT_RUNNING"
+    assert data["diagnostic"]["code"] == expected
 
 
 def test_diagnostics_summary_mt5_ipc_failed(client, tmp_path, monkeypatch):
@@ -545,7 +553,11 @@ def test_diagnostics_summary_mt5_ipc_failed(client, tmp_path, monkeypatch):
     ctx.driver._diagnostic_code = None
     ctx.driver._set_state("TERMINAL_ERROR", "initialize failed")
     data = _summary(http, ctx)
-    assert data["diagnostic"]["code"] == "MT5_IPC_FAILED"
+    # Same v1.3.0 gate as above: IPC failure is only meaningful where
+    # IPC can exist. The TERMINAL_ERROR state is still recorded on the
+    # driver; the user-facing code is the platform gate.
+    expected = "MT5_WINDOWS_REQUIRED" if not MT5_PLATFORM_SUPPORTED else "MT5_IPC_FAILED"
+    assert data["diagnostic"]["code"] == expected
 
 
 def test_diagnostics_summary_mt5_account_not_ready(client):
@@ -556,6 +568,32 @@ def test_diagnostics_summary_mt5_account_not_ready(client):
     assert "password" in data["diagnostic"]["explanation"].lower() or any(
         "password" in step.lower() for step in data["diagnostic"]["recovery"]
     )
+
+
+def test_diagnostics_summary_mt5_windows_required(client):
+    """v1.3.0: on a platform without the IPC driver the summary says so.
+
+    Skipped on a supported platform (Windows x64), where the code can
+    never appear. The recovery steps must point at the Windows x64
+    build — never at installing a terminal on this machine.
+    """
+    if MT5_PLATFORM_SUPPORTED:
+        pytest.skip("MT5_WINDOWS_REQUIRED only exists where the driver cannot load")
+    http, ctx, _ = client
+    data = _summary(http, ctx)
+    assert data["diagnostic"]["code"] == "MT5_WINDOWS_REQUIRED"
+    assert data["diagnostic"]["severity"] == "error"
+    assert "Windows" in data["diagnostic"]["explanation"]
+    assert any("Windows" in step for step in data["diagnostic"]["recovery"])
+
+
+def test_mt5_terminals_reports_platform_supported(client):
+    http, ctx, _ = client
+    resp = http.get("/api/v1/mt5/terminals", headers=_auth(ctx))
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["platform_supported"] is MT5_PLATFORM_SUPPORTED
+    assert data["can_open"] == (sys.platform == "win32")
 
 
 def test_diagnostics_summary_mt5_unsupported_version(client):

@@ -472,6 +472,29 @@ async def restart_server_channel(request: Request) -> dict[str, Any]:
 #: code carries a human-readable explanation + actionable recovery
 #: steps; ordinary users never see a raw stack trace.
 MT5_DIAGNOSTICS: dict[str, dict[str, Any]] = {
+    # v1.3.0 — honest capability gate: the official MetaTrader5 IPC
+    # driver ships win_amd64 wheels only, so on macOS, Linux, or a
+    # native-ARM64 Windows process no terminal can ever attach. The
+    # driver reports this code itself (connection_state_dict) whenever
+    # no more specific code was set, and _derive_mt5_diagnostic returns
+    # it before the NOT_FOUND / NOT_RUNNING / IPC_FAILED fallbacks.
+    # There is no remote-terminal mode — this state must never be
+    # presented as "terminal found but not running".
+    "MT5_WINDOWS_REQUIRED": {
+        "title": "Windows MT5 terminal required",
+        "explanation": (
+            "The MetaTrader 5 terminal — and the official IPC driver the bridge "
+            "attaches with — run on Windows (x64) only. This bridge is running on "
+            "a platform where no MT5 terminal can attach, so trading, positions, "
+            "and account data from MT5 are unavailable here. The bridge core "
+            "itself (dashboard, platform channel, settings, diagnostics) still runs."
+        ),
+        "recovery": [
+            "To trade, run the Windows x64 build of the bridge on a Windows 10/11 PC with a MetaTrader 5 terminal installed.",
+            "On ARM64 Windows, use the Windows x64 build (it runs under emulation and CAN attach to the terminal) — the native ARM64 build is core-only.",
+            "On this machine you can still enrol the device and watch the platform channel; MT5 features stay disabled until a Windows bridge attaches.",
+        ],
+    },
     "MT5_NOT_FOUND": {
         "title": "No MetaTrader 5 terminal found",
         "explanation": (
@@ -892,6 +915,11 @@ async def list_mt5_terminals(request: Request) -> dict[str, Any]:
             "driver_state": state["state"],
             "connected": ctx.driver.connected,
             "diagnostic_code": state.get("diagnostic_code"),
+            # v1.3.0: False on macOS/Linux/native-ARM64 Windows, where
+            # the MT5 IPC driver cannot load — the UI shows the
+            # "Windows MT5 terminal required" state instead of an
+            # empty terminal list that looks like a bug.
+            "platform_supported": state.get("platform_supported", True),
         },
     }
 
