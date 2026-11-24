@@ -525,10 +525,21 @@ jobs:
         run: python -m mypy nse_bridge
 
       - name: Security checks (bandit + pip-audit)
-        # Same skips as test-linux (see the comment there).
+        # Same skips as test-linux (see the comment there). pip-audit
+        # ignores below are Windows-ARM64 ONLY: cryptography 46.0.3 is
+        # the newest release with a win_arm64 wheel (46.0.4+ ship none,
+        # including the 46.0.5/46.0.6/46.0.7 fixes), so these findings
+        # have no installable fix on this platform. The bridge does not
+        # exercise the affected paths (PKCS#7 decryption, custom X.509
+        # verification, SECT curves); re-check when upstream publishes
+        # a win_arm64 wheel for a fixed release, then drop the ignores.
         run: |
           python -m bandit -r nse_bridge --skip B101,B110,B311,B404 -q
-          python -m pip_audit -r requirements.txt -r requirements-dev.txt
+          python -m pip_audit -r requirements.txt -r requirements-dev.txt \
+            --ignore-vuln PYSEC-2026-2141 --ignore-vuln PYSEC-2026-35 \
+            --ignore-vuln PYSEC-2026-36 --ignore-vuln PYSEC-2026-3552 \
+            --ignore-vuln PYSEC-2026-3553 --ignore-vuln PYSEC-2026-3554 \
+            --ignore-vuln GHSA-537c-gmf6-5ccf
 
       - name: Run unit + mock-integration tests on Windows ARM64
         run: python -m pytest tests/unit tests/integration -q --junitxml=test-results.xml -rf

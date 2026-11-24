@@ -154,6 +154,11 @@ class EnrolmentManager:
         # (not one shared Event) so a clearing waiter can never swallow
         # another's wake — _set_state is sync and can signal safely.
         self._state_waiters: set[asyncio.Event] = set()
+        # In-flight best-effort manifest POST (§4.1): enrol_once fires
+        # it as a background task (see there) so a slow/hung POST can
+        # never hold enrolment completion — or supervisor shutdown —
+        # hostage. Kept referenced so it is never GC'd mid-flight.
+        self._manifest_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
     @property
@@ -339,7 +344,14 @@ class EnrolmentManager:
         # no-op via the tracker). Best-effort: a manifest failure must
         # NOT un-enrol the device — the manifest is retried on the next
         # change / re-enrolment, and the WS channel also reports it.
-        await self._publish_manifest()
+        # It runs as a BACKGROUND task, not awaited here: a slow or hung
+        # manifest POST (30 s read budget + retries) used to hold
+        # enrolment completion hostage, and the supervisor's run() could
+        # not park — on ubuntu-24.04-arm the POST stalled >15 s and the
+        # enrolment test's teardown wait died on it. REGISTERED is
+        # already set above, so nothing downstream waits on the POST.
+        if self._manifest_task is None or self._manifest_task.done():
+            self._manifest_task = asyncio.create_task(self._publish_manifest())
         return True
 
     async def _publish_manifest(self) -> None:
@@ -352,6 +364,31 @@ class EnrolmentManager:
             await self.manifest_tracker.send_via_rest(self._rest, manifest)
         except Exception as exc:  # noqa: BLE001 — manifest must never break enrolment
             logger.warning("[ENROL] manifest post failed ({}); will retry on next change", type(exc).__name__)
+
+    async def wait_for_manifest(self) -> None:
+        """Await the in-flight best-effort manifest POST, if any.
+
+        Tests use this to assert on manifest delivery after enrol_once;
+        production never needs it (the POST is fire-and-forget).
+        """
+        task = self._manifest_task
+        if task is not None:
+            await task
+
+    async def _cancel_manifest_task(self) -> None:
+        """Cancel a still-running best-effort manifest POST (shutdown).
+
+        The POST must not outlive the supervisor: cancelling it keeps
+        shutdown prompt and leaves no task pending at interpreter exit.
+        """
+        task = self._manifest_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     # ------------------------------------------------------------------
     # Re-enrolment notifications from the REST client (§3.2). The
@@ -486,7 +523,9 @@ class EnrolmentManager:
                     await self._wait_state_change(stop)
                 continue
             if state == EnrolmentState.FAILED_AUTH:
-                return
+                # Terminal for this key — fall through to the manifest
+                # cleanup below instead of returning directly.
+                break
             if state == EnrolmentState.FAILED_TRANSIENT:
                 delay = self._next_backoff_delay()
                 self.backoff_delays.append(delay)
@@ -494,3 +533,6 @@ class EnrolmentManager:
                 if stop.is_set() or not self.is_configured:
                     continue
             await self.enrol_once()
+        # Supervisor exiting (stop set, or FAILED_AUTH): a best-effort
+        # manifest POST must not keep running past shutdown.
+        await self._cancel_manifest_task()

@@ -9,11 +9,14 @@ pydantic-settings==2.16.3
 websockets==17.4
 httpx==0.28.1
 cryptography==50.0.2; platform_machine != "ARM64"
-# cryptography 50.0.2 ships no win_arm64 wheel (only 46.0.0 does) — on
-# native-ARM64 Windows pip falls back to a Rust source build that fails
-# (openssl-sys needs OpenSSL dev libs). Pin the newest win_arm64-wheel
-# build on ARM64 only; every other platform keeps 50.0.2.
-cryptography==46.0.0; platform_machine == "ARM64"
+# cryptography 50.0.2 ships no win_arm64 wheel — on native-ARM64 Windows
+# pip falls back to a Rust source build that fails (openssl-sys needs
+# OpenSSL dev libs). 46.0.3 is the NEWEST release with a win_arm64 wheel
+# (46.0.4+ ship none, including the 46.0.5/46.0.6/46.0.7 security fixes),
+# so ARM64 pins it and the win-arm CI job ignores the residual audit
+# findings for it (see the pip-audit line in .github/workflows/build.yml).
+# Every other platform keeps 50.0.2.
+cryptography==46.0.3; platform_machine == "ARM64"
 loguru==0.8.0
 numpy==2.5.5
 pywebview==6.2.1
