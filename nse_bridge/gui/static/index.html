@@ -2354,7 +2354,13 @@ LOADERS.execution = loadExecution;
 LOADERS.diagnostics = loadDiagnostics;
 LOADERS.updates = loadUpdates;
 LOADERS.settings = loadSettings;
-show('overview');
+/* Deep link: /ui#platform lands on the Connection screen (the
+   Platform screen holds the connection configuration). First-run
+   launches open /ui#platform so the user starts at setup, with the
+   guided-setup overlay on top — not at an Overview full of dashes.
+   Any other hash falls back to the Overview. */
+const _initial = (location.hash || '').slice(1);
+show(SCREENS.includes(_initial) ? _initial : 'overview');
 wsConnect();
 /* Onboarding detection must never depend on one potentially slow
    endpoint settling: decide with whatever data arrived inside the
