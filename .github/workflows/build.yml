@@ -3,15 +3,32 @@
 # Jobs:
 #   test-linux    ruff + format + mypy + security + unit + mock-integration
 #                 tests (Linux).
-#   build-windows same gates on Windows (proves Windows imports work) +
-#                 PyInstaller exe build. The real-MT5 e2e suite is NEVER
-#                 run here: GitHub-hosted runners have no MT5 terminal,
-#                 and a required-MT5 test fails loudly without one
-#                 (tests/conftest.py). E2E is manual, Windows-with-MT5-only
+#   build-windows same gates on Windows x64 (proves Windows imports work) +
+#                 PyInstaller exe build + Inno Setup installer. The real-MT5
+#                 e2e suite is NEVER run here: GitHub-hosted runners have no
+#                 MT5 terminal, and a required-MT5 test fails loudly without
+#                 one (tests/conftest.py). E2E is manual, Windows-with-MT5-only
 #                 (see docs/RELEASE.md).
-#   release       tags only (v*): exe + setup exe + SHA-256s + release
-#                 manifest + release notes. Stable vs prerelease by tag
-#                 name: v1.2.3 = stable, v1.2.3-rc.1 = prerelease.
+#   build-unix    matrix: macOS x64 (macos-15-intel) + macOS arm64
+#                 (macos-latest) + Linux x64 (ubuntu-latest) + Linux arm64
+#                 (ubuntu-24.04-arm). Same gates as build-windows, then a
+#                 PyInstaller build (macOS .app -> .dmg, Linux binary ->
+#                 tarball) + a headless frozen-binary smoke. PyInstaller
+#                 cannot cross-compile — each OS/arch builds natively.
+#                 MT5 is Windows-x64-only by design: the core (server, UI,
+#                 platform channel) builds and runs on macOS/Linux, terminal
+#                 attach reports MT5_WINDOWS_REQUIRED, never faked.
+#   build-windows-arm
+#                 Windows 11 ARM64 (windows-11-arm): native-arm64 build of
+#                 the bridge CORE only — the MetaTrader5 wheel has no
+#                 win_arm64 build, so the exe runs but cannot attach to a
+#                 terminal (MT5_WINDOWS_REQUIRED). Trading on ARM64 Windows
+#                 uses the x64 build (runs under emulation, CAN attach).
+#                 Portable exe only, no Inno installer (the .iss is x64).
+#   bench         local-processing benchmark (mission §B3), main/tags only.
+#   release       tags only (v*): all six platform artifacts + SHA-256s +
+#                 release manifest + release notes. Stable vs prerelease by
+#                 tag name: v1.2.3 = stable, v1.2.3-rc.1 = prerelease.
 #
 # Spec §20 gates (all mandatory, all fast — no Wine in PR checks):
 #   lint    `ruff check .` (whole repo) + `ruff format --check .`
@@ -21,7 +38,7 @@
 #           on failure so the failing test names are visible without
 #           log access (A1: the Windows test step failed at 3f0950c
 #           with logs unreachable — 403 — and no per-test record).
-name: Build Windows exe
+name: Build and release
 
 on:
   push:
@@ -208,8 +225,8 @@ jobs:
         #    complete enough to boot Python).
         # 2. Headless serve smoke: the exe binds the loopback API,
         #    /health answers, /ui serves the bundled Control Center
-        #    (GUI asset integrity), and the single-instance mutex
-        #    rejects a second launch with exit code 2.
+        #    (GUI asset integrity), and a second launch brings the
+        #    running dashboard to front and exits 0 (S1).
         # 3. CLI JSON contract: status/health/mt5 list --json answer
         #    with one parseable JSON document and exit 0 against the
         #    RUNNING instance (same-user secret store provides the
@@ -258,22 +275,46 @@ jobs:
               # element-boundaries of ArgumentList arrays — observed:
               # "status" + "--json" arrived as one token "status--json").
               $argStr = ($cli -join ' ') + ' --json'
+              # -Wait has no timeout: a hung CLI would burn the whole
+              # 40-min job budget. WaitForExit(60s) fails fast instead.
               $cp = Start-Process -FilePath "dist/NSE-MT5-Bridge.exe" `
-                -ArgumentList $argStr -Wait -PassThru `
+                -ArgumentList $argStr -PassThru `
                 -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+              if (-not $cp.WaitForExit(60000)) { Stop-Process -Id $cp.Id -Force; throw "CLI '$cli' timed out after 60 s" }
               if ($cp.ExitCode -ne 0) {
                 Write-Host "--- cli stderr ---"; Get-Content $errFile | Write-Host
                 throw "CLI '$cli' exited with $($cp.ExitCode)"
               }
               Get-Content $outFile -Raw | ConvertFrom-Json > $null
             }
-            # Single instance: a second launch must refuse fast (exit 2).
-            $second = Start-Process -FilePath "dist/NSE-MT5-Bridge.exe" -ArgumentList "--gui","none","--port","8799" -Wait -PassThru
-            if ($second.ExitCode -ne 2) { throw "second instance exited $($second.ExitCode), expected 2" }
+            # Single instance (S1): a second launch brings the running
+            # dashboard to front and exits 0 — it must never hang (a
+            # modal dialog on the failure path blocked the process
+            # until the 40-min job timeout; headless runs skip the
+            # browser + dialog entirely now). Bounded wait so a future
+            # hang fails fast instead of burning the job budget.
+            $second = Start-Process -FilePath "dist/NSE-MT5-Bridge.exe" -ArgumentList "--gui","none","--port","8799" -PassThru
+            if (-not $second.WaitForExit(60000)) { Stop-Process -Id $second.Id -Force; throw "second instance did not exit within 60 s (bring-to-front hang)" }
+            if ($second.ExitCode -ne 0) { throw "second instance exited $($second.ExitCode), expected 0 (bring-to-front)" }
             Write-Host "frozen exe serve + GUI asset + CLI JSON + single-instance smoke OK"
           } finally {
             if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
           }
+
+      - name: Frozen-exe smoke test via scripts/smoke_frozen_exe.py (S1)
+        # S1 (fix/bridge-visible-startup) owns scripts/smoke_frozen_exe.py:
+        # start the frozen exe, show UI, answer /ui + status --json.
+        # The step activates automatically when the script lands
+        # (hashFiles guard) and runs AFTER the inline smoke above, so
+        # no release ever depends on a script that is not there yet.
+        # Contract for S1: the script takes --exe <path> --port <port>
+        # and exits non-zero on any failure. Until it lands, the inline
+        # smoke above is the frozen-exe verification. What the smoke
+        # covers — and what it does NOT (no real MT5) — is documented
+        # in docs/RELEASE.md §3.
+        if: hashFiles('scripts/smoke_frozen_exe.py') != ''
+        shell: pwsh
+        run: python scripts/smoke_frozen_exe.py --exe dist/NSE-MT5-Bridge.exe --port 8799
 
       - name: Build Windows installer (Inno Setup)
         # Proves the .iss compiles on every PR, not just on tags: the
@@ -327,6 +368,254 @@ jobs:
             dist/NSE-MT5-Bridge-Setup-*.exe
           if-no-files-found: error
 
+  # Cross-platform builds (v1.3.0): macOS x64 + arm64, Linux x64 + arm64.
+  # One matrix job — the steps are identical except the packaging
+  # (macOS .app -> .dmg via hdiutil; Linux binary -> tarball).
+  # PyInstaller cannot cross-compile: each OS/arch builds natively on
+  # its own runner. Every runner re-runs the gates (lint + format +
+  # mypy + security + unit/mock-integration tests) so a
+  # platform-specific import failure fails HERE, not at release time.
+  # MT5 is Windows-x64-only by design: the core (server, UI, platform
+  # channel) builds and runs on macOS/Linux, terminal attach reports
+  # MT5_WINDOWS_REQUIRED — never faked. The headless smoke boots the
+  # frozen binary with --console and asserts /health + /ui + a
+  # parseable `status --json` — no MT5 terminal, no GUI display needed.
+  build-unix:
+    needs: test-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            arch: x64
+            platform: macos-x64
+            artifact_glob: dist/*.dmg
+          - os: macos-latest
+            arch: arm64
+            platform: macos-arm64
+            artifact_glob: dist/*.dmg
+          - os: ubuntu-latest
+            arch: x64
+            platform: linux-x64
+            artifact_glob: dist/*.tar.gz
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            platform: linux-arm64
+            artifact_glob: dist/*.tar.gz
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint (whole repo)
+        run: ruff check .
+
+      - name: Format check
+        run: ruff format --check .
+
+      - name: Static analysis (mypy)
+        run: python -m mypy nse_bridge
+
+      - name: Security checks (bandit + pip-audit)
+        # Same skips as test-linux (see the comment there).
+        run: |
+          python -m bandit -r nse_bridge --skip B101,B110,B311,B404 -q
+          python -m pip_audit -r requirements.txt -r requirements-dev.txt
+
+      - name: Run unit + mock-integration tests
+        run: python -m pytest tests/unit tests/integration -q --junitxml=test-results.xml -rf
+
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-results-${{ matrix.platform }}
+          path: test-results.xml
+          if-no-files-found: warn
+
+      - name: Build frozen binary
+        run: pyinstaller bridge.spec --noconfirm --clean
+
+      - name: Headless smoke-check the frozen binary
+        # Boots the frozen binary with --console (foreground, no GUI),
+        # polls /health until ready, asserts /ui serves 200 and
+        # `status --json` parses against the RUNNING instance. No MT5
+        # terminal exists on these runners — MT5 fields honestly
+        # report down/unknown. The trap kills the server on any exit
+        # path (bash -e is on for this step).
+        shell: bash
+        run: |
+          BIN=dist/NSE-MT5-Bridge
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            BIN="dist/NSE-MT5-Bridge.app/Contents/MacOS/NSE-MT5-Bridge"
+          fi
+          test -x "$BIN" || { echo "frozen binary missing: $BIN"; ls -R dist; exit 1; }
+          "$BIN" --help > /dev/null
+          "$BIN" --console --port 8799 > /tmp/bridge-smoke.log 2>&1 &
+          SMOKE_PID=$!
+          trap 'kill $SMOKE_PID 2>/dev/null || true' EXIT
+          READY=0
+          for _ in $(seq 1 180); do
+            if curl -fsS --max-time 2 http://127.0.0.1:8799/health > /dev/null 2>&1; then READY=1; break; fi
+            sleep 0.5
+          done
+          if [ "$READY" != "1" ]; then echo "--- bridge smoke log ---"; tail -40 /tmp/bridge-smoke.log; exit 1; fi
+          curl -fsS --max-time 15 http://127.0.0.1:8799/ui > /dev/null
+          "$BIN" status --json > /tmp/bridge-status.json
+          python -c "import json; json.load(open('/tmp/bridge-status.json'))"
+          echo "frozen binary headless smoke OK (${{ matrix.platform }})"
+
+      - name: Package artifact (macOS .dmg / Linux tarball)
+        shell: bash
+        run: |
+          VER=$(python -c "from nse_bridge import BRIDGE_VERSION; print(BRIDGE_VERSION, end='')")
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            hdiutil create -volname "NSE MT5 Bridge $VER" -srcfolder dist/NSE-MT5-Bridge.app -ov -format UDZO "dist/NSE-MT5-Bridge-$VER-macos-${{ matrix.arch }}.dmg"
+            ls -la dist/*.dmg
+          else
+            mkdir -p "pkg/NSE-MT5-Bridge-$VER-linux-${{ matrix.arch }}"
+            cp dist/NSE-MT5-Bridge "pkg/NSE-MT5-Bridge-$VER-linux-${{ matrix.arch }}/"
+            tar -czf "dist/NSE-MT5-Bridge-$VER-linux-${{ matrix.arch }}.tar.gz" -C pkg "NSE-MT5-Bridge-$VER-linux-${{ matrix.arch }}"
+            ls -la dist/*.tar.gz
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: NSE-MT5-Bridge-${{ matrix.platform }}
+          path: ${{ matrix.artifact_glob }}
+          if-no-files-found: error
+
+  # Windows ARM64 (v1.3.0): native-arm64 build of the bridge CORE only.
+  # The MetaTrader5 wheel has no win_arm64 build, so pip (marker:
+  # platform_machine == 'AMD64') skips it and bridge.spec skips
+  # collecting it — the exe runs (dashboard, platform channel) but
+  # terminal attach reports MT5_WINDOWS_REQUIRED. Trading on ARM64
+  # Windows uses the x64 build, which runs under emulation and CAN
+  # attach. Portable exe only, no Inno installer (the .iss is x64).
+  build-windows-arm:
+    needs: test-linux
+    runs-on: windows-11-arm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        # MetaTrader5 is skipped on this runner by its platform marker
+        # (win_amd64 wheel only) — the install must still succeed.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint (whole repo)
+        run: ruff check .
+
+      - name: Format check
+        run: ruff format --check .
+
+      - name: Static analysis (mypy)
+        run: python -m mypy nse_bridge
+
+      - name: Security checks (bandit + pip-audit)
+        # Same skips as test-linux (see the comment there). pip-audit
+        # ignores below are Windows-ARM64 ONLY: cryptography 46.0.3 is
+        # the newest release with a win_arm64 wheel (46.0.4+ ship none,
+        # including the 46.0.5/46.0.6/46.0.7 fixes), so these findings
+        # have no installable fix on this platform. The bridge does not
+        # exercise the affected paths (PKCS#7 decryption, custom X.509
+        # verification, SECT curves); re-check when upstream publishes
+        # a win_arm64 wheel for a fixed release, then drop the ignores.
+        run: |
+          python -m bandit -r nse_bridge --skip B101,B110,B311,B404 -q
+          # One line on purpose: this step runs under pwsh, which does
+          # NOT accept backslash line continuations (a multi-line
+          # pip_audit with "\" died with a ParserError).
+          python -m pip_audit -r requirements.txt -r requirements-dev.txt --ignore-vuln PYSEC-2026-2141 --ignore-vuln PYSEC-2026-35 --ignore-vuln PYSEC-2026-36 --ignore-vuln PYSEC-2026-3552 --ignore-vuln PYSEC-2026-3553 --ignore-vuln PYSEC-2026-3554 --ignore-vuln GHSA-537c-gmf6-5ccf
+
+      - name: Run unit + mock-integration tests on Windows ARM64
+        run: python -m pytest tests/unit tests/integration -q --junitxml=test-results.xml -rf
+
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-results-windows-arm64
+          path: test-results.xml
+          if-no-files-found: warn
+
+      - name: Build single-file exe (core-only, no MT5 driver)
+        run: pyinstaller bridge.spec --noconfirm --clean
+
+      - name: Smoke-check the frozen exe (headless)
+        # Same shape as the x64 smoke, trimmed: --help, serve +
+        # /health + /ui, and one parseable `status --json`. The full
+        # CLI contract + single-instance check are covered by the x64
+        # job; no MT5 terminal exists on this runner either.
+        shell: pwsh
+        run: |
+          dist/NSE-MT5-Bridge.exe --help
+          $proc = Start-Process -FilePath "dist/NSE-MT5-Bridge.exe" -ArgumentList "--console","--port","8799" -PassThru
+          try {
+            $deadline = (Get-Date).AddSeconds(90)
+            $ready = $false
+            while ((Get-Date) -lt $deadline -and -not $ready) {
+              Start-Sleep -Milliseconds 500
+              try {
+                $h = Invoke-WebRequest -Uri "http://127.0.0.1:8799/health" -UseBasicParsing -TimeoutSec 2
+                if ($h.StatusCode -eq 200) { $ready = $true }
+              } catch { }
+            }
+            if (-not $ready) { throw "frozen exe (ARM64) /health did not become ready within 90 s" }
+            $ui = Invoke-WebRequest -Uri "http://127.0.0.1:8799/ui" -UseBasicParsing -TimeoutSec 15
+            if ($ui.StatusCode -ne 200) { throw "/ui (bundled GUI asset) answered HTTP $($ui.StatusCode)" }
+            $outFile = Join-Path $env:TEMP "cli-status.json"
+            $errFile = Join-Path $env:TEMP "cli-status.err.txt"
+            $cp = Start-Process -FilePath "dist/NSE-MT5-Bridge.exe" `
+              -ArgumentList "status --json" -Wait -PassThru `
+              -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+            if ($cp.ExitCode -ne 0) {
+              Write-Host "--- cli stderr ---"; Get-Content $errFile | Write-Host
+              throw "CLI 'status' exited with $($cp.ExitCode)"
+            }
+            Get-Content $outFile -Raw | ConvertFrom-Json > $null
+            Write-Host "frozen exe (ARM64) headless smoke OK"
+          } finally {
+            if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+          }
+
+      - name: Rename artifact with platform suffix
+        # The x64 exe keeps the canonical name (install.ps1 + the
+        # updater expect it); the ARM64 exe is renamed so the release
+        # can carry both without a filename collision.
+        shell: pwsh
+        run: |
+          $ver = python -c "from nse_bridge import BRIDGE_VERSION; print(BRIDGE_VERSION, end='')"
+          Rename-Item dist/NSE-MT5-Bridge.exe "NSE-MT5-Bridge-$ver-windows-arm64.exe"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: NSE-MT5-Bridge-windows-arm64
+          path: dist/NSE-MT5-Bridge-*-windows-arm64.exe
+          if-no-files-found: error
+
   # Local-processing benchmark (mission §B3 regression tracking). NOT
   # on PRs (keeps PR checks fast): runs on main pushes, tags, and
   # manual dispatch, uploading the JSON report as an artifact so
@@ -361,13 +650,14 @@ jobs:
           path: bench-report.json
           if-no-files-found: error
 
-  # Release: tags only. The exe and the setup exe are checksummed +
-  # manifested here, and all five files (exe, exe .sha256, setup exe,
-  # setup .sha256, manifest) are attached to the GitHub release. No
-  # release is ever cut from an untested build: this job needs
-  # build-windows, which needs test-linux.
+  # Release: tags only. All six platform artifacts are checksummed +
+  # manifested here, and every file (artifact + .sha256 sidecar +
+  # manifest) is attached to the GitHub release. No release is ever
+  # cut from an untested build: this job needs build-windows,
+  # build-windows-arm and build-unix, which each ran the gates and a
+  # frozen-binary smoke on their own runner.
   release:
-    needs: build-windows
+    needs: [build-windows, build-windows-arm, build-unix]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     timeout-minutes: 15
@@ -381,19 +671,66 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Download exe artifact
+      - name: Download Windows x64 artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: NSE-MT5-Bridge-windows
-          path: dist
+          path: dist/NSE-MT5-Bridge-windows
+
+      - name: Download Windows ARM64 artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: NSE-MT5-Bridge-windows-arm64
+          path: dist/NSE-MT5-Bridge-windows-arm64
+
+      - name: Download macOS x64 artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: NSE-MT5-Bridge-macos-x64
+          path: dist/NSE-MT5-Bridge-macos-x64
+
+      - name: Download macOS arm64 artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: NSE-MT5-Bridge-macos-arm64
+          path: dist/NSE-MT5-Bridge-macos-arm64
+
+      - name: Download Linux x64 artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: NSE-MT5-Bridge-linux-x64
+          path: dist/NSE-MT5-Bridge-linux-x64
+
+      - name: Download Linux arm64 artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: NSE-MT5-Bridge-linux-arm64
+          path: dist/NSE-MT5-Bridge-linux-arm64
 
       - name: Checksum + release manifest
+        # Stage every artifact flat into dist/ first: the manifest
+        # script writes the .sha256 sidecars next to the names the
+        # attach step globs, and install.ps1 verifies by bare filename.
+        shell: pwsh
         run: |
+          $setupSrc = (Get-Item dist/NSE-MT5-Bridge-windows/NSE-MT5-Bridge-Setup-*.exe).FullName
+          $armSrc = (Get-Item dist/NSE-MT5-Bridge-windows-arm64/NSE-MT5-Bridge-*-windows-arm64.exe).FullName
+          $dmgX64Src = (Get-Item dist/NSE-MT5-Bridge-macos-x64/*.dmg).FullName
+          $dmgArmSrc = (Get-Item dist/NSE-MT5-Bridge-macos-arm64/*.dmg).FullName
+          $tgzX64Src = (Get-Item dist/NSE-MT5-Bridge-linux-x64/*.tar.gz).FullName
+          $tgzArmSrc = (Get-Item dist/NSE-MT5-Bridge-linux-arm64/*.tar.gz).FullName
+          Copy-Item dist/NSE-MT5-Bridge-windows/NSE-MT5-Bridge.exe, $setupSrc, $armSrc, $dmgX64Src, $dmgArmSrc, $tgzX64Src, $tgzArmSrc dist/
           $setup = (Get-Item dist/NSE-MT5-Bridge-Setup-*.exe).FullName
-          python scripts/write_release_manifest.py dist/NSE-MT5-Bridge.exe --setup $setup --tag ${{ github.ref_name }}
-          type dist/NSE-MT5-Bridge.exe.sha256
-          type dist/NSE-MT5-Bridge-Setup-*.exe.sha256
-          type dist/release-manifest.json
+          $armExe = (Get-Item dist/NSE-MT5-Bridge-*-windows-arm64.exe).FullName
+          $dmgX64 = (Get-Item dist/NSE-MT5-Bridge-*-macos-x64.dmg).FullName
+          $dmgArm = (Get-Item dist/NSE-MT5-Bridge-*-macos-arm64.dmg).FullName
+          $tgzX64 = (Get-Item dist/NSE-MT5-Bridge-*-linux-x64.tar.gz).FullName
+          $tgzArm = (Get-Item dist/NSE-MT5-Bridge-*-linux-arm64.tar.gz).FullName
+          python scripts/write_release_manifest.py dist/NSE-MT5-Bridge.exe --setup $setup --tag ${{ github.ref_name }} --out-dir dist `
+            --extra "windows-arm64:$armExe" `
+            --extra "macos-x64:$dmgX64" --extra "macos-arm64:$dmgArm" `
+            --extra "linux-x64:$tgzX64" --extra "linux-arm64:$tgzArm"
+          Get-ChildItem dist/*.sha256, dist/release-manifest.json | ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_ }
 
       - name: Attach to release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
@@ -403,6 +740,16 @@ jobs:
             dist/NSE-MT5-Bridge.exe.sha256
             dist/NSE-MT5-Bridge-Setup-*.exe
             dist/NSE-MT5-Bridge-Setup-*.exe.sha256
+            dist/NSE-MT5-Bridge-*-windows-arm64.exe
+            dist/NSE-MT5-Bridge-*-windows-arm64.exe.sha256
+            dist/NSE-MT5-Bridge-*-macos-x64.dmg
+            dist/NSE-MT5-Bridge-*-macos-x64.dmg.sha256
+            dist/NSE-MT5-Bridge-*-macos-arm64.dmg
+            dist/NSE-MT5-Bridge-*-macos-arm64.dmg.sha256
+            dist/NSE-MT5-Bridge-*-linux-x64.tar.gz
+            dist/NSE-MT5-Bridge-*-linux-x64.tar.gz.sha256
+            dist/NSE-MT5-Bridge-*-linux-arm64.tar.gz
+            dist/NSE-MT5-Bridge-*-linux-arm64.tar.gz.sha256
             dist/release-manifest.json
           # v1.2.3-rc.1 (or any tag containing '-') is a prerelease;
           # v1.2.3 is stable. The two are never mixed in one release.

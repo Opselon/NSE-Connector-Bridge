@@ -16,7 +16,11 @@ and no indicator/risk engine in the client.
   capability-gated) — see [docs/API_PROTOCOL.md](docs/API_PROTOCOL.md).
   The full 91-command registry stays available **locally**; the server
   channel enforces the 3-op allowlist at the boundary. Never the reverse.
-- **Packaged as a single-file Windows `.exe`** (x64), built by CI.
+- **Packaged for six targets, built by CI** (v1.3.0): Windows x64 +
+  ARM64, macOS x64 + arm64, Linux x64 + arm64 — see the release matrix
+  below. Trading needs the Windows x64 build; the other targets run
+  the bridge core (dashboard, platform channel) with MT5 honestly
+  disabled.
 
 > Contract source of truth: `NSE-CONNECTOR-CONTRACT.md` (CONTRACT v1,
 > NSE-Platform, merged via PR #102). Where this repo and the contract
@@ -67,8 +71,34 @@ level, GUI mode — secrets masked, stored via Credential Manager).
 No trading dashboard, no positions/orders screens, no AI screens, no
 Backtest screen. Guided MT5 diagnostics use structured codes
 (`MT5_NOT_FOUND`, `MT5_NOT_RUNNING`, `MT5_IPC_FAILED`,
-`MT5_ACCOUNT_NOT_READY`, `MT5_UNSUPPORTED_VERSION`) with retry +
+`MT5_ACCOUNT_NOT_READY`, `MT5_UNSUPPORTED_VERSION`,
+`MT5_WINDOWS_REQUIRED`) with retry +
 copy-diagnostics — no raw stack traces for ordinary users.
+
+## Release matrix (v1.3.0)
+
+Every release ships all six artifacts (each with a `.sha256` sidecar,
+all listed in `release-manifest.json`). The official MetaTrader5 IPC
+driver ships Windows-x64 wheels only, so **only the Windows x64 build
+can attach to an MT5 terminal and trade**. Every other target runs the
+full bridge core — dashboard, platform channel, settings, diagnostics —
+and its MetaTrader screen reports `MT5_WINDOWS_REQUIRED` ("Windows MT5
+terminal required") instead of pretending a terminal exists. There is
+no remote-terminal mode.
+
+| Target | Artifact | MT5 trading |
+|---|---|---|
+| Windows 10/11 x64 | `NSE-MT5-Bridge-Setup-1.3.0.exe` (installer) + `NSE-MT5-Bridge.exe` (portable) | **Yes — the trading build** |
+| Windows 11 ARM64 | `NSE-MT5-Bridge-1.3.0-windows-arm64.exe` (portable, core-only) | No — use the x64 build under emulation to trade |
+| macOS 13+ x64 (Intel) | `NSE-MT5-Bridge-1.3.0-macos-x64.dmg` (`.app` inside) | No (`MT5_WINDOWS_REQUIRED`) |
+| macOS 13+ arm64 (Apple Silicon) | `NSE-MT5-Bridge-1.3.0-macos-arm64.dmg` (`.app` inside) | No (`MT5_WINDOWS_REQUIRED`) |
+| Linux x64 (glibc) | `NSE-MT5-Bridge-1.3.0-linux-x64.tar.gz` | No (`MT5_WINDOWS_REQUIRED`) |
+| Linux arm64 (glibc) | `NSE-MT5-Bridge-1.3.0-linux-arm64.tar.gz` | No (`MT5_WINDOWS_REQUIRED`) |
+
+Install steps per platform: [docs/INSTALLATION.md](docs/INSTALLATION.md).
+Builds are unsigned — Windows SmartScreen / macOS Gatekeeper ask on
+first run (right-click → Open on macOS); no notarization or signing
+key is provisioned yet.
 
 ## Quick start (development)
 
@@ -106,7 +136,8 @@ dist\NSE-MT5-Bridge.exe mt5 list --json
 Full CLI contract (envelope, exit codes): [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
 
 Releases are cut from tags only (`v1.2.3` stable, `v1.2.3-rc.1`
-prerelease) and ship the installer + exe + `.sha256` + `release-manifest.json`.
+prerelease) and ship the six platform artifacts + `.sha256` sidecars +
+`release-manifest.json` (see the matrix above).
 Direct install from GitHub Releases (SHA-256 verified, idempotent):
 
 ```powershell

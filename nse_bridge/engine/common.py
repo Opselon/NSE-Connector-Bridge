@@ -189,6 +189,8 @@ class BridgeContext:
             "connected": False,
             "url": "",
             "last_connected_at": None,
+            "last_heartbeat_at": None,
+            "last_server_heartbeat_at": None,
             "reconnects": 0,
             "last_error": None,
         }

@@ -120,6 +120,9 @@ async def test_enrolment_success_stores_subscription_and_session():
 
     manager, rest, _sleeps, _ctx = _manager(handler)
     assert await manager.enrol_once() is True
+    # The manifest POST is a background task now (see enrol_once): wait
+    # for it before asserting on the recorded request paths.
+    await manager.wait_for_manifest()
     assert manager.state == "registered"
     assert manager.is_registered
     assert calls == [

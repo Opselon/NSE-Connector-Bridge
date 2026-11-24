@@ -18,7 +18,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from .. import BRIDGE_VERSION
+from .. import BRIDGE_VERSION, PROTOCOL_VERSION
 from ..config import (
     persist_settings,
     validate_network_proxy,
@@ -27,7 +27,7 @@ from ..config import (
 )
 from ..engine.common import BridgeContext, datetime_now_iso
 from ..errors import BridgeError, ErrorCode
-from ..logging_setup import redact_text
+from ..logging_setup import redact_text, sanitize_payload
 from ..secrets import get_secret_store
 from ..server.errors import ServerError
 from ..updates import Updater
@@ -117,6 +117,7 @@ async def get_settings(request: Request) -> dict[str, Any]:
             "mt5_custom_terminal_dirs": s.mt5_custom_terminal_dirs,
             "device_id": ctx.get_or_create_device_id(),
             "config_file": str(s.config_file),
+            "log_file": str(s.resolved_log_dir / "bridge.log"),
             "server_channel": ctx.server_channel_state,
         },
     }
@@ -471,6 +472,29 @@ async def restart_server_channel(request: Request) -> dict[str, Any]:
 #: code carries a human-readable explanation + actionable recovery
 #: steps; ordinary users never see a raw stack trace.
 MT5_DIAGNOSTICS: dict[str, dict[str, Any]] = {
+    # v1.3.0 — honest capability gate: the official MetaTrader5 IPC
+    # driver ships win_amd64 wheels only, so on macOS, Linux, or a
+    # native-ARM64 Windows process no terminal can ever attach. The
+    # driver reports this code itself (connection_state_dict) whenever
+    # no more specific code was set, and _derive_mt5_diagnostic returns
+    # it before the NOT_FOUND / NOT_RUNNING / IPC_FAILED fallbacks.
+    # There is no remote-terminal mode — this state must never be
+    # presented as "terminal found but not running".
+    "MT5_WINDOWS_REQUIRED": {
+        "title": "Windows MT5 terminal required",
+        "explanation": (
+            "The MetaTrader 5 terminal — and the official IPC driver the bridge "
+            "attaches with — run on Windows (x64) only. This bridge is running on "
+            "a platform where no MT5 terminal can attach, so trading, positions, "
+            "and account data from MT5 are unavailable here. The bridge core "
+            "itself (dashboard, platform channel, settings, diagnostics) still runs."
+        ),
+        "recovery": [
+            "To trade, run the Windows x64 build of the bridge on a Windows 10/11 PC with a MetaTrader 5 terminal installed.",
+            "On ARM64 Windows, use the Windows x64 build (it runs under emulation and CAN attach to the terminal) — the native ARM64 build is core-only.",
+            "On this machine you can still enrol the device and watch the platform channel; MT5 features stay disabled until a Windows bridge attaches.",
+        ],
+    },
     "MT5_NOT_FOUND": {
         "title": "No MetaTrader 5 terminal found",
         "explanation": (
@@ -891,6 +915,11 @@ async def list_mt5_terminals(request: Request) -> dict[str, Any]:
             "driver_state": state["state"],
             "connected": ctx.driver.connected,
             "diagnostic_code": state.get("diagnostic_code"),
+            # v1.3.0: False on macOS/Linux/native-ARM64 Windows, where
+            # the MT5 IPC driver cannot load — the UI shows the
+            # "Windows MT5 terminal required" state instead of an
+            # empty terminal list that looks like a bug.
+            "platform_supported": state.get("platform_supported", True),
         },
     }
 
@@ -1047,8 +1076,142 @@ async def diagnostics_summary(request: Request) -> dict[str, Any]:
             "last_errors": ctx.logs.tail(20, "ERROR"),
             "driver_last_error": state.get("last_error"),
             "diagnostic": diagnostic,
+            # Where the full logs live on disk — the UI shows this so a
+            # user can open bridge.log without guessing the data dir.
+            "log_file": str(ctx.settings.resolved_log_dir / "bridge.log"),
+            "config_file": str(ctx.settings.config_file),
         },
     }
+
+
+def _mask_login(login: Any) -> str | None:
+    """Mask an MT5 account login for display/copy: all but the last 4 digits.
+
+    A login number is not a password, but it is account-identifying —
+    a diagnostics bundle that gets pasted into a support chat must
+    not carry the full number.
+    """
+    if login is None:
+        return None
+    text = str(login)
+    if not text:
+        return None
+    if len(text) <= 4:
+        return "••••"
+    return "•" * (len(text) - 4) + text[-4:]
+
+
+@router.get(
+    "/diagnostics/report",
+    summary="Copy-ready diagnostics report (pre-redacted)",
+    description="One server-built bundle for 'copy diagnostics': bridge "
+    "versions, MT5 state (login masked), the structured diagnostic "
+    "code + recovery steps, enrolment, WebSocket state with last "
+    "heartbeats, sync, recent v1 execution (close/modify lifecycle "
+    "with reconciliation facts), last errors, and the log/config file "
+    "paths. The whole payload passes through the bridge redaction "
+    "(sanitize_payload) — no key material is ever included.",
+)
+async def diagnostics_report(request: Request) -> dict[str, Any]:
+    from ..engine.connection import get_mt5_connection_status
+    from ..engine.system import get_bridge_status
+
+    ctx: BridgeContext = request.app.state.ctx
+    terminals = await run_in_threadpool(_discover_terminals, ctx)
+    code, severity = _derive_mt5_diagnostic(ctx, terminals["terminals"])
+    diagnostic = None
+    if code is not None:
+        entry = MT5_DIAGNOSTICS[code]
+        diagnostic = {
+            "code": code,
+            "severity": severity,
+            "title": entry["title"],
+            "explanation": entry["explanation"],
+            "recovery": list(entry["recovery"]),
+        }
+    channel_state = dict(ctx.server_channel_state)
+    channel = getattr(request.app.state, "channel", None)
+    if channel is None:
+        execution: dict[str, Any] = {
+            "executions": [],
+            "pending_results": 0,
+            "executor_available": False,
+            "channel_available": False,
+        }
+    else:
+        execution = {**channel.recent_command_executions(10), "channel_available": True}
+    state = ctx.driver.connection_state_dict()
+    bridge_status, mt5_status = await run_in_threadpool(
+        lambda: (
+            get_bridge_status(ctx, None),
+            get_mt5_connection_status(ctx, None),
+        )
+    )
+    # Mask the account login everywhere it appears in the MT5 status
+    # (top level + terminal dict) before the bundle is built.
+    mt5_report = dict(mt5_status)
+    mt5_report["login"] = _mask_login(mt5_status.get("login"))
+    terminal = mt5_status.get("terminal")
+    if isinstance(terminal, dict):
+        terminal_report = dict(terminal)
+        terminal_report["login"] = _mask_login(terminal.get("login"))
+        mt5_report["terminal"] = terminal_report
+    sync_engine = ctx.sync_engine
+    if channel_state.get("connected"):
+        network = {"status": "ok", "detail": "WebSocket channel is connected."}
+    elif not ctx.settings.server_token:
+        network = {"status": "not_configured", "detail": "No API key configured — set it in Settings first."}
+    else:
+        network = {
+            "status": "not_connected",
+            "detail": "Server channel is not connected — see the diagnostics summary for the live probe.",
+        }
+    report = {
+        "generated_at": datetime_now_iso(),
+        "bridge": {
+            "version": BRIDGE_VERSION,
+            "protocol_version": PROTOCOL_VERSION,
+            "python": sys.version.split()[0],
+            "platform": sys.platform,
+            "uptime_seconds": bridge_status.get("uptime_seconds"),
+            "pid": bridge_status.get("pid"),
+            "device_id": ctx.get_or_create_device_id(),
+        },
+        "mt5": mt5_report,
+        "terminals": {
+            "selected_path": terminals.get("selected_path"),
+            "count": len(terminals.get("terminals") or []),
+            "paths": [t.get("path") for t in terminals.get("terminals") or []],
+        },
+        "diagnostic": diagnostic,
+        "enrolment": ctx.enrolment_status(),
+        "websocket": channel_state,
+        "network": network,
+        "sync": {
+            "available": sync_engine is not None,
+            "pending_batches": sync_engine.pending_count() if sync_engine is not None else None,
+            "checkpoint": sync_engine.checkpoint.iso if sync_engine is not None else None,
+        },
+        "execution": execution,
+        "trade_metrics": ctx.trade_metrics.to_dict(),
+        "last_errors": ctx.logs.tail(20, "ERROR"),
+        "driver_last_error": state.get("last_error"),
+        "updates": _get_updater(request).status(),
+        "settings": {
+            "server_base_url": ctx.settings.server_base_url,
+            "environment": ctx.settings.environment,
+            "server_url_configured": bool(ctx.settings.server_url),
+            "network_proxy_configured": bool(ctx.settings.network_proxy),
+            "gui_mode": ctx.settings.gui_mode,
+            "log_level": ctx.settings.log_level,
+            "mt5_terminal_path": ctx.settings.mt5_terminal_path or None,
+        },
+        "log_file": str(ctx.settings.resolved_log_dir / "bridge.log"),
+        "config_file": str(ctx.settings.config_file),
+    }
+    # Final safety net: secret-labelled keys/values are scrubbed even
+    # if a future field accidentally carries key material.
+    return {"ok": True, "data": sanitize_payload(report)}
 
 
 # ---------------------------------------------------------------------------
