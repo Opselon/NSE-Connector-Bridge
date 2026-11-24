@@ -15,5 +15,8 @@ pywebview==6.2.1
 python-socks==3.2.2
 socksio==1.0.0
 keyring==25.7.0; sys_platform == "win32"
-MetaTrader5==5.0.6231; sys_platform == "win32"
+# MetaTrader5 ships Windows-only wheels — win_amd64 only, no win_arm64
+# wheel exists (see pyproject.toml: the marker names the process arch
+# so an ARM64-Windows install does not fail on a missing distribution).
+MetaTrader5==5.0.6231; sys_platform == "win32" and platform_machine == "AMD64"
 pyinstaller==6.22.3
