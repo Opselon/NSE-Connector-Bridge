@@ -606,6 +606,195 @@ def test_diagnostics_summary_mt5_unsupported_version(client):
     assert data["diagnostic"]["severity"] == "warning"
 
 
+def test_diagnostics_summary_includes_log_and_config_file_paths(client):
+    # First-run usefulness: the UI shows where bridge.log lives instead
+    # of making the user guess the data dir.
+    http, ctx, _ = client
+    data = _summary(http, ctx)
+    assert data["log_file"].endswith("bridge.log"), data
+    assert "logs" in data["log_file"]
+    assert data["config_file"].endswith("config.json")
+
+
+def test_settings_includes_log_file_path(client):
+    http, ctx, _ = client
+    data = http.get("/api/v1/settings", headers=_auth(ctx)).json()["data"]
+    assert data["log_file"].endswith("bridge.log")
+    assert "logs" in data["log_file"]
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics report: the "copy diagnostics" bundle (S2)
+# ---------------------------------------------------------------------------
+class _FakeChannel:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def recent_command_executions(self, limit=50):
+        data = dict(self._payload)
+        data["executions"] = list(data.get("executions", []))[:limit]
+        return data
+
+
+def _report(http, ctx):
+    resp = http.get("/api/v1/diagnostics/report", headers=_auth(ctx))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["ok"] is True
+    return resp.json()["data"]
+
+
+def test_diagnostics_report_is_useful_and_redacted(client):
+    http, ctx, _ = client
+    secret = "sk-test-secret-abcdef123456"
+    ctx.settings.server_token = secret
+    ctx.settings.local_api_key = "local-key-abcdef123456"
+    # A full login must come back masked in the report, never verbatim.
+    ctx.driver._set_state("CONNECTED", "connected")
+    data = _report(http, ctx)
+    assert secret not in json.dumps(data), "server token leaked in diagnostics report"
+    assert "local-key-abcdef123456" not in json.dumps(data)
+    # Versions + identity.
+    from nse_bridge import BRIDGE_VERSION
+
+    assert data["bridge"]["version"] == BRIDGE_VERSION
+    assert data["bridge"]["protocol_version"]
+    assert data["bridge"]["platform"]
+    assert data["bridge"]["python"]
+    assert data["bridge"]["device_id"]
+    # MT5 state, WS state, enrolment, sync, last errors, log location.
+    assert data["mt5"]["state"] == "CONNECTED"
+    assert isinstance(data["websocket"], dict)
+    assert "connected" in data["websocket"]
+    assert "last_heartbeat_at" in data["websocket"]
+    assert "last_server_heartbeat_at" in data["websocket"]
+    assert data["enrolment"]["state"]
+    assert data["sync"]["available"] is False  # no sync engine in tests
+    assert isinstance(data["last_errors"], list)
+    assert data["log_file"].endswith("bridge.log")
+    assert data["config_file"].endswith("config.json")
+    # Execution section: empty but honest when the channel never opened.
+    assert data["execution"] == {
+        "executions": [],
+        "pending_results": 0,
+        "executor_available": False,
+        "channel_available": False,
+    }
+    # Non-secret settings only: no token value, only booleans.
+    assert data["settings"]["server_base_url"]
+    assert data["settings"]["environment"] == "production"
+    assert data["settings"]["server_url_configured"] is False
+    assert data["settings"]["network_proxy_configured"] is False
+    assert "server_token" not in json.dumps(data["settings"])
+
+
+def test_diagnostics_report_masks_mt5_login_and_carries_execution(client):
+    http, ctx, app = client
+    ctx.driver._connected = True
+    ctx.driver._set_state("CONNECTED", "connected")
+    # Fake a driver-reported login via the connection state dict.
+    ctx.driver._login = 12345678
+    app.state.channel = _FakeChannel(
+        {
+            "executions": [
+                {
+                    "command_id": "cmd-9",
+                    "operation": "close_position",
+                    "state": "PARTIALLY_COMPLETED",
+                    "wire_status": "executed",
+                    "partial": True,
+                    "closed_volume": 0.4,
+                    "remaining_volume": 0.6,
+                    "reconciled": True,
+                    # S4 execution-hardening fields ride the same surface.
+                    "retcode": 10009,
+                    "retcode_label": "TRADE_RETCODE_DONE",
+                    "attempts": 2,
+                    "already_closed": False,
+                    "no_changes": False,
+                }
+            ],
+            "pending_results": 1,
+            "executor_available": True,
+        }
+    )
+    data = _report(http, ctx)
+    assert data["execution"]["channel_available"] is True
+    assert data["execution"]["pending_results"] == 1
+    first = data["execution"]["executions"][0]
+    assert first["operation"] == "close_position"
+    assert first["state"] == "PARTIALLY_COMPLETED"
+    assert first["reconciled"] is True
+    # S4 fields pass through the report untouched (same existing surface).
+    assert first["retcode"] == 10009
+    assert first["retcode_label"] == "TRADE_RETCODE_DONE"
+    assert first["attempts"] == 2
+    assert first["already_closed"] is False
+    assert first["no_changes"] is False
+    # The full login must not appear anywhere in the bundle.
+    assert "12345678" not in json.dumps(data)
+    login = data["mt5"].get("login")
+    assert login is None or login.endswith("5678"), login
+
+
+def test_diagnostics_report_requires_auth(client):
+    http, _, _ = client
+    resp = http.get("/api/v1/diagnostics/report")
+    assert resp.status_code == 401, resp.text
+
+
+# ---------------------------------------------------------------------------
+# Overview: at-a-glance state + what to do next (S2)
+# ---------------------------------------------------------------------------
+def test_gui_overview_has_next_steps_execution_and_heartbeat(client):
+    http, _, _ = client
+    html = http.get("/ui").text
+    ov = html.split('id="page-overview"')[1].split('id="page-platform"')[0]
+    # "What to do next" panel: every state links to its fix.
+    assert 'id="ovNextCard"' in ov
+    assert 'id="ovNextSteps"' in ov
+    assert 'id="ovNextState"' in ov
+    assert "data-goto" in html  # next-step buttons navigate to the fix screen
+    assert "data-ob-open" in html  # ... or open guided setup
+    # Last heartbeat (sent + received) and masked account on Overview.
+    assert 'id="ovHbOut"' in ov
+    assert 'id="ovHbIn"' in ov
+    assert 'id="ovUser"' in ov
+    assert 'id="ovKey"' in ov
+    assert "maskLogin" in html
+    # Visible execution status from the EXISTING /execution/recent surface.
+    assert 'id="ovExLast"' in ov
+    assert 'id="ovExState"' in ov
+    assert 'id="ovExRecon"' in ov
+    assert 'id="ovExUnknown"' in ov
+    assert 'id="ovExRetcode"' in ov
+    assert 'id="ovExAttempts"' in ov
+    assert 'id="btnOvEx"' in ov
+    assert "/api/v1/execution/recent" in html
+    assert "/api/v1/account/subscription" in html
+    # S4 execution-hardening fields are rendered (only when present).
+    assert "retcode_label" in html
+    assert "already_closed" in html
+    assert "no_changes" in html
+    assert "Broker retcode" in html
+    assert "Attempts" in html
+    # No v2 execution surface is invented here.
+    assert "open_order" not in html
+
+
+def test_gui_diagnostics_shows_log_file_and_server_report(client):
+    http, _, _ = client
+    html = http.get("/ui").text
+    dg = html.split('id="page-diagnostics"')[1].split('id="page-updates"')[0]
+    assert 'id="dgLogFile"' in dg
+    assert 'id="btnDgCopyLog"' in dg
+    assert 'id="btnDgCopy"' in dg
+    assert 'id="btnDgDownload"' in dg
+    # Copy diagnostics uses the server-built, pre-redacted report.
+    assert "/api/v1/diagnostics/report" in html
+    settings_html = html.split('id="page-settings"')[1].split("</section>")[0]
+    assert 'id="logPath"' in settings_html
+
+
 def test_diagnostics_summary_healthy_when_connected_current_build(client):
     http, ctx, _ = client
     ctx.driver._connected = True

@@ -356,6 +356,30 @@
         }
       }
     },
+    "/api/v1/diagnostics/report": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Copy-ready diagnostics report (pre-redacted)",
+        "description": "One server-built bundle for 'copy diagnostics': bridge versions, MT5 state (login masked), the structured diagnostic code + recovery steps, enrolment, WebSocket state with last heartbeats, sync, recent v1 execution (close/modify lifecycle with reconciliation facts), last errors, and the log/config file paths. The whole payload passes through the bridge redaction (sanitize_payload) — no key material is ever included.",
+        "operationId": "diagnostics_report_api_v1_diagnostics_report_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Diagnostics Report Api V1 Diagnostics Report Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/symbols/inventory": {
       "get": {
         "tags": [

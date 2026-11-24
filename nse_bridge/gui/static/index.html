@@ -424,6 +424,11 @@ pre.report{
             <span class="note" style="display:inline;margin-left:8px">The bridge also works standalone.</span>
           </div>
         </div>
+        <div class="card" id="ovNextCard">
+          <h2>What to do next <span id="ovNextState" class="badge gray">checking…</span></h2>
+          <div id="ovNextSteps"><div class="skel" style="width:60%"></div></div>
+          <p class="note">Every item links straight to its fix — guided setup, the MetaTrader screen, or the Platform screen. No dead ends: a red state always says what to do.</p>
+        </div>
         <div class="grid">
           <div class="card">
             <h2>Bridge</h2>
@@ -443,6 +448,10 @@ pre.report{
             <h2>Platform</h2>
             <div class="kv"><span class="k">Server channel</span><span class="v" id="ovChannelState">—</span></div>
             <div class="kv"><span class="k">Channel reconnects</span><span class="v" id="ovChannelReconn">—</span></div>
+            <div class="kv"><span class="k">Last heartbeat sent</span><span class="v" id="ovHbOut">—</span></div>
+            <div class="kv"><span class="k">Last heartbeat received</span><span class="v" id="ovHbIn">—</span></div>
+            <div class="kv"><span class="k">Platform user</span><span class="v" id="ovUser">—</span></div>
+            <div class="kv"><span class="k">API key</span><span class="v" id="ovKey">—</span></div>
             <div class="kv"><span class="k">Enrolment</span><span class="v" id="ovEnrol">—</span></div>
             <div class="kv"><span class="k">Live feed (this UI)</span><span class="v" id="ovUiFeed">—</span></div>
             <div class="kv"><span class="k">Last live event</span><span class="v" id="ovLastEvent">—</span></div>
@@ -459,6 +468,16 @@ pre.report{
             <div class="kv"><span class="k">Installed</span><span class="v" id="ovUpdInstalled">—</span></div>
             <div class="kv"><span class="k">Availability</span><span class="v" id="ovUpdStatus">—</span></div>
             <div class="kv"><span class="k">Staged</span><span class="v" id="ovUpdStaged">—</span></div>
+          </div>
+          <div class="card">
+            <h2>Last execution <span><button class="btn small ghost" id="btnOvEx" type="button">Open Execution</button></span></h2>
+            <div class="kv"><span class="k">Last command</span><span class="v" id="ovExLast">—</span></div>
+            <div class="kv"><span class="k">State</span><span class="v" id="ovExState">—</span></div>
+            <div class="kv"><span class="k">Broker retcode</span><span class="v" id="ovExRetcode">—</span></div>
+            <div class="kv"><span class="k">Attempts</span><span class="v" id="ovExAttempts">—</span></div>
+            <div class="kv"><span class="k">Reconciliation</span><span class="v" id="ovExRecon">—</span></div>
+            <div class="kv"><span class="k">UNKNOWN awaiting reconciliation</span><span class="v" id="ovExUnknown">—</span></div>
+            <p class="note">v1 operations only (close / modify). No new-position trading exists in this bridge version — that needs the platform P3 protocol.</p>
           </div>
         </div>
         <p class="note">Bridge / Platform cards update live over the authenticated local WebSocket feed
@@ -684,8 +703,8 @@ pre.report{
             <span><button class="btn small ghost" id="btnExRefresh" type="button">Refresh</button></span>
           </h2>
           <div class="tablewrap"><table>
-            <thead><tr><th scope="col">Command</th><th scope="col">Operation</th><th scope="col">Local state</th><th scope="col">Wire status</th><th scope="col">Started</th><th scope="col">Duration</th><th scope="col">Error</th><th scope="col">Partial close</th></tr></thead>
-            <tbody id="exRows"><tr><td colspan="8"><div class="skel" style="width:40%"></div></td></tr></tbody>
+            <thead><tr><th scope="col">Command</th><th scope="col">Operation</th><th scope="col">Local state</th><th scope="col">Wire status</th><th scope="col">Started</th><th scope="col">Duration</th><th scope="col">Error</th><th scope="col">Broker retcode</th><th scope="col">Attempts</th><th scope="col">Partial close</th></tr></thead>
+            <tbody id="exRows"><tr><td colspan="10"><div class="skel" style="width:40%"></div></td></tr></tbody>
           </table></div>
         </div>
         <div class="card">
@@ -726,6 +745,14 @@ pre.report{
           </div>
         </div>
         <div class="card">
+          <h2>Log file</h2>
+          <div class="kv"><span class="k">bridge.log</span><span class="v" id="dgLogFile">—</span></div>
+          <div class="actions" style="margin:var(--sp-3) 0 0">
+            <button class="btn small ghost" id="btnDgCopyLog" type="button">Copy log path</button>
+          </div>
+          <p class="note">Full logs live here (rotated 10 MB × 10). Paste the path into Explorer / Finder to open it. The diagnostics report below never includes key material.</p>
+        </div>
+        <div class="card">
           <h2>Last errors</h2>
           <div class="errlist" id="dgErrors"><div class="empty">No errors recorded.</div></div>
         </div>
@@ -741,9 +768,11 @@ pre.report{
               <button class="btn small ghost" id="btnDgDownload" type="button" disabled>Download JSON</button>
             </span>
           </h2>
-          <p class="note" style="margin-top:0">“Build report” assembles a full diagnostics snapshot
-            (bridge, connection, terminal, metrics, recent logs — all values pre-redacted by the bridge).
-            The report never leaves this machine unless you copy or download it. No stack traces are included.</p>
+          <p class="note" style="margin-top:0">“Build report” asks the bridge itself for a copy-ready snapshot
+            (GET /api/v1/diagnostics/report — versions, MT5 state, last errors, WS state with heartbeats,
+            recent v1 execution, log file path — pre-redacted server-side, no key material), plus the
+            MT5 diagnostic report. The report never leaves this machine unless you copy or download it.
+            No stack traces are included.</p>
           <details class="report" id="dgReportWrap" hidden>
             <summary>Report contents</summary>
             <pre class="report" id="dgReport"></pre>
@@ -830,6 +859,7 @@ pre.report{
             <div class="kv"><span class="k">Local API key (gate)</span><span class="v" id="setLocalKey">—</span></div>
             <div class="kv"><span class="k">Device ID</span><span class="v" id="setDevice">—</span></div>
             <div class="kv"><span class="k">Config file</span><span class="v" id="cfgPath">—</span></div>
+            <div class="kv"><span class="k">Log file</span><span class="v" id="logPath">—</span></div>
           </fieldset>
 
           <fieldset>
@@ -1079,6 +1109,13 @@ function fmtUptime(sec){
   if (m) return m + 'm ' + s + 's';
   return s + 's';
 }
+/* Account logins are identifying: show only the last 4 digits at a
+   glance (the full login stays on the MetaTrader detail screen). */
+function maskLogin(v){
+  if (v == null || v === '') return '—';
+  const s = String(v);
+  return s.length <= 4 ? '••••' : '•'.repeat(s.length - 4) + s.slice(-4);
+}
 function setMsg(el, txt, cls){
   const n = typeof el === 'string' ? $(el) : el;
   n.textContent = txt;
@@ -1184,6 +1221,7 @@ const model = {
   network: null,
   summary: null,       // last diagnostics/summary payload
   sub: null,           // account/subscription payload
+  execRecent: null,    // last /execution/recent payload (v1 close/modify)
   updLatest: null,     // GET /updates/latest
   updStatus: null      // GET /updates/status (updater)
 };
@@ -1326,6 +1364,9 @@ setInterval(refreshActive, 30000);
 setInterval(() => {
   if (current !== 'overview') return;
   $('ovLastEvent').textContent = live.lastEventAt ? ago(live.lastEventAt) : '—';
+  const ch = model.channel || {};
+  if (ch.last_heartbeat_at) $('ovHbOut').textContent = ago(ch.last_heartbeat_at);
+  if (ch.last_server_heartbeat_at) $('ovHbIn').textContent = ago(ch.last_server_heartbeat_at);
   if (model.bridge.uptimeS != null) {
     const elapsed = (performance.now() - model.bridge.uptimeAt) / 1000;
     $('ovUptime').textContent = fmtUptime(model.bridge.uptimeS + elapsed);
@@ -1340,7 +1381,9 @@ async function loadOverview(){
     api('/api/v1/diagnostics/summary').then(s => { model.summary = s; absorbSummary(s); }),
     api('/api/v1/updates/status').then(s => { model.updStatus = s; paintUpdateChip(); })
       .catch(() => { model.updStatus = null; }),
-    api('/api/v1/updates/latest').then(s => { model.updLatest = s; }).catch(() => { model.updLatest = null; })
+    api('/api/v1/updates/latest').then(s => { model.updLatest = s; }).catch(() => { model.updLatest = null; }),
+    api('/api/v1/account/subscription').then(s => { model.sub = s; }).catch(() => { model.sub = null; }),
+    api('/api/v1/execution/recent').then(r => { model.execRecent = r; }).catch(() => { model.execRecent = null; })
   ];
   /* allSettled: a failing endpoint must never blank the whole Overview —
      each card renders what actually arrived, '—' for the rest. */
@@ -1377,13 +1420,19 @@ function renderOverview(){
   const acct = model.acct || {};
   const mt = model.mt5;
   setKv('ovMt5State', mt.state || '—', mt.state === 'CONNECTED' ? 'up' : (mt.state ? 'down' : ''));
-  setKv('ovMt5Login', acct.login != null ? String(acct.login) : (mt.login || '—'));
+  setKv('ovMt5Login', maskLogin(acct.login != null ? acct.login : mt.login));
   setKv('ovMt5Server', acct.server || '—');
   setKv('ovMt5Currency', acct.currency || '—');
   const ch = model.channel || {};
   setKv('ovChannelState', ch.connected ? 'LIVE' : (ch.enabled ? 'RECONNECTING' : (ch.enabled === false ? 'OFF' : '—')),
     ch.connected ? 'up' : (ch.enabled ? 'warn' : 'down'));
   $('ovChannelReconn').textContent = ch.reconnects != null ? String(ch.reconnects) : '—';
+  $('ovHbOut').textContent = ch.last_heartbeat_at ? ago(ch.last_heartbeat_at) : '—';
+  $('ovHbIn').textContent = ch.last_server_heartbeat_at ? ago(ch.last_server_heartbeat_at) : '—';
+  const sub = model.sub || {};
+  $('ovUser').textContent = sub.user_id || '—';
+  setKv('ovKey', sub.api_key_set ? ('stored: ' + (sub.api_key_masked || '••••')) : 'not set',
+    sub.api_key_set ? '' : 'warn');
   const en = model.enrolment;
   setKv('ovEnrol', en ? human(en.state || 'unknown') : '—',
     en && en.state === 'registered' ? 'up' : (en && en.state === 'not_configured' ? 'warn' : ''));
@@ -1409,7 +1458,127 @@ function renderOverview(){
   $('ovUpdStaged').textContent = us && us.staged_version ? 'v' + us.staged_version : '—';
   const setupRow = $('ovSetupRow');
   setupRow.hidden = !(model.enrolment && model.enrolment.state === 'not_configured');
+  renderNextSteps();
+  renderOvExecution();
 }
+
+/* ---------- What to do next (Overview): one ordered list, no dead ends ----------
+   Every red/unknown state becomes an item that links straight to its fix:
+   the structured MT5 diagnostic (first recovery step), the exact Algo
+   Trading checkboxes, guided setup, or the Platform screen. When nothing
+   is wrong the card says so and shows the last server heartbeat. */
+function renderNextSteps(){
+  const host = $('ovNextSteps');
+  const badge = $('ovNextState');
+  if (!host || !badge) return;
+  if (!model.summary) return; /* still loading — keep the skeleton */
+  const s = model.summary, diag = s.diagnostic;
+  const items = [];
+  const mtOk = model.mt5.connected === true;
+  const en = model.enrolment || {};
+  const ch = model.channel || {};
+  if (diag) {
+    items.push({tone: 'err', text: diag.title + '. ' + ((diag.recovery && diag.recovery[0]) || ''),
+      goto: 'metatrader', label: 'Fix on MetaTrader'});
+  } else if (!mtOk) {
+    items.push({tone: 'warn', text: 'MetaTrader 5 is not attached yet. Start the terminal, sign in inside MT5, then press Connect.',
+      goto: 'metatrader', label: 'Go to MetaTrader'});
+  }
+  const tradeAllowed = s.mt5 && s.mt5.terminal ? s.mt5.terminal.trade_allowed : undefined;
+  if (mtOk && tradeAllowed === false) {
+    items.push({tone: 'err',
+      text: 'Algo Trading is OFF in the terminal — every trade command would be rejected (retcode 10027). In MT5: the Algo Trading button must be GREEN (Ctrl+E), Tools → Options → Experts → “Allow algorithmic trading” checked, and “Disable algorithmic trading via external Python API” UNCHECKED.',
+      goto: 'metatrader', label: 'See the exact checkboxes'});
+  }
+  if (en.state === 'not_configured') {
+    items.push({tone: 'warn', text: 'No API key yet — the bridge works standalone, but the platform channel stays off until you enrol.',
+      setup: true, label: 'Run guided setup'});
+  } else if (en.state && en.state !== 'registered') {
+    items.push({tone: 'warn',
+      text: 'Device registration: ' + human(en.state) + (en.last_error_message ? ' — ' + en.last_error_message : '') + '.',
+      goto: 'platform', label: 'Check Platform'});
+  }
+  if (ch.enabled === false) {
+    items.push({tone: 'warn', text: 'Server channel is off (no server URL configured). Set the platform URL + key, or keep using the bridge standalone.',
+      goto: 'platform', label: 'Configure Platform'});
+  } else if (!ch.connected) {
+    items.push({tone: 'warn', text: 'Server channel is reconnecting — last error: ' + (ch.last_error || 'none reported yet') + '.',
+      goto: 'platform', label: 'Check Platform'});
+  }
+  if (!items.length) {
+    badge.textContent = 'Ready';
+    badge.className = 'badge ok';
+    host.innerHTML = '<p class="note" style="margin-top:0">Everything looks ready: MT5 attached, device registered, server channel live. Last server heartbeat ' +
+      (ch.last_server_heartbeat_at ? esc(ago(ch.last_server_heartbeat_at)) : '—') + '.</p>';
+    return;
+  }
+  badge.textContent = items.length + (items.length === 1 ? ' thing to do' : ' things to do');
+  badge.className = 'badge ' + (items.some(i => i.tone === 'err') ? 'bad' : 'warnb');
+  host.innerHTML = items.map(i =>
+    '<div class="check"><div class="ic ' + (i.tone === 'err' ? 'fail' : 'warn') + '" aria-hidden="true">' +
+    (i.tone === 'err' ? '✕' : '!') + '</div>' +
+    '<div style="min-width:0;flex:1"><div class="t">' + esc(i.text) + '</div></div>' +
+    '<div class="ob-actions">' + (i.setup
+      ? '<button class="btn small" type="button" data-ob-open>Guided setup</button>'
+      : '<button class="btn small" type="button" data-goto="' + esc(i.goto) + '">' + esc(i.label) + '</button>') +
+    '</div></div>').join('');
+  host.querySelectorAll('[data-goto]').forEach(b => b.addEventListener('click', () => show(b.dataset.goto)));
+  host.querySelectorAll('[data-ob-open]').forEach(b => b.addEventListener('click', () => openOnboarding()));
+}
+
+/* ---------- Last execution (Overview): v1 close/modify only ----------
+   Reads the SAME /execution/recent surface as the Execution screen —
+   last command, its local state, and the reconciliation outcome. No
+   v2 surface is invented here. */
+function renderOvExecution(){
+  const rec = model.execRecent;
+  if (!rec) return; /* still loading — keep the '—' placeholders */
+  const execs = rec.executions || [];
+  $('ovExUnknown').textContent = String(execs.filter(x => x.state === 'UNKNOWN').length);
+  if (!execs.length) {
+    $('ovExLast').textContent = rec.channel_available
+      ? 'No server-channel commands yet in this session'
+      : 'Server channel never opened — no command history yet';
+    setKv('ovExState', '—');
+    setKv('ovExRetcode', '—');
+    $('ovExAttempts').textContent = '—';
+    setKv('ovExRecon', '—');
+    return;
+  }
+  const x = execs[0];
+  $('ovExLast').textContent = (x.operation || '—') + ' · ' + ((x.command_id || '').slice(0, 8));
+  setKv('ovExState', x.state || '—',
+    x.state === 'COMPLETED' ? 'up' : (x.state === 'UNKNOWN' ? 'warn' : (x.state === 'FAILED' ? 'down' : '')));
+  /* S4 execution-hardening fields, rendered only when the surface
+     carries them (absent pre-S4 → '—', never invented). already_closed
+     means the close was a verified no-op (position already gone);
+     no_changes means a modify with nothing to change. */
+  setKv('ovExRetcode', x.retcode == null ? '—'
+    : (String(x.retcode) + (x.retcode_label ? ' (' + x.retcode_label + ')' : '')),
+    x.retcode == null ? '' : (x.retcode === 10009 || x.retcode === 10036 ? 'up' : 'warn'));
+  $('ovExAttempts').textContent = x.attempts == null ? '—' : String(x.attempts);
+  let recon, cls;
+  if (x.state === 'UNKNOWN') {
+    recon = 'outcome uncertain — reconcile MT5 state before any retry'; cls = 'warn';
+  } else if (x.already_closed === true) {
+    recon = 'already closed — position was already gone, verified success'; cls = '';
+  } else if (x.no_changes === true) {
+    recon = 'no changes — nothing to modify, verified success'; cls = '';
+  } else if (x.partial) {
+    recon = 'partial close — closed ' + (x.closed_volume != null ? x.closed_volume : '?') +
+      ', remaining ' + (x.remaining_volume != null ? x.remaining_volume : '?') +
+      ' · ' + (x.reconciled ? 'reconciled' : 'NOT reconciled yet');
+    cls = x.reconciled ? '' : 'warn';
+  } else if (x.reconciled === true) {
+    recon = 'reconciled'; cls = '';
+  } else if (x.reconciled === false) {
+    recon = 'not reconciled'; cls = 'warn';
+  } else {
+    recon = '—'; cls = '';
+  }
+  setKv('ovExRecon', recon, cls);
+}
+$('btnOvEx').addEventListener('click', () => show('execution'));
 $('ovRunSetup').addEventListener('click', () => openOnboarding());
 paintUpdateChip();
 
@@ -1805,7 +1974,7 @@ async function loadExecution(){
   let rec;
   try { rec = await api('/api/v1/execution/recent'); }
   catch (e) {
-    $('exRows').innerHTML = '<tr><td colspan="8"><div class="empty">Execution history unavailable: ' + esc(e.message || e) + '</div></td></tr>';
+    $('exRows').innerHTML = '<tr><td colspan="10"><div class="empty">Execution history unavailable: ' + esc(e.message || e) + '</div></td></tr>';
     return;
   }
   const execs = rec.executions || [];
@@ -1813,17 +1982,24 @@ async function loadExecution(){
   $('exUnknown').textContent = String(execs.filter(x => x.state === 'UNKNOWN').length);
   $('exAvail').textContent = rec.executor_available ? 'available' : 'not started yet (no commands executed)';
   $('exRows').innerHTML = execs.length === 0
-    ? '<tr><td colspan="8"><div class="empty">' + (rec.channel_available
+    ? '<tr><td colspan="10"><div class="empty">' + (rec.channel_available
       ? 'No server-channel commands executed yet in this session.'
       : 'Server channel never opened in this session — no command history exists yet.') + '</div></td></tr>'
     : execs.map(x => {
       const partial = x.partial
         ? ('closed ' + (x.closed_volume != null ? x.closed_volume : '?') + ' · remaining ' + (x.remaining_volume != null ? x.remaining_volume : '?') + ' · ' + (x.reconciled ? 'reconciled' : 'not reconciled'))
         : '—';
+      /* S4 fields (retcode / attempts / already_closed / no_changes) are
+         rendered only when present — absent pre-S4 they read '—'. */
+      const rc = x.retcode == null ? '—' : (String(x.retcode) + (x.retcode_label ? ' (' + x.retcode_label + ')' : ''));
+      const attempts = (x.attempts == null ? '—' : String(x.attempts))
+        + (x.already_closed ? ' · already closed' : '')
+        + (x.no_changes ? ' · no changes' : '');
       return '<tr><td>' + esc((x.command_id || '').slice(0, 8)) + '</td><td>' + esc(x.operation || '—') + '</td>'
         + '<td>' + stateBadge(x.state) + '</td><td>' + esc(x.wire_status || '—') + '</td>'
         + '<td>' + fmtTime(x.started_at) + '</td><td>' + (x.duration_ms == null ? '—' : Math.round(x.duration_ms) + ' ms') + '</td>'
         + '<td>' + esc(x.error_code ? (x.error_code + (x.error_message ? ' — ' + x.error_message : '')) : '—') + '</td>'
+        + '<td>' + esc(rc) + '</td><td>' + esc(attempts) + '</td>'
         + '<td>' + esc(partial) + '</td></tr>';
     }).join('');
   let jr;
@@ -1900,6 +2076,7 @@ async function loadDiagnostics(){
   $('dgErrors').innerHTML = errs.length === 0
     ? '<div class="empty">No errors recorded.</div>'
     : errs.map(e => '<div><span class="ts">' + esc((e.ts || '').slice(11, 23)) + '</span> ' + esc(e.message || '') + '</div>').join('');
+  $('dgLogFile').textContent = s.log_file || '—';
   const sh = s.self_healing || {};
   const scenarios = Object.values(sh);
   const recoveries = scenarios.reduce((acc, x) => acc + (x.occurrences || 0), 0);
@@ -1917,9 +2094,18 @@ $('btnDgReport').addEventListener('click', async () => {
   $('btnDgReport').disabled = true;
   setMsg('dgMsg', 'assembling report…');
   try {
+    /* The server builds the report (GET /diagnostics/report): versions,
+       MT5 state (login masked), last errors, WS state with heartbeats,
+       recent v1 execution, log file path — pre-redacted, no key material.
+       Falling back to a client-assembled bundle would risk leaking
+       whatever the page happened to hold, so a failed endpoint is
+       reported instead of silently downgrading. */
+    let report = null;
+    try { report = await api('/api/v1/diagnostics/report'); }
+    catch (e) { report = {error: 'diagnostics report endpoint failed: ' + (e.message || e)}; }
     let mt5rep = null;
     try { mt5rep = await post('/api/v1/get_mt5_diagnostic_report'); } catch (e) { mt5rep = {error: e.message || String(e)}; }
-    diagReport = {summary: model.summary, mt5_diagnostic_report: mt5rep};
+    diagReport = {report, mt5_diagnostic_report: mt5rep};
     $('dgReport').textContent = JSON.stringify(diagReport, null, 2);
     $('dgReportWrap').hidden = false;
     $('btnDgCopy').disabled = false;
@@ -1944,6 +2130,17 @@ $('btnDgCopy').addEventListener('click', async () => {
     try { document.execCommand('copy'); setMsg('dgMsg', 'diagnostics copied to clipboard', 'up'); }
     catch (err2) { setMsg('dgMsg', 'copy failed: ' + (err2.message || err2), 'down'); }
     ta.remove();
+  }
+});
+$('btnDgCopyLog').addEventListener('click', async () => {
+  const p = $('dgLogFile').textContent;
+  if (!p || p === '—') { setMsg('dgMsg', 'log path not reported yet', 'down'); return; }
+  try {
+    await navigator.clipboard.writeText(p);
+    setMsg('dgMsg', 'log path copied to clipboard', 'up');
+    toast('Log path copied', 'ok');
+  } catch (e) {
+    setMsg('dgMsg', 'copy failed: ' + (e.message || e), 'down');
   }
 });
 $('btnDgDownload').addEventListener('click', () => {
@@ -2110,6 +2307,7 @@ async function loadSettings(){
   setKv('setLocalKey', st.local_api_key_set ? 'set (mandatory gate)' : 'not set', st.local_api_key_set ? '' : 'warn');
   $('setDevice').textContent = st.device_id || '—';
   $('cfgPath').textContent = st.config_file || 'config.json';
+  $('logPath').textContent = st.log_file || '—';
   fillConnectionForm();
 }
 $('saveSettings').addEventListener('click', async () => {
