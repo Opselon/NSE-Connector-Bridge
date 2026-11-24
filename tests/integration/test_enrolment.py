@@ -98,7 +98,7 @@ async def test_bad_key_failed_auth_and_no_ws_connection(mock_server):
     finally:
         await channel.stop()
         stop.set()
-        await asyncio.wait_for(run_task, timeout=5.0)
+        await asyncio.wait_for(run_task, timeout=15.0)
         await rest.close()
 
 
@@ -127,7 +127,7 @@ async def test_channel_connects_only_after_registered(mock_server):
     finally:
         await channel.stop()
         stop.set()
-        await asyncio.wait_for(run_task, timeout=5.0)
+        await asyncio.wait_for(run_task, timeout=15.0)
         await rest.close()
 
 

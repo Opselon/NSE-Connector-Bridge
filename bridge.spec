@@ -28,8 +28,13 @@ IS_MAC = sys.platform == "darwin"
 
 
 def _bridge_version() -> str:
-    """BRIDGE_VERSION without importing the package (spec-time parse)."""
-    text = (Path(SPEC_DIR) / "nse_bridge" / "__init__.py").read_text(encoding="utf-8")
+    """BRIDGE_VERSION without importing the package (spec-time parse).
+
+    SPECPATH is the PyInstaller spec global for the spec file's
+    directory (PyInstaller 6 removed SPEC_DIR; __file__ is not set
+    in the spec namespace either — both raised NameError on macOS).
+    """
+    text = (Path(SPECPATH) / "nse_bridge" / "__init__.py").read_text(encoding="utf-8")
     match = re.search(r'^BRIDGE_VERSION\s*=\s*"([^"]+)"', text, re.M)
     return match.group(1) if match else "0.0.0"
 
