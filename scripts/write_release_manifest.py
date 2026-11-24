@@ -44,6 +44,25 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from nse_bridge import BRIDGE_VERSION
 
+#: Platforms the v1.3.0 release matrix ships. --extra labels are
+#: validated against this set (not just "any string before the first
+# ':"): on Windows a bare absolute path like C:\...\NSE-MT5-Bridge.exe
+# contains a drive-letter colon, so partition(":") yields platform "C"
+# and the drive-relative remainder resolves to the real file when the
+# workspace is on C: (windows-11-arm puts it on C:\a; windows-latest
+# on D:\a, where the same path does not exist) — the extra was silently
+# accepted with platform "C" on ARM64 and rejected on x64.
+KNOWN_PLATFORMS = frozenset(
+    {
+        "windows-x64",
+        "windows-arm64",
+        "macos-x64",
+        "macos-arm64",
+        "linux-x64",
+        "linux-arm64",
+    }
+)
+
 
 def sha256_of(path: Path) -> str:
     digest = hashlib.sha256()
@@ -105,6 +124,12 @@ def main(argv: list[str] | None = None) -> int:
         extra_path = Path(raw_path)
         if not sep or not platform_label or not extra_path.is_file():
             print(f"error: --extra must be PLATFORM:PATH to an existing file: {spec!r}", file=sys.stderr)
+            return 2
+        if platform_label not in KNOWN_PLATFORMS:
+            print(
+                f"error: --extra platform must be one of {sorted(KNOWN_PLATFORMS)}: {spec!r}",
+                file=sys.stderr,
+            )
             return 2
         extras.append((platform_label, extra_path))
     out_dir = args.out_dir or exe.parent
