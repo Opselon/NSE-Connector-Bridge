@@ -79,6 +79,27 @@ class ErrorEnvelope(BaseModel):
     request_id: str | None = None
 
 
+#: Diagnostics drain cadence (P5a): the periodic drain ships WARN
+#: events, which never trigger the ERROR immediate drain. The queue's
+#: own retry/backoff/dedup/TTL semantics still govern every attempt —
+#: this task only decides WHEN a drain is attempted.
+DIAGNOSTICS_DRAIN_INTERVAL_S = 60.0
+
+
+async def _periodic_diagnostics_drain(telemetry: Any) -> None:
+    """Drain the diagnostic queue every minute until cancelled.
+
+    ``telemetry.drain()`` is synchronous (the HTTP sink blocks briefly
+    per event), so it runs in a worker thread — never on the event
+    loop. Cancellation is the shutdown signal; a drain error is
+    already swallowed by the queue (a sink failure never kills the
+    drain), so the loop itself cannot die on a failed upload.
+    """
+    while True:
+        await asyncio.sleep(DIAGNOSTICS_DRAIN_INTERVAL_S)
+        await asyncio.to_thread(telemetry.drain)
+
+
 def _error_response(err: BridgeError, request_id: str) -> JSONResponse:
     payload = ErrorEnvelope(
         ok=False,
@@ -133,9 +154,10 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         app.state.bus = bus
         # Reliability (§8): structured telemetry + self-healing matrix.
         # Created first so every component below can read them off the
-        # context. The diagnostics sink stays inert (NullDiagnosticsSink
-        # semantics — no endpoint exists in CONTRACT v1 §4.2) until a
-        # future contract version defines one.
+        # context. The diagnostics sink is attached below, once the
+        # REST client exists (P5a: HttpDiagnosticsSink posts to the
+        # Platform diagnostics endpoint); until then the emitter has
+        # no sink and queues inertly (NullDiagnosticsSink semantics).
         from ..reliability import (
             DurableDiagnosticQueue,
             DurableDiagnosticStore,
@@ -147,8 +169,8 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         # Bridge restart — the emitter's queue is the durable one
         # (bounded JSONL mirror, pending_diagnostics.jsonl in data_dir),
         # not the in-memory default. Persistence preserves events; it
-        # does not deliver them — delivery still waits on the Platform
-        # D1 endpoint, and the sink stays inert until then.
+        # does not deliver them — delivery is the attached HTTP sink's
+        # job (P5a), draining on ERROR emit + the 60 s periodic drain.
         telemetry = TelemetryEmitter(
             ctx.get_or_create_device_id(),
             diagnostic_mode=ctx.settings.diagnostic_mode,
@@ -169,6 +191,29 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         from ..updates import Updater
 
         rest_client = RestClient(ctx.settings, ctx.get_or_create_device_id())
+        # P5a (GAP F / D1): attach the HTTP diagnostics sink — the
+        # emitter's queue now drains to the Platform endpoint
+        # (POST /api/v1/connector/diagnostics, CONTRACT §4.2) instead
+        # of ageing out by TTL. Credentials resolve lazily from the
+        # REST client: enrolment can reassign `api_key` after startup,
+        # and a snapshot taken here would go stale. The GUI Diagnostics
+        # screen and the local commands (get_mt5_last_error,
+        # get_bridge_logs, get_bridge_health, ...) are untouched — the
+        # sink only adds delivery; nothing about local diagnostics
+        # changes. The periodic drain below ships WARN events, which
+        # never trigger the ERROR immediate drain.
+        from ..reliability import HttpDiagnosticsSink
+
+        telemetry.sink = HttpDiagnosticsSink(
+            base_url=lambda: rest_client.base_url,
+            api_key=lambda: rest_client.api_key,
+            device_id=lambda: rest_client.device_id,
+            proxy=ctx.settings.network_proxy or None,
+        )
+        diagnostics_drain_task = asyncio.create_task(
+            _periodic_diagnostics_drain(telemetry), name="nse-diagnostics-drain"
+        )
+        app.state.diagnostics_drain_task = diagnostics_drain_task
         # Spec §16: the sync checkpoint survives restarts — restored
         # here at startup, persisted on every advance (sync.py).
         sync_engine = SyncEngine(
@@ -230,6 +275,11 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         logger.info("[APP] realtime streaming started (server_channel={})", bool(ctx.settings.server_url))
         yield
         await channel.stop()
+        diagnostics_drain_task.cancel()
+        try:
+            await diagnostics_drain_task
+        except asyncio.CancelledError:
+            pass
         enrolment_stop.set()
         try:
             await asyncio.wait_for(enrolment_task, timeout=5.0)

@@ -82,7 +82,9 @@ commit `9f27432` PR #144, 2026-11-21) — not from vendored snapshots:
   `tests/unit/test_icon_asset.py`).
 
 
-Status map (Phase E, refreshed): D1 open, D2 open, D3 open, D4 open (gated),
+Status map (Phase E, refreshed): D1 CLOSED by P5a (2026-11-25 — endpoint
+`POST /api/v1/connector/diagnostics` + `HttpDiagnosticsSink`; live proof
+still owed under D11), D2 open, D3 open, D4 open (gated),
 D5 open (local side now implemented, wire still missing),
 D6 open (local collector now exists AND is wired in production, upload
 channel still missing),
@@ -135,6 +137,21 @@ explicitly left to the Platform side to define.
 - Required from the Platform: a contract amendment defining a
   diagnostics/events upload endpoint (path, auth, payload, rate limits,
   retention). No URL or payload shape is proposed here.
+- **P5a closure (2026-11-25): CLOSED.** The Platform now defines the
+  endpoint — `POST /api/v1/connector/diagnostics` (Platform
+  `connector::diagnostics`, migration 0095; CONTRACT §4.2 amended) —
+  and the Bridge ships `HttpDiagnosticsSink`
+  (`nse_bridge/reliability/telemetry.py`), attached at startup in
+  `api/app.py` with the same Bearer + `X-NSE-Device-Id` auth as every
+  other device call. Wire shape: `{ "events": [...] }`, 1–100 events
+  per request, the nine `TelemetryEvent` fields verbatim; server
+  answers `{ "accepted": <n>, "stored": <n> }` and stores one row per
+  event in `connector_diagnostics`. Durable §2.5 budget `diagnostics`
+  30/min per device. Drain schedule: ERROR drains immediately on
+  emit, WARN/ERROR drain on the 60 s periodic drain; queue
+  retry/backoff/dedup/TTL semantics unchanged. Live proof against the
+  deployed Platform is still owed (D11): unit tests prove the sink
+  against `httpx.MockTransport` only.
 - Phase E status (2026-11-18): **unchanged — still open, and now the
   single hardest blocker in the §25 table.** Spec §25 item 22 ("ERROR
   and WARN events reach the server reliably") is **Not-proven** and

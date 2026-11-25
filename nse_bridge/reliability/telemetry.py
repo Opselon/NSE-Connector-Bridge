@@ -26,28 +26,25 @@ Secrets: every event's details pass through the Phase 1 redaction
 built, queued, or delivered. A secret value can never appear in an
 emitted event (proven by ``tests/unit/test_telemetry.py``).
 
-DELIVERY GAP (CONTRACT v1 §4.2, docs/PLATFORM-GAPS.md §2): the
-contract defines NO diagnostics/events upload endpoint — the server
-derives health from ``last_seen_at``, WS liveness, the last accepted
-batch, and the manifest. Telemetry therefore travels via the
-existing truthful channels only (``action.result`` errors,
-heartbeat/liveness, manifest updates, sync/batch acks), and the
-local pipeline keeps ERROR/WARN events in a bounded queue with
-retry/backoff/dedup/limits/expiry for the day an endpoint exists.
-The queue's durable backing is
+DELIVERY (P5a, GAP F / D1 — CLOSED): the Platform now defines the
+diagnostics upload endpoint — ``POST /api/v1/connector/diagnostics``
+(Platform ``connector::diagnostics``, migration 0095) — and the real
+adapter is :class:`HttpDiagnosticsSink`: same auth headers as every
+other device call (``Authorization: Bearer <api_key>`` +
+``X-NSE-Device-Id``), batch envelope ``{"events": [event, ...]}``
+with exactly the nine fields below, durable §2.5 budget
+``diagnostics`` 30/min per device. The queue's durable backing is
 :mod:`nse_bridge.reliability.diagnostic_store` (bounded JSONL, same
 pattern as the result store): queued events survive a Bridge restart
-and keep draining by TTL until an endpoint exists. Persistence
-preserves the events; it does not invent a delivery channel.
+and keep draining by TTL. :class:`NullDiagnosticsSink` remains the
+default when no sink is attached — inert by design — but the app
+attaches the HTTP sink at startup (``api/app.py`` lifespan), so
+delivery is live: ERROR drains immediately on emit, WARN/ERROR drain
+on the 60 s periodic drain, and the queue's retry/backoff/dedup/TTL
+semantics still govern every attempt.
 
-The adapter for that future endpoint is :class:`DiagnosticsSink`:
-a protocol with a single method, ``send(event) -> bool``. The
-default sink is :class:`NullDiagnosticsSink` — INERT by design: it
-sends nothing, to no URL, because no endpoint exists yet. It must
-stay inert until a future contract version defines the endpoint
-(path, auth, payload, rate limits); inventing a production URL here
-would violate the contract. A real sink is attached only when that
-contract amendment lands.
+The adapter for that endpoint is :class:`DiagnosticsSink`:
+a protocol with a single method, ``send(event) -> bool``.
 """
 
 from __future__ import annotations
@@ -56,10 +53,12 @@ import json
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+import httpx
 from loguru import logger
 
 from ..logging_setup import sanitize_payload
@@ -71,10 +70,23 @@ __all__ = [
     "WARN",
     "DiagnosticQueue",
     "DiagnosticsSink",
+    "HttpDiagnosticsSink",
     "NullDiagnosticsSink",
     "TelemetryEmitter",
     "TelemetryEvent",
 ]
+
+#: Platform diagnostics upload endpoint (P5a, CONTRACT §4.2):
+#: ``POST <server_base_url>/api/v1/connector/diagnostics``.
+PATH_DIAGNOSTICS = "/api/v1/connector/diagnostics"
+
+#: Tight per-request budget for one diagnostics upload (same shape as
+#: the ``releases/latest`` read in ``server/rest.py``): a half-dead
+#: server must not stall the emit/drain path for the full 30 s client
+#: default. Drains run on the calling thread, so this also bounds how
+#: long an ERROR emit can block the event loop.
+DIAGNOSTICS_TIMEOUT_S = 10.0
+DIAGNOSTICS_CONNECT_TIMEOUT_S = 5.0
 
 ERROR = "ERROR"
 WARN = "WARN"
@@ -123,33 +135,142 @@ class TelemetryEvent:
 
 
 class DiagnosticsSink(Protocol):
-    """Adapter interface for a future diagnostics/events upload
-    endpoint (CONTRACT v1 §4.2 gap — see the module docstring).
+    """Adapter interface for the diagnostics/events upload endpoint
+    (CONTRACT §4.2, P5a — see the module docstring).
 
-    A single method, on purpose: the future endpoint's transport
-    (REST POST, WS frame, ...) is the Platform's to define, and the
-    adapter must not assume it. ``send`` returns True only when the
-    event was accepted by the sink; False means "keep it queued"
-    (retry/backoff/expiry apply). The adapter MUST NOT invent a
-    production URL or payload shape.
+    A single method, on purpose: the endpoint's transport is the
+    Platform's to define, and the adapter must not assume it. ``send``
+    returns True only when the event was accepted by the sink; False
+    means "keep it queued" (retry/backoff/expiry apply). The adapter
+    MUST NOT invent a production URL or payload shape — the live one
+    is :class:`HttpDiagnosticsSink`, built from the contract.
     """
 
     def send(self, event: TelemetryEvent) -> bool: ...
 
 
 class NullDiagnosticsSink:
-    """INERT sink — the default until a contract version defines the
-    diagnostics endpoint (docs/PLATFORM-GAPS.md §2).
+    """INERT sink — the default when no sink is attached.
 
-    ``send`` always returns False and transmits nothing: there is no
-    URL to send to, and guessing one would violate CONTRACT v1 §4.2.
-    Events queued against this sink age out by TTL (see
+    ``send`` always returns False and transmits nothing. It is what
+    an emitter has before the app attaches the real sink at startup;
+    events queued against it age out by TTL (see
     :class:`DiagnosticQueue`); nothing is lost silently — expiry is
     counted and exposed in the diagnostics summary.
     """
 
     def send(self, event: TelemetryEvent) -> bool:
         return False
+
+
+def _resolve(value: str | Callable[[], str]) -> str:
+    """Resolve a sink credential: a plain value, or a zero-arg callable
+    read at send time (the app passes callables bound to the
+    ``RestClient`` because enrolment can reassign ``api_key`` after
+    startup — a snapshot taken at construction would go stale)."""
+    return value() if callable(value) else value
+
+
+class HttpDiagnosticsSink:
+    """HTTP diagnostics sink (P5a, GAP F / D1): POSTs each event to the
+    Platform diagnostics endpoint.
+
+    One event per request — ``{"events": [event]}`` — because the sink
+    protocol is ``send(event) -> bool`` and the queue drains one entry
+    at a time; the endpoint accepts up to 100 events per request, so
+    a batching sink stays possible without changing the wire shape.
+    Auth is the same pair every other device call uses
+    (``Authorization: Bearer <api_key>`` + ``X-NSE-Device-Id``).
+    A fresh :class:`httpx.Client` is built per send (the ``cli.py``
+    precedent): drains run from both the event-loop thread (ERROR
+    immediate drain) and the periodic-drain thread, and a per-send
+    client keeps no shared transport state across threads. The
+    explicit ``proxy`` is the Bridge's configured network proxy only
+    (``trust_env=False`` — never an ambient env proxy, same as
+    ``RestClient``).
+
+    Return contract (the queue's retry/backoff/dedup semantics ride
+    on it — see :meth:`DiagnosticQueue.drain`):
+
+    - True: HTTP 2xx AND the server acked ``{"accepted": 1}``.
+    - False: anything else — transport error, timeout, 4xx, 5xx, or
+      a 2xx that did not ack the event. 401/403 (bad/revoked key) and
+      429 (server budget) are NOT retried here: the queue backs off
+      and drops the entry after its attempts, exactly like any other
+      failed send; re-enrolment stays the REST client's job (§3.2).
+      An empty API key (never enrolled) returns False without ever
+      sending a request.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str | Callable[[], str],
+        api_key: str | Callable[[], str],
+        device_id: str | Callable[[], str],
+        proxy: str | None = None,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        self._base_url = base_url
+        self._api_key = api_key
+        self._device_id = device_id
+        self._proxy = proxy
+        # Test seam only (httpx.MockTransport): production passes None
+        # and gets a real transport.
+        self._transport = transport
+
+    def _client(self) -> httpx.Client:
+        return httpx.Client(
+            base_url=_resolve(self._base_url).rstrip("/"),
+            transport=self._transport,
+            headers={
+                "Authorization": f"Bearer {_resolve(self._api_key)}",
+                "X-NSE-Device-Id": _resolve(self._device_id),
+            },
+            timeout=httpx.Timeout(DIAGNOSTICS_TIMEOUT_S, connect=DIAGNOSTICS_CONNECT_TIMEOUT_S),
+            proxy=self._proxy or None,
+            trust_env=False,
+        )
+
+    def send(self, event: TelemetryEvent) -> bool:
+        if not _resolve(self._api_key):
+            logger.debug("[TELEMETRY] diagnostics sink has no API key — event kept queued")
+            return False
+        try:
+            with self._client() as client:
+                response = client.post(PATH_DIAGNOSTICS, json={"events": [event.to_dict()]})
+        except httpx.TransportError as exc:
+            logger.warning(
+                "[TELEMETRY] diagnostics upload transport error: {}",
+                type(exc).__name__,
+            )
+            return False
+        if not 200 <= response.status_code < 300:
+            if response.status_code in (401, 403):
+                logger.warning(
+                    "[TELEMETRY] diagnostics upload refused ({}): key invalid or revoked — event kept queued",
+                    response.status_code,
+                )
+            elif response.status_code == 429:
+                logger.warning("[TELEMETRY] diagnostics upload rate-limited (429) — event kept queued")
+            else:
+                logger.warning(
+                    "[TELEMETRY] diagnostics upload failed (HTTP {}) — event kept queued",
+                    response.status_code,
+                )
+            return False
+        try:
+            accepted = response.json().get("accepted")
+        except ValueError:
+            logger.warning("[TELEMETRY] diagnostics upload returned a non-JSON 2xx — event kept queued")
+            return False
+        if accepted != 1:
+            logger.warning(
+                "[TELEMETRY] diagnostics upload acked accepted={} for one event — event kept queued",
+                accepted,
+            )
+            return False
+        return True
 
 
 @dataclass
@@ -274,8 +395,8 @@ class DiagnosticQueue:
         Returns how many events were accepted. Failed sends back off
         and stay queued until ``max_attempts``; expired entries are
         purged (counted). A sink that returns False for everything
-        (e.g. :class:`NullDiagnosticsSink`) delivers nothing and the
-        queue drains by TTL — by design, until an endpoint exists.
+        (e.g. :class:`NullDiagnosticsSink`, the no-sink default)
+        delivers nothing and the queue drains by TTL — by design.
         """
         now = self._clock()
         delivered = 0
@@ -449,7 +570,7 @@ class TelemetryEmitter:
         """Attempt delivery of queued events via the attached sink.
 
         Returns 0 when no sink is attached (inert default — nothing
-        is sent anywhere until a contract-defined endpoint exists).
+        is sent anywhere until the app attaches a sink at startup).
         """
         if self.sink is None:
             return 0

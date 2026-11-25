@@ -4,9 +4,11 @@ Today the diagnostic queue is in-memory only
 (:class:`nse_bridge.reliability.telemetry.DiagnosticQueue`): a Bridge
 restart loses every queued ERROR/WARN event that was produced but
 not yet delivered. Only ``action.result`` payloads had a durable
-(JSONL) store. The queue drains by TTL until a diagnostics endpoint
-exists (contract dependency D1 — CONTRACT v1 §4.2 defines none), so
-an in-memory queue meant those events simply vanished on restart.
+(JSONL) store. The queue used to drain by TTL until a diagnostics
+endpoint existed (contract dependency D1 — CONTRACT v1 §4.2 defined
+none); since P5a the endpoint exists and the queue drains through
+the attached HTTP sink, so an in-memory queue meant those events
+simply vanished on restart.
 
 This module fixes the persistence half, following the exact pattern
 of :mod:`nse_bridge.reliability.result_store` (DO NOT diverge from
@@ -32,9 +34,10 @@ Bounds (same discipline as the in-memory queue, §12):
   mid-write cannot corrupt the store.
 
 What this does NOT do: it invents no upload URL or endpoint. The
-queue still drains by TTL until the Platform defines a diagnostics
-endpoint (D1); persistence preserves the events, it does not deliver
-them. The sink stays inert (:class:`NullDiagnosticsSink`).
+sink is the :class:`HttpDiagnosticsSink`'s job (P5a): persistence
+preserves the events, delivery drains them through the attached sink.
+When no sink is attached the queue still drains by TTL and the sink
+stays inert (:class:`NullDiagnosticsSink`).
 """
 
 from __future__ import annotations

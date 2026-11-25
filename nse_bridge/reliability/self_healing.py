@@ -644,10 +644,9 @@ class SelfHealingRegistry:
         The queue itself already handles the overflow honestly (oldest
         entry evicted WITH a warning, evictions counted — never
         silently discarded). This entry's recovery is a delivery
-        attempt: drain against the attached sink. Until the D1
-        diagnostics endpoint exists the sink is inert
-        (NullDiagnosticsSink), so a drain delivers nothing and the
-        queue keeps draining by TTL — the handler reports that
+        attempt: drain against the attached sink. When the sink is the
+        inert default (no sink attached) a drain delivers nothing and
+        the queue keeps draining by TTL — the handler reports that
         honestly instead of claiming delivery."""
         if not ctx.queue_full:
             return "ok", "diagnostic queue within its bound", None, None
@@ -668,7 +667,7 @@ class SelfHealingRegistry:
             ctx.on_drain_diagnostics()
             action += "; drain requested"
         else:
-            action += "; no drain wired — events age out by TTL (no diagnostics endpoint exists yet, D1)"
+            action += "; no drain wired — events age out by TTL (no sink attached)"
         return ("recovering", action, "diagnostic_queue_full", detail)
 
     def _handle_update_failure(self, ctx: HealingContext) -> _Outcome:
