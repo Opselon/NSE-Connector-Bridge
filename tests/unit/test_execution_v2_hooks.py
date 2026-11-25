@@ -376,3 +376,103 @@ def test_server_open_order_still_rejected_by_default_gate(ctx):
     outcome = validator.validate(frame)
     assert outcome.rejection is RejectionReason.UNSUPPORTED_OPERATION
     assert ctx.driver._mt5.send_calls == 0
+
+
+# ----------------------------------------------------------------------
+# from_operation: Platform §14.2 wire aliases
+# ----------------------------------------------------------------------
+PLATFORM_LIMIT = {
+    "type": "open_order",
+    "ticket": "0",
+    "symbol": "EURUSD",
+    "side": "sell",
+    "order_type": "limit",
+    "volume": 0.1,
+    "price": 1.1050,
+}
+
+PLATFORM_STOP_LIMIT = {
+    "type": "open_order",
+    "ticket": "0",
+    "symbol": "EURUSD",
+    "side": "buy",
+    "order_type": "stop_limit",
+    "volume": 0.1,
+    "price": 1.1050,
+    "stop_limit": 1.1040,
+}
+
+
+def test_v2_from_operation_accepts_platform_order_type():
+    req = V2OpenOrderRequest.from_operation(PLATFORM_LIMIT)
+    assert req.order_kind == "limit"
+    assert req.price == pytest.approx(1.1050)
+    assert req.stoplimit is None
+
+
+def test_v2_from_operation_accepts_platform_stop_limit():
+    req = V2OpenOrderRequest.from_operation(PLATFORM_STOP_LIMIT)
+    assert req.order_kind == "stop_limit"
+    assert req.stoplimit == pytest.approx(1.1040)
+
+
+def test_v2_from_operation_bridge_names_still_work():
+    req = V2OpenOrderRequest.from_operation(
+        {"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_kind": "stop", "volume": 0.1, "price": 1.1050}
+    )
+    assert req.order_kind == "stop"
+
+
+def test_v2_from_operation_bridge_name_wins_over_platform_alias():
+    req = V2OpenOrderRequest.from_operation(
+        {**PLATFORM_LIMIT, "order_kind": "stop", "stoplimit": 1.1040, "stop_limit": 1.1030}
+    )
+    assert req.order_kind == "stop"
+    assert req.stoplimit == pytest.approx(1.1040)
+
+
+def test_v2_from_operation_no_kind_defaults_market_only_when_no_order_type():
+    req = V2OpenOrderRequest.from_operation({"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1})
+    assert req.order_kind == "market"
+
+
+def test_v2_from_operation_unknown_kind_fails_loudly():
+    with pytest.raises(ValueError, match="unknown order kind"):
+        V2OpenOrderRequest.from_operation({**PLATFORM_LIMIT, "order_type": "banana"})
+
+
+def test_v2_from_operation_missing_required_fields_fail_loudly():
+    with pytest.raises(ValueError, match="missing 'symbol'"):
+        V2OpenOrderRequest.from_operation({"type": "open_order", "side": "buy", "volume": 0.1})
+    with pytest.raises(ValueError, match="missing 'volume'"):
+        V2OpenOrderRequest.from_operation({"type": "open_order", "symbol": "EURUSD", "side": "buy"})
+
+
+def test_v2_from_operation_wrong_type_fails_loudly():
+    with pytest.raises(ValueError, match="unexpected type"):
+        V2OpenOrderRequest.from_operation({"type": "close_position", "ticket": "9000001"})
+
+
+def test_v2_dispatches_platform_shaped_pending_order(ctx):
+    """Regression: a pending entry sent under the Platform wire names
+    must dispatch as PENDING — never silently as a market deal."""
+    from nse_bridge.engine.execution import PENDING_TYPES
+
+    req = V2OpenOrderRequest.from_operation(PLATFORM_LIMIT)
+    out = execute_v2_open_order(ctx, req, flag_enabled=True, negotiation=NEGOTIATED)
+    assert out["status"] == "done"
+    assert out["order_ticket"] is not None
+    assert ctx.driver._mt5.send_calls == 1
+    assert len(ctx.driver._mt5.orders) == 1
+    assert len(ctx.driver._mt5.positions) == 0
+    assert ctx.driver._mt5.sent_requests[0]["type"] == PENDING_TYPES["SELL_LIMIT"]
+
+
+def test_v2_dispatches_platform_shaped_stop_limit_with_stoplimit(ctx):
+    from nse_bridge.engine.execution import PENDING_TYPES
+
+    req = V2OpenOrderRequest.from_operation(PLATFORM_STOP_LIMIT)
+    out = execute_v2_open_order(ctx, req, flag_enabled=True, negotiation=NEGOTIATED)
+    assert out["status"] == "done"
+    assert ctx.driver._mt5.sent_requests[0]["type"] == PENDING_TYPES["BUY_STOP_LIMIT"]
+    assert ctx.driver._mt5.sent_requests[0]["stoplimit"] == pytest.approx(1.1040)

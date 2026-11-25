@@ -366,6 +366,53 @@ def test_parse_envelope_accepts_integral_float_ticket():
 
 
 # ----------------------------------------------------------------------
+# W5 open-order wire compat (P3a §14.2): the Platform emits the v2
+# names `order_type` / `stop_limit`; the Bridge's native names are
+# `order_kind` / `stoplimit`. Both must parse — a pending entry sent
+# under the Platform names must never silently default to `market`.
+# ----------------------------------------------------------------------
+def _open_frame(**op_fields):
+    op = {"type": "open_order", "ticket": "0", "symbol": "EURUSD", "side": "buy", "volume": 0.1}
+    op.update(op_fields)
+    return _frame(operation=op)
+
+
+@pytest.mark.unit
+def test_parse_envelope_platform_order_type_limit():
+    env = parse_envelope(_open_frame(order_type="limit", price=1.0850))
+    assert env.order_kind == "limit"
+    assert env.price == pytest.approx(1.0850)
+
+
+@pytest.mark.unit
+def test_parse_envelope_platform_order_type_stop_and_market():
+    assert parse_envelope(_open_frame(order_type="stop", price=1.1050)).order_kind == "stop"
+    assert parse_envelope(_open_frame(order_type="market")).order_kind == "market"
+
+
+@pytest.mark.unit
+def test_parse_envelope_platform_stop_limit_alias():
+    env = parse_envelope(_open_frame(order_type="stop_limit", price=1.0850, stop_limit=1.0840))
+    assert env.order_kind == "stop_limit"
+    assert env.stoplimit == pytest.approx(1.0840)
+
+
+@pytest.mark.unit
+def test_parse_envelope_bridge_name_wins_over_platform_alias():
+    env = parse_envelope(
+        _open_frame(order_kind="limit", order_type="stop", price=1.0850, stoplimit=1.0840, stop_limit=1.0830)
+    )
+    assert env.order_kind == "limit"
+    assert env.stoplimit == pytest.approx(1.0840)
+
+
+@pytest.mark.unit
+def test_parse_envelope_open_order_without_kind_still_defaults_market():
+    env = parse_envelope(_open_frame())
+    assert env.order_kind == "market"
+
+
+# ----------------------------------------------------------------------
 # W3 — reduce-volume close via the optional `volume` field (PROPOSED
 # Phase 2b wire amendment; absent volume keeps v1 full-close semantics).
 # ----------------------------------------------------------------------
