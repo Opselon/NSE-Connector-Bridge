@@ -37,8 +37,9 @@ never touches the driver (zero ``order_send`` calls).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from loguru import logger
 
@@ -83,6 +84,67 @@ class V2OpenOrderRequest:
     price: float | None = None
     stoplimit: float | None = None
     comment: str = "NSE_OPEN"
+
+    @classmethod
+    def from_operation(cls, operation: Mapping[str, Any]) -> V2OpenOrderRequest:
+        """Build a request from a Platform v2 ``operation`` object (§14.2).
+
+        Accepts the Platform wire names ``order_type`` / ``stop_limit``
+        as aliases of the Bridge-native ``order_kind`` / ``stoplimit``
+        (Bridge name wins when both are present). A pending kind sent
+        under either name is preserved — it must never silently fall
+        back to ``"market"``. Unknown kinds and missing required
+        fields fail loudly here, never at dispatch.
+        """
+        if not isinstance(operation, Mapping):
+            raise TypeError("v2 open_order operation is not a JSON object")
+        op_type = operation.get("type")
+        if op_type is not None and str(op_type) != "open_order":
+            raise ValueError(f"v2 open_order operation has unexpected type {op_type!r}")
+        kind_raw = operation.get("order_kind")
+        if kind_raw in (None, ""):
+            kind_raw = operation.get("order_type")
+        order_kind = str(kind_raw).strip().lower() if kind_raw not in (None, "") else "market"
+        if order_kind not in ("market", "limit", "stop", "stop_limit"):
+            raise ValueError(f"v2 open_order has unknown order kind {order_kind!r}")
+        stoplimit_raw = operation.get("stoplimit")
+        if stoplimit_raw is None:
+            stoplimit_raw = operation.get("stop_limit")
+
+        def _num(value: Any, name: str) -> float | None:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"v2 open_order {name} is not a number") from None
+
+        symbol = operation.get("symbol")
+        if symbol in (None, ""):
+            raise ValueError("v2 open_order operation is missing 'symbol'")
+        side_raw = operation.get("side")
+        if side_raw in (None, ""):
+            raise ValueError("v2 open_order operation is missing 'side'")
+        side = str(side_raw).strip().lower()
+        if side not in ("buy", "sell"):
+            raise ValueError(f"v2 open_order has unknown side {side!r}")
+        volume = _num(operation.get("volume"), "volume")
+        if volume is None:
+            raise ValueError("v2 open_order operation is missing 'volume'")
+        sl_value = _num(operation.get("sl"), "sl")
+        tp_value = _num(operation.get("tp"), "tp")
+        comment = operation.get("comment")
+        return cls(
+            symbol=str(symbol).strip(),
+            side=cast(Literal["buy", "sell"], side),
+            volume=volume,
+            sl=sl_value if sl_value is not None else 0.0,
+            tp=tp_value if tp_value is not None else 0.0,
+            order_kind=cast(Literal["market", "limit", "stop", "stop_limit"], order_kind),
+            price=_num(operation.get("price"), "price"),
+            stoplimit=_num(stoplimit_raw, "stoplimit"),
+            comment=str(comment) if comment not in (None, "") else "NSE_OPEN",
+        )
 
 
 def check_v2_open_order_available(

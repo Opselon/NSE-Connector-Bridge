@@ -354,10 +354,20 @@ def parse_envelope(frame: Any) -> CommandEnvelope:
     # W5 open-order fields (parsed for every frame; meaningful only for
     # operation.type == "open_order"). Structural requirements are
     # enforced at dispatch, inside the gate.
+    # P3a wire compat (§14.2): the Platform emits the v2 names
+    # `order_type` / `stop_limit`; the Bridge's native names are
+    # `order_kind` / `stoplimit`. Accept both — Bridge name wins when
+    # both are present. A pending entry sent under the Platform names
+    # must never silently default to `market`.
     order_kind_raw = operation.get("order_kind")
+    if order_kind_raw in (None, ""):
+        order_kind_raw = operation.get("order_type")
     order_kind = str(order_kind_raw).strip().lower() if order_kind_raw not in (None, "") else None
     if order_kind == "market" or (operation.get("type") == "open_order" and order_kind is None):
         order_kind = order_kind or "market"  # CONTRACTS §7 market default
+    stoplimit_raw = operation.get("stoplimit")
+    if stoplimit_raw is None:
+        stoplimit_raw = operation.get("stop_limit")
 
     return CommandEnvelope(
         command_id=str(frame["command_id"]),
@@ -372,7 +382,7 @@ def parse_envelope(frame: Any) -> CommandEnvelope:
         side=str(operation["side"]).strip().lower() if operation.get("side") not in (None, "") else None,
         order_kind=order_kind,
         price=_num(operation.get("price")),
-        stoplimit=_num(operation.get("stoplimit")),
+        stoplimit=_num(stoplimit_raw),
         issued_at=str(frame["issued_at"]),
         expires_at=str(frame["expires_at"]),
         idempotency_key=str(frame["idempotency_key"]) if frame.get("idempotency_key") is not None else None,
