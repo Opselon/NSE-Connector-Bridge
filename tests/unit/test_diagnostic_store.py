@@ -3,9 +3,8 @@
 Label: unit. A Bridge restart must not silently lose queued ERROR/WARN
 diagnostic events: they are mirrored to a bounded JSONL file and
 re-queued on startup, with the existing retry/backoff/dedup/TTL/limits
-semantics preserved. The queue still drains by TTL until a diagnostics
-endpoint exists (D1) — persistence preserves the events, it does not
-invent a delivery channel.
+semantics preserved. Since P5a the queue drains through the attached
+HTTP sink; persistence preserves the events, it does not deliver them.
 """
 
 from __future__ import annotations

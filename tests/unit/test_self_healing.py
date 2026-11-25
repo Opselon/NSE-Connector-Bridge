@@ -509,7 +509,7 @@ def test_diagnostic_queue_full_without_drain_says_ttl_honestly():
     state = _registry().handle(Scenario.DIAGNOSTIC_QUEUE_FULL, HealingContext(queue_full=True))
     assert state.status == "recovering"
     assert "age out by TTL" in state.last_action
-    assert "no diagnostics endpoint exists yet, D1" in state.last_action
+    assert "no sink attached" in state.last_action
 
 
 def test_diagnostic_queue_full_ok_when_within_bound():
