@@ -13,7 +13,11 @@ object, not JSONL — a checkpoint is one small record, not a queue):
 
 - at most 4 KiB on disk (one record; anything larger is corrupt);
 - writes go through a temp file + atomic replace, so a crash
-  mid-write cannot corrupt the store;
+  mid-write cannot corrupt the store; the temp file is fsynced
+  before the replace and the directory is fsynced after it (B4),
+  so a crash/power loss cannot leave a half-written checkpoint or a
+  replace that never reached disk — the on-disk record is either
+  the old checkpoint or the new one, never a torn write;
 - the file is created lazily on the first persisted checkpoint, never
   at construction (tests and read-only runs create no files);
 - a missing file → no checkpoint (fresh backfill from epoch);
@@ -135,9 +139,30 @@ class SyncCheckpointStore:
 
     # ------------------------------------------------------------------
     def _rewrite_locked(self, record: dict[str, Any]) -> None:
-        """Write ``record`` atomically (temp file + replace)."""
+        """Write ``record`` atomically (temp file + replace).
+
+        Crash-safe (B4): the temp file is flushed + fsynced before
+        the replace, and the parent directory is fsynced after it, so
+        a crash can leave the old record or the new record on disk,
+        never a torn one. A failed fsync still raises to the caller
+        (``SyncEngine._persist_checkpoint`` treats it as best-effort
+        and logs a warning — persistence must never break sync).
+        """
         encoded = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.write_bytes(encoded)
+        with open(tmp, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, self.path)
+        try:
+            dir_fd = os.open(self.path.parent, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dir_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(dir_fd)

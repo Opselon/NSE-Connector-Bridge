@@ -13,6 +13,17 @@ The contract bounds every outbound queue the Connector keeps:
 
 This module is the single implementation of that bound. Eviction
 always logs a warning naming the queue and the evicted item's id.
+
+DROP POLICY (B4, stated once here — the sync engine's docstring
+states the full order across snapshots / history / dead-letter):
+this queue evicts OLDEST first, because the oldest entry is the one
+whose loss is recoverable: for sync history the checkpoint has not
+advanced past it, so the next cycle re-creates it from the
+checkpoint; for command results the result is re-derived from server
+state on the next ``sync_request``. The NEWEST entry is never the one
+dropped — it is the freshest state and the one the server has waited
+for least. Eviction is a bounded, logged, recoverable event — never
+a silent discard.
 """
 
 from __future__ import annotations
@@ -56,7 +67,7 @@ class BoundedPendingQueue[T]:
                     "it must be re-created/re-derived, never assumed delivered",
                     self.name,
                     self.max_items,
-                    item_id or _describe(evicted),
+                    _describe(evicted),
                 )
             self._items.append(item)
         return evicted

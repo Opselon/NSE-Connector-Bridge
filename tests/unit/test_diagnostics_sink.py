@@ -141,6 +141,13 @@ def test_sink_returns_false_on_non_json_2xx():
     assert sink.send(_event()) is False
 
 
+def test_sink_returns_false_on_2xx_without_accepted_field():
+    # A 2xx that acks nothing (e.g. {"stored": 1} with no "accepted")
+    # is NOT an ack: the event stays queued.
+    sink = _sink(lambda request: httpx.Response(200, json={"stored": 1}))
+    assert sink.send(_event()) is False
+
+
 def test_sink_returns_false_on_transport_error():
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("unreachable", request=request)
@@ -207,3 +214,93 @@ def test_emitter_without_sink_keeps_queue_inert():
     emitter.warn("test.warn", component="test")
     assert len(emitter.queue) == 1
     assert emitter.drain() == 0
+
+
+# ---------------------------------------------------------------------------
+# Startup wiring (B4): the PR #22 sink must actually be attached by the
+# app lifespan, and the 60 s periodic drain must run — a sink that
+# exists only as a class is not shipped.
+# ---------------------------------------------------------------------------
+def test_lifespan_wires_http_diagnostics_sink_and_periodic_drain(tmp_path):
+    """Entering the real app lifespan attaches the HTTP sink (not the
+    inert Null sink) and starts the 60 s periodic drain task."""
+    from fastapi.testclient import TestClient
+
+    from nse_bridge.api.app import DIAGNOSTICS_DRAIN_INTERVAL_S, create_app
+    from nse_bridge.config import BridgeSettings
+    from nse_bridge.engine.common import BridgeContext
+    from nse_bridge.mt5.driver import Mt5Driver
+    from nse_bridge.reliability.telemetry import HttpDiagnosticsSink
+
+    assert DIAGNOSTICS_DRAIN_INTERVAL_S == 60.0
+    settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
+    driver = Mt5Driver(settings)
+    ctx = BridgeContext(settings=settings, driver=driver)
+    app = create_app(ctx)
+    try:
+        with TestClient(app, raise_server_exceptions=False):
+            telemetry = app.state.telemetry
+            assert isinstance(telemetry.sink, HttpDiagnosticsSink)
+            assert telemetry.summary()["sink_attached"] is True
+            assert telemetry.summary()["sink_inert"] is False
+            drain_task = app.state.diagnostics_drain_task
+            assert drain_task.get_name() == "nse-diagnostics-drain"
+            assert not drain_task.done()
+            # The sink resolves its credentials lazily from the REST
+            # client the lifespan built — no snapshot taken at startup.
+            assert telemetry.sink._api_key() == ""
+    finally:
+        driver.disconnect()
+
+
+@pytest.mark.unit
+async def test_periodic_drain_loop_drains_repeatedly(monkeypatch):
+    """The periodic drain task actually calls telemetry.drain() once
+    per interval until cancelled — with the interval patched short
+    so the test observes several drains without waiting 60 s."""
+    import asyncio
+
+    from nse_bridge.api import app as app_module
+
+    # The interval is patched to 0 (each iteration is just a yield),
+    # so the loop drains as fast as the event loop iterates — the
+    # test observes several drains without depending on wall-clock
+    # timing under load.
+    monkeypatch.setattr(app_module, "DIAGNOSTICS_DRAIN_INTERVAL_S", 0.0)
+    calls: list[int] = []
+
+    class _FakeTelemetry:
+        def drain(self) -> int:
+            calls.append(1)
+            return 0
+
+    task = asyncio.create_task(app_module._periodic_diagnostics_drain(_FakeTelemetry()))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert len(calls) >= 2  # drained repeatedly, not once
+
+
+def test_durable_queue_reloads_and_drains_via_mock_sink(tmp_path):
+    """Resume story for diagnostics: events queued before a restart
+    are re-queued from the durable store and drain through the mock
+    Platform endpoint — none are lost to the restart."""
+    from nse_bridge.reliability.diagnostic_store import DurableDiagnosticQueue, DurableDiagnosticStore
+
+    store_path = tmp_path / "pending_diagnostics.jsonl"
+    queue1 = DurableDiagnosticQueue(DurableDiagnosticStore(store_path))
+    queue1.put(_event(event_type="test.before_restart"))
+    assert store_path.is_file()
+    # A new queue over the same store (a Bridge restart) reloads it.
+    queue2 = DurableDiagnosticQueue(DurableDiagnosticStore(store_path))
+    assert len(queue2) == 1
+    sink = _sink(_accepting_handler)
+    assert queue2.drain(sink) == 1
+    assert len(queue2) == 0
+    assert queue2.stats()["delivered"] == 1
+    # Delivered events leave the store: a third restart finds nothing.
+    queue3 = DurableDiagnosticQueue(DurableDiagnosticStore(store_path))
+    assert len(queue3) == 0

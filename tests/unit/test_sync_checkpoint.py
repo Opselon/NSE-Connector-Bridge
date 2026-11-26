@@ -241,6 +241,62 @@ def test_account_switch_resets_and_persists_epoch(tmp_path: Path):
 
 
 @pytest.mark.unit
+async def test_dead_lettered_batch_never_advances_checkpoint_and_is_recreated(tmp_path: Path):
+    """B4: the pre-B4 checkpoint check ("not pending means accepted")
+    advanced the checkpoint for a dead-lettered batch — silent
+    history loss, because the range was never re-fetched. A
+    dead-lettered batch must leave the checkpoint behind, so the
+    next cycle re-fetches the same range and re-creates the batch
+    with a fresh id."""
+    from nse_bridge.server.errors import ServerError, ServerErrorCode
+
+    class _AlwaysFailingRest:
+        async def send_batch(self, batch: dict[str, Any]) -> SyncAck:
+            raise ServerError(ServerErrorCode.SERVER_UNAVAILABLE, "platform down", retryable=True)
+
+    seen_from: list[datetime] = []
+    orders, positions = _history_fetchers(seen_from)
+    engine = SyncEngine(
+        _AlwaysFailingRest(),
+        None,
+        sleep=_no_sleep,
+        checkpoint_store=_store(tmp_path),
+        history_orders=orders,
+        history_positions=positions,
+    )
+    # Enough cycles for the oldest page to exhaust its 5 attempts
+    # (each cycle flushes it at least once) and dead-letter.
+    for _ in range(5):
+        await engine.sync_history()
+    assert engine.dead_letter_count() >= 1
+    assert engine.checkpoint.iso == EPOCH_ISO  # never advanced past undelivered data
+    assert _store(tmp_path).load() is None  # nothing persisted
+    dead_ids = {entry["batch"]["batch_id"] for entry in engine.dead_letter_snapshot()}
+
+    # The server recovers: the same engine re-fetches from the
+    # checkpoint (epoch — the full range) and delivers with fresh ids.
+    engine.rest = FakeRest()
+    await engine.sync_history()
+    assert engine.checkpoint.iso == "2026-11-16T12:00:00Z"
+    assert _store(tmp_path).load()["checkpoint"] == "2026-11-16T12:00:00Z"
+    assert engine.pending_count() == 0
+    delivered_ids = {batch["batch_id"] for batch in engine.rest.sent}
+    assert delivered_ids.isdisjoint(dead_ids)  # re-created, not resurrected
+
+
+@pytest.mark.unit
+def test_store_save_leaves_no_temp_file_and_valid_json(tmp_path: Path):
+    """Crash-safe write (B4): after a save there is no stray .tmp
+    file and the store parses as the record that was saved."""
+    store = _store(tmp_path)
+    assert store.save("2026-11-16T12:00:00Z", account_id="12345678901") is True
+    assert list(tmp_path.glob("*.tmp")) == []
+    record = json.loads((tmp_path / CHECKPOINT_FILENAME).read_text(encoding="utf-8"))
+    assert record["checkpoint"] == "2026-11-16T12:00:00Z"
+    assert record["account_id"] == "12345678901"
+
+
+@pytest.mark.unit
 async def test_engine_without_store_keeps_in_memory_behaviour(tmp_path: Path):
     """No store wired → the old in-memory checkpoint still works."""
     seen_from: list[datetime] = []
