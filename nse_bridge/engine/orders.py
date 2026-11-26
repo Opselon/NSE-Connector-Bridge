@@ -388,7 +388,9 @@ def trade_cancel_pending_order(ctx: BridgeContext, params: TicketRequest) -> dic
     def job(mt5: Any):
         return mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": int(params.ticket)})
 
-    result = ctx.driver.run(job, op="order_send_cancel", context={"ticket": params.ticket, "symbol": symbol})
+    # P3 v2: placement wrapper — a timed-out cancel is TRADE_UNVERIFIED
+    # (the order may already be gone), never a bare timeout.
+    result = ctx.driver.run_order_send(job, op="order_send_cancel", context={"ticket": params.ticket, "symbol": symbol})
     if result is None:
         raise BridgeError(
             ErrorCode.TRADE_UNVERIFIED,
@@ -404,6 +406,18 @@ def trade_cancel_pending_order(ctx: BridgeContext, params: TicketRequest) -> dic
         "retcode": retcode,
         "retcode_label": translate_retcode(retcode),
     }
+
+
+def cancel_order_by_ticket(ctx: BridgeContext, ticket: int) -> dict[str, Any]:
+    """v2 ``cancel_order`` entry point (P3 §14.2).
+
+    A typed alias over :func:`trade_cancel_pending_order`: the
+    Platform's ``cancel_order`` op carries the pending-order ticket,
+    exactly what the local cancel takes. Kept separate so the v2
+    command path names the operation it executes, and so the
+    reconcile path can distinguish a v2 cancel from a local cancel.
+    """
+    return trade_cancel_pending_order(ctx, TicketRequest(ticket=ticket))
 
 
 def _modify_pending_landed(ctx: BridgeContext, ticket: int, price: float, sl: float, tp: float) -> bool:

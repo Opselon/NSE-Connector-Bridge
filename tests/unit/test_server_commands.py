@@ -413,6 +413,84 @@ def test_parse_envelope_open_order_without_kind_still_defaults_market():
 
 
 # ----------------------------------------------------------------------
+# B3 — P3 v2 envelope fields (§14.1–§14.2).
+# ----------------------------------------------------------------------
+@pytest.mark.unit
+def test_parse_envelope_v2_fields():
+    env = parse_envelope(
+        _frame(
+            protocol_version="2",
+            priority=9,
+            operation={
+                "type": "open_order",
+                "symbol": "EURUSD",
+                "side": "buy",
+                "order_type": "limit",
+                "volume": 0.1,
+                "price": 1.0850,
+                "deviation": 10,
+                "expiry_secs": 300,
+                "comment": "NSE_TEST",
+                "policy_revision": 7,
+                "strategy_ref": "strat:3",
+                "decision_ref": "dec-1",
+                "risk_ref": "rce-2",
+                "approval_ref": "appr-9",
+            },
+        )
+    )
+    assert env.protocol_version == "2"
+    assert env.priority == 9
+    assert env.deviation == pytest.approx(10)
+    assert env.expiry_secs == 300
+    assert env.comment == "NSE_TEST"
+    assert env.policy_revision == 7
+    assert env.strategy_ref == "strat:3"
+    assert env.decision_ref == "dec-1"
+    assert env.risk_ref == "rce-2"
+    assert env.approval_ref == "appr-9"
+
+
+@pytest.mark.unit
+def test_parse_envelope_v2_defaults():
+    """Absent protocol_version is v1; absent priority is the op's
+    default (close 9, else 0) — the Platform stamps both, but an
+    older frame without them must still parse as v1."""
+    env = parse_envelope(_frame(operation={"type": "close_position", "ticket": "9000001"}))
+    assert env.protocol_version == "1"
+    assert env.priority == 9
+    env2 = parse_envelope(_open_frame())
+    assert env2.protocol_version == "1"
+    assert env2.priority == 0
+
+
+@pytest.mark.unit
+def test_parse_envelope_unknown_protocol_version_fails_closed_to_v1():
+    env = parse_envelope(_frame(protocol_version="99", operation={"type": "close_position", "ticket": "9000001"}))
+    assert env.protocol_version == "1"
+
+
+@pytest.mark.unit
+def test_parse_envelope_priority_clamped_to_0_9():
+    env = parse_envelope(_frame(priority=99, operation={"type": "close_position", "ticket": "9000001"}))
+    assert env.priority == 9
+    env2 = parse_envelope(_frame(priority=-3, operation={"type": "close_position", "ticket": "9000001"}))
+    assert env2.priority == 0
+
+
+@pytest.mark.unit
+def test_parse_envelope_v2_malformed_fields_are_malformed():
+    with pytest.raises(ValueError):
+        parse_envelope(_open_frame(deviation=-1))
+    with pytest.raises(ValueError):
+        parse_envelope(_open_frame(expiry_secs=901))
+    with pytest.raises(ValueError):
+        parse_envelope(_open_frame(deviation="abc"))
+    with pytest.raises(ValueError):
+        parse_envelope(_frame(priority="high", operation={"type": "close_position", "ticket": "9000001"}))
+
+
+# ----------------------------------------------------------------------
 # W3 — reduce-volume close via the optional `volume` field (PROPOSED
 # Phase 2b wire amendment; absent volume keeps v1 full-close semantics).
 # ----------------------------------------------------------------------
@@ -533,14 +611,19 @@ def test_open_order_rejected_by_default_gate_closed(monkeypatch):
 def test_open_order_gate_open_market_dispatches(monkeypatch):
     ctx = _ctx()
     seen: dict[str, object] = {}
+    # B3: the executor dispatches through the v2 hook — patch the
+    # names the hook resolves (v2_open_order.market_order), and the
+    # MT5 pre-flight (no live terminal in this test).
     monkeypatch.setattr(
-        "nse_bridge.engine.trading.market_order",
+        "nse_bridge.engine.v2_open_order.market_order",
         lambda ctx_, **kw: seen.update(kw) or {"status": "done", "ticket": 8001234, "retcode": 10009},
     )
+    monkeypatch.setattr("nse_bridge.engine.v2_open_order.validate_market_open_params", lambda *a, **k: [])
     validator = _validator(open_order_authorized=True)
     executor = CommandExecutor(ctx, validator, clock=lambda: NOW)
     execution, result = executor.execute(
         _frame(
+            protocol_version="2",
             operation={
                 "type": "open_order",
                 "symbol": "EURUSD",
@@ -548,12 +631,14 @@ def test_open_order_gate_open_market_dispatches(monkeypatch):
                 "volume": 0.01,
                 "sl": 1.08,
                 "tp": 1.10,
-            }
+            },
         )
     )
     assert execution.state is CommandState.COMPLETED
     assert result["status"] == "executed"
     assert result["source_tool"] == "trade_send_market_order"
+    assert result["command_protocol_version"] == "2"
+    assert result["server_lifecycle"]["current"] == "confirmed"
     assert seen["symbol"] == "EURUSD"
     assert seen["side"] == "buy"
     assert seen["volume"] == pytest.approx(0.01)
@@ -564,7 +649,7 @@ def test_open_order_gate_open_pending_dispatches(monkeypatch):
     ctx = _ctx()
     seen: dict[str, object] = {}
     monkeypatch.setattr(
-        "nse_bridge.engine.execution.trade_send_pending_order",
+        "nse_bridge.engine.v2_open_order.trade_send_pending_order",
         lambda ctx_, params: (
             seen.update(
                 {
@@ -581,6 +666,7 @@ def test_open_order_gate_open_pending_dispatches(monkeypatch):
     executor = CommandExecutor(ctx, validator, clock=lambda: NOW)
     execution, result = executor.execute(
         _frame(
+            protocol_version="2",
             operation={
                 "type": "open_order",
                 "order_kind": "limit",
@@ -588,12 +674,13 @@ def test_open_order_gate_open_pending_dispatches(monkeypatch):
                 "side": "buy",
                 "volume": 0.01,
                 "price": 1.05,
-            }
+            },
         )
     )
     assert execution.state is CommandState.COMPLETED
     assert result["status"] == "executed"
     assert result["source_tool"] == "trade_send_pending_order"
+    assert result["command_protocol_version"] == "2"
     assert seen["order_type"] == "BUY_LIMIT"
     assert seen["price"] == pytest.approx(1.05)
 
@@ -627,11 +714,14 @@ def test_open_order_structural_requirements_enforced():
 @pytest.mark.unit
 def test_open_order_gate_open_but_malformed_open_is_validation_error(monkeypatch):
     ctx = _ctx()
-    monkeypatch.setattr("nse_bridge.engine.trading.market_order", lambda ctx_, **kw: {"status": "done"})
+    monkeypatch.setattr("nse_bridge.engine.v2_open_order.market_order", lambda ctx_, **kw: {"status": "done"})
     validator = _validator(open_order_authorized=True)
     executor = CommandExecutor(ctx, validator, clock=lambda: NOW)
     execution, result = executor.execute(
-        _frame(operation={"type": "open_order", "symbol": "EURUSD", "side": "sideways", "volume": 0.01})
+        _frame(
+            protocol_version="2",
+            operation={"type": "open_order", "symbol": "EURUSD", "side": "sideways", "volume": 0.01},
+        )
     )
     assert execution.state is CommandState.FAILED
     assert result["status"] == "mcp_failed"
@@ -645,7 +735,8 @@ def test_open_order_uncertain_send_reconciles_via_fingerprint(monkeypatch):
     def unverified_open(ctx_, **kw):
         raise BridgeError(ErrorCode.TRADE_UNVERIFIED, "order_send returned no result")
 
-    monkeypatch.setattr("nse_bridge.engine.trading.market_order", unverified_open)
+    monkeypatch.setattr("nse_bridge.engine.v2_open_order.market_order", unverified_open)
+    monkeypatch.setattr("nse_bridge.engine.v2_open_order.validate_market_open_params", lambda *a, **k: [])
     # A just-opened matching position exists (side + magic + recency).
     pos = SimpleNamespace(
         ticket=8001234,
@@ -666,7 +757,10 @@ def test_open_order_uncertain_send_reconciles_via_fingerprint(monkeypatch):
     validator = _validator(open_order_authorized=True)
     executor = CommandExecutor(ctx, validator, clock=lambda: NOW)
     execution, result = executor.execute(
-        _frame(operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.01})
+        _frame(
+            protocol_version="2",
+            operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.01},
+        )
     )
     # W4: reconciliation proves the open landed → executed, never re-sent.
     assert execution.state is CommandState.COMPLETED

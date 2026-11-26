@@ -246,7 +246,7 @@ def ctx(tmp_path):
         driver.disconnect()
 
 
-NEGOTIATED = V2Negotiation(negotiated=True, schema_version="2026-11-24")
+NEGOTIATED = V2Negotiation(negotiated=True, schema_version="2")
 MARKET = V2OpenOrderRequest(symbol="EURUSD", side="buy", volume=0.1)
 
 
@@ -302,6 +302,52 @@ def test_v2_refuses_when_negotiation_is_none(ctx):
     assert ctx.driver._mt5.send_calls == 0
 
 
+def test_v2_refuses_when_schema_version_mismatches(ctx):
+    """A negotiated handshake carrying a schema this Bridge does not
+    speak is refused — the schema is the contract version, and a
+    mismatch means the two sides disagree about the wire shape."""
+    wrong = V2Negotiation(negotiated=True, schema_version="2026-11-24")
+    with pytest.raises(BridgeError) as excinfo:
+        execute_v2_open_order(ctx, MARKET, flag_enabled=True, negotiation=wrong)
+    assert excinfo.value.code is ErrorCode.DISABLED
+    assert ctx.driver._mt5.send_calls == 0
+
+
+# ----------------------------------------------------------------------
+# negotiation: protocol_version "2" is honoured only by a v2 Bridge
+# ----------------------------------------------------------------------
+def test_negotiate_protocol_version_honours_v2_for_v2_bridge():
+    from nse_bridge.engine.v2_open_order import negotiate_protocol_version
+
+    n = negotiate_protocol_version("2")
+    assert n.negotiated is True
+    assert n.schema_version == "2"
+
+
+def test_negotiate_protocol_version_falls_back_to_v1():
+    from nse_bridge.engine.v2_open_order import negotiate_protocol_version
+
+    assert negotiate_protocol_version(None).negotiated is False
+    assert negotiate_protocol_version("1").negotiated is False
+    assert negotiate_protocol_version("99").negotiated is False
+
+
+def test_negotiate_protocol_version_refuses_v2_for_old_bridge():
+    from nse_bridge.engine.v2_open_order import negotiate_protocol_version
+
+    assert negotiate_protocol_version("2", bridge_version="1.2.9").negotiated is False
+    assert negotiate_protocol_version("2", bridge_version="1.3.0").negotiated is True
+
+
+def test_version_at_least_comparison():
+    from nse_bridge.engine.v2_open_order import version_at_least
+
+    assert version_at_least("1.3.1", "1.3.0") is True
+    assert version_at_least("1.3.0", "1.3.0") is True
+    assert version_at_least("1.2.9", "1.3.0") is False
+    assert version_at_least("banana", "1.3.0") is False  # malformed never qualifies
+
+
 # ----------------------------------------------------------------------
 # dispatch: both gates open (the P3-ready path, still not live-wired)
 # ----------------------------------------------------------------------
@@ -330,19 +376,22 @@ def test_v2_pending_without_price_is_validation_error(ctx):
 
 
 # ----------------------------------------------------------------------
-# not wired into the live command path
+# wired into the live command path — but both gates still default closed
 # ----------------------------------------------------------------------
-def test_v2_hook_is_not_imported_by_command_path():
-    """The server command path must never import the v2 hook: a
-    server-sent open_order stays rejected by the §17.5 gate, and no
-    live wiring can silently enable it."""
+def test_v2_hook_is_wired_into_command_path_but_gates_default_closed():
+    """B3 wiring: the server command path DOES import the v2 hook
+    now (the dormant-hook pin is retired), and the channel passes
+    the operator flag into the validator — but a server-sent
+    open_order is still refused unless BOTH gates are open (flag +
+    negotiated v2 envelope). The hook's existence changes nothing
+    on the live path while the gates are closed."""
     repo = Path(__file__).resolve().parents[2]
     commands_src = (repo / "nse_bridge" / "server" / "commands.py").read_text(encoding="utf-8")
     channel_src = (repo / "nse_bridge" / "realtime" / "channel.py").read_text(encoding="utf-8")
-    assert "v2_open_order" not in commands_src
-    assert "v2_open_order" not in channel_src
-    assert "enable_v2_open_order" not in commands_src
-    assert "enable_v2_open_order" not in channel_src
+    assert "v2_open_order" in commands_src
+    assert "execute_v2_open_order" in commands_src
+    assert "enable_v2_open_order" in channel_src
+    assert "open_order_authorized" in channel_src
 
 
 def test_server_open_order_still_rejected_by_default_gate(ctx):
@@ -476,3 +525,95 @@ def test_v2_dispatches_platform_shaped_stop_limit_with_stoplimit(ctx):
     assert out["status"] == "done"
     assert ctx.driver._mt5.sent_requests[0]["type"] == PENDING_TYPES["BUY_STOP_LIMIT"]
     assert ctx.driver._mt5.sent_requests[0]["stoplimit"] == pytest.approx(1.1040)
+
+
+# ----------------------------------------------------------------------
+# from_operation: fail-closed on malformed v2 fields
+# ----------------------------------------------------------------------
+def test_v2_from_operation_stop_limit_without_stop_limit_fails():
+    with pytest.raises(ValueError, match="requires stop_limit"):
+        V2OpenOrderRequest.from_operation({**PLATFORM_LIMIT, "order_type": "stop_limit", "price": 1.1050})
+
+
+def test_v2_from_operation_pending_without_price_fails():
+    with pytest.raises(ValueError, match="requires price"):
+        V2OpenOrderRequest.from_operation(
+            {"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_type": "limit", "volume": 0.1}
+        )
+
+
+def test_v2_from_operation_market_with_price_fails():
+    """A price on a market entry is forbidden by §14.2 — refusing
+    beats silently ignoring a field the sender thought mattered."""
+    with pytest.raises(ValueError, match="forbids price"):
+        V2OpenOrderRequest.from_operation(
+            {
+                "type": "open_order",
+                "symbol": "EURUSD",
+                "side": "buy",
+                "order_type": "market",
+                "volume": 0.1,
+                "price": 1.10,
+            }
+        )
+
+
+def test_v2_from_operation_negative_deviation_fails():
+    with pytest.raises(ValueError, match="deviation"):
+        V2OpenOrderRequest.from_operation({**PLATFORM_LIMIT, "order_type": "market", "deviation": -5, "price": None})
+
+
+def test_v2_from_operation_expiry_over_max_fails():
+    with pytest.raises(ValueError, match="expiry_secs"):
+        V2OpenOrderRequest.from_operation(
+            {"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1, "expiry_secs": 901}
+        )
+
+
+def test_v2_from_operation_non_positive_sl_tp_fail():
+    with pytest.raises(ValueError, match="sl must be > 0"):
+        V2OpenOrderRequest.from_operation(
+            {"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1, "sl": 0.0}
+        )
+    with pytest.raises(ValueError, match="tp must be > 0"):
+        V2OpenOrderRequest.from_operation(
+            {"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1, "tp": -1.0}
+        )
+
+
+def test_v2_from_operation_unknown_side_fails():
+    with pytest.raises(ValueError, match="unknown side"):
+        V2OpenOrderRequest.from_operation({"type": "open_order", "symbol": "EURUSD", "side": "sideways", "volume": 0.1})
+
+
+# ----------------------------------------------------------------------
+# passthrough: deviation / expiry / comment reach the MT5 request
+# ----------------------------------------------------------------------
+def test_v2_market_deviation_reaches_order_send(ctx):
+    req = V2OpenOrderRequest(symbol="EURUSD", side="buy", volume=0.1, deviation=5, comment="NSE_TEST")
+    out = execute_v2_open_order(ctx, req, flag_enabled=True, negotiation=NEGOTIATED)
+    assert out["status"] == "done"
+    assert ctx.driver._mt5.sent_requests[0]["deviation"] == 5
+    assert ctx.driver._mt5.sent_requests[0]["comment"] == "NSE_TEST"
+
+
+def test_v2_pending_expiry_becomes_specified_time(ctx):
+    req = V2OpenOrderRequest(
+        symbol="EURUSD", side="sell", volume=0.1, order_kind="limit", price=1.1050, expiry_secs=300
+    )
+    out = execute_v2_open_order(ctx, req, flag_enabled=True, negotiation=NEGOTIATED)
+    assert out["status"] == "done"
+    sent = ctx.driver._mt5.sent_requests[0]
+    assert sent["type_time"] == 1  # ORDER_TIME_SPECIFIED
+    assert "expiration" in sent
+
+
+def test_v2_market_preflight_rejects_volume_below_min(ctx):
+    """MT5 pre-flight: a volume below the broker minimum fails
+    before order_check / order_send are ever reached."""
+    req = V2OpenOrderRequest(symbol="EURUSD", side="buy", volume=0.001)
+    with pytest.raises(BridgeError) as excinfo:
+        execute_v2_open_order(ctx, req, flag_enabled=True, negotiation=NEGOTIATED)
+    assert excinfo.value.code is ErrorCode.VALIDATION
+    assert "volume_below_min" in str(excinfo.value.details.get("reasons"))
+    assert ctx.driver._mt5.send_calls == 0

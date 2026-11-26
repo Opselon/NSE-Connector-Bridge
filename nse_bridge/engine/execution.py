@@ -230,6 +230,72 @@ def validate_pending(
     return reasons
 
 
+def validate_market_open_params(
+    ctx: BridgeContext,
+    *,
+    symbol: str,
+    side: str,
+    volume: float,
+    sl: float,
+    tp: float,
+) -> list[str]:
+    """Pre-dispatch structural validation for a MARKET open against
+    the CURRENT market (v2 open_order pre-flight).
+
+    Mirrors :func:`validate_pending`'s volume and SL/TP geometry
+    rules, with the entry price being the live tick (ask for buys,
+    bid for sells). Returns a list of reason codes; empty means the
+    request is structurally sound. The official ``order_check``
+    inside :func:`nse_bridge.engine.trading.market_order` remains
+    the broker acceptance check — this pre-flight only fails fast
+    on requests the broker cannot accept.
+    """
+    spec = require_symbol_info(ctx, symbol)
+    tick = _fresh_tick(ctx, symbol)
+    reasons: list[str] = []
+    point = float(spec.point or 0.0)
+    stops_level = float(spec.trade_stops_level or 0)
+    spread = float((tick.ask or 0) - (tick.bid or 0))
+    safety_floor = 10 * point  # 10 broker points floor (ported)
+    min_gap = max(stops_level * point, spread, safety_floor)
+    min_stop_dist = max(stops_level * point, safety_floor)
+
+    vol_min = spec.volume_min
+    vol_max = spec.volume_max
+    vol_step = spec.volume_step
+    if vol_min is not None and volume < float(vol_min) - 1e-9:
+        reasons.append("volume_below_min")
+    if vol_max is not None and volume > float(vol_max) + 1e-9:
+        reasons.append("volume_above_max")
+    if vol_step is not None and float(vol_step) > 0:
+        steps = round(volume / float(vol_step))
+        if abs(volume - steps * float(vol_step)) > 1e-9:
+            reasons.append("volume_not_multiple_of_step")
+
+    is_buy = side == "buy"
+    entry = float(tick.ask) if is_buy else float(tick.bid)
+    if not entry > 0:
+        reasons.append("no_live_price")
+        return reasons
+    if sl > 0:
+        if is_buy and sl >= entry - min_stop_dist + 1e-9:
+            reasons.append("sl_not_below_entry")
+        if not is_buy and sl <= entry + min_stop_dist - 1e-9:
+            reasons.append("sl_not_above_entry")
+    if tp > 0:
+        if is_buy and tp <= entry + min_stop_dist - 1e-9:
+            reasons.append("tp_not_above_entry")
+        if not is_buy and tp >= entry - min_stop_dist + 1e-9:
+            reasons.append("tp_not_below_entry")
+    if sl > 0 and tp > 0:
+        if is_buy and sl >= tp:
+            reasons.append("sl_not_below_tp")
+        if not is_buy and sl <= tp:
+            reasons.append("sl_not_above_tp")
+    _ = min_gap
+    return reasons
+
+
 @command(
     "trade_send_pending_order",
     number=67,
@@ -324,7 +390,12 @@ def trade_send_pending_order(ctx: BridgeContext, params: PendingOrderRequest) ->
         translate_retcode,
     )
 
-    result = ctx.driver.run(job, op="order_send_pending", context={"symbol": symbol, "type": params.order_type})
+    # P3 v2: order placement goes through the placement wrapper —
+    # a placement that times out is TRADE_UNVERIFIED (outcome
+    # unknown; reconcile, never blind-retry), not a bare timeout.
+    result = ctx.driver.run_order_send(
+        job, op="order_send_pending", context={"symbol": symbol, "type": params.order_type}
+    )
     retcode = int(_f(result, "retcode", 0)) if result is not None else None
     if result is None or retcode == TRADE_RETCODE_CONNECTION:
         ctx.trade_metrics.record("order_send_pending", "unknown", 0.0, retcode, {"symbol": symbol, "uncertain": True})

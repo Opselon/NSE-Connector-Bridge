@@ -1,74 +1,140 @@
-"""Client-side v2 ``open_order`` hooks (S4, v1.3.0) — BEHIND A FLAG.
+"""Client-side v2 ``open_order`` execution (P3 v2 protocol, Bridge v1.4.0 B3).
 
-IMPORTANT — the Bridge alone does NOT enable new-position trading.
-Opening a new position requires the Platform P3 protocol: the
-Platform must ship the P3 contract (risk engine, financial consent,
-kill-switch enforcement), negotiate protocol v2 with this Bridge
-(a ``schema_version`` bump the Platform publishes), and the operator
-must explicitly enable the local flag. Until ALL of that exists,
-every call here refuses loudly and nothing reaches MT5.
-
-This module is deliberately NOT wired into the live command path:
-:mod:`nse_bridge.server.commands` never imports it, the §17.5
-activation gate (``open_order_authorized=False``, no config knob)
-still rejects server-sent ``open_order`` frames as
-``UnsupportedOperation``, and the WS channel never constructs a v2
-negotiation. The P3 work will call :func:`execute_v2_open_order`
-only after negotiation is implemented; until then this module is a
-tested, dormant hook — proof that the client side is ready, not a
-live trading surface.
+Wired into the live server command path by
+:mod:`nse_bridge.server.commands` — a server-sent ``open_order``
+frame reaches :func:`execute_v2_open_order` ONLY when every gate
+below is open. The kill switch stays ENGAGED: this slice is code
+only, no execution enablement beyond what the Platform authorizes
+per command (the Platform's §6.4 gate refuses v2 commands while
+its switch is engaged; the Bridge enforces its own gates here).
 
 Two independent gates, both default CLOSED:
 
 1. ``flag_enabled`` — the operator opt-in
    (``BridgeSettings.enable_v2_open_order``,
    env ``NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=1``; default False).
-2. ``negotiation`` — a :class:`V2Negotiation` the Platform must
-   establish during the v2 handshake (``negotiated=True`` plus the
-   negotiated ``schema_version``). There is no v2 handshake in
-   CONTRACT v1, so no production code can construct a negotiated
-   instance today; the P3 work owns that wire shape.
+2. ``negotiation`` — a :class:`V2Negotiation` built from the
+   command envelope's ``protocol_version`` by
+   :func:`negotiate_protocol_version`: ``"2"`` is honoured only
+   when this Bridge speaks v2 (version >= ``1.3.0``, the Platform's
+   ``V2_MIN_CONNECTOR_VERSION``). Any other value — absent, ``"1"``,
+   unknown — negotiates down to v1, fail-closed, and a v2-only op
+   is refused before it ever reaches MT5.
 
-Refusal is loud and typed: :class:`BridgeError` with
-``ErrorCode.DISABLED`` (``FEATURE_DISABLED``) and a message naming
-exactly which gate is closed and what is missing. A refused call
-never touches the driver (zero ``order_send`` calls).
+Fail-closed parsing (the PR #20 wire-bug lesson): the Platform
+emits the v2 names ``order_type`` / ``stop_limit``; the Bridge's
+native names are ``order_kind`` / ``stoplimit``. Both are accepted
+(Bridge name wins when both are present). A pending kind sent under
+either name is preserved — it must never silently fall back to
+``"market"``. A kind that IS present but unknown fails loudly
+here, never at dispatch. No kind at all keeps the documented
+CONTRACTS §7 market default — exactly what the Platform's own
+``validate_v2_operation`` does (``unwrap_or("market")``) — and the
+Platform always sends ``order_type`` explicitly (see
+``agent_trade::exe``), so the default is a documented fallback,
+never a dropped pending kind.
+
+Pre-send validation: :func:`execute_v2_open_order` validates the
+request against live MT5 state (symbol resolvable, volume within
+the broker min/max/step, SL/TP geometry against the live tick)
+BEFORE dispatch, on top of the mandatory official ``order_check``
+the primitives run (W2). A structurally invalid open is a
+``VALIDATION`` failure and nothing is sent.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
 from loguru import logger
 
+from .. import BRIDGE_VERSION
 from ..errors import BridgeError, ErrorCode
 from .common import BridgeContext
-from .execution import PendingOrderRequest, trade_send_pending_order
+from .execution import PendingOrderRequest, trade_send_pending_order, validate_market_open_params
 from .trading import market_order
 
-#: The negotiated v2 contract version is recorded here once the
-#: Platform publishes it (P3). Until then there is no v2 schema to
-#: negotiate, and ``V2Negotiation.negotiated`` can never be True in
-#: production.
-V2_SCHEMA_VERSION: str | None = None
+#: The negotiated v2 contract version (Platform
+#: ``connector::contract::V2_SCHEMA_VERSION``). A handshake that
+#: negotiates any other schema is refused.
+V2_SCHEMA_VERSION: str = "2"
+
+#: Minimum Bridge version that speaks protocol v2 (Platform
+#: ``connector::contract::V2_MIN_CONNECTOR_VERSION``).
+V2_MIN_CONNECTOR_VERSION: str = "1.3.0"
+
+#: Max pending-order expiry, seconds from issue (Platform
+#: ``connector::contract::COMMAND_TTL_MAX_SECS``). A larger
+#: ``expiry_secs`` is refused, never clamped silently.
+COMMAND_TTL_MAX_SECS: int = 900
+
+#: Allowed deviation range for a market open, in MT5 points
+#: (``MarketOrderRequest.deviation`` is 0..1000).
+DEVIATION_MAX: int = 1000
+
+ORDER_KINDS: tuple[str, str, str, str] = ("market", "limit", "stop", "stop_limit")
+
+
+def version_at_least(version: str, minimum: str) -> bool:
+    """Semver-ish ``version >= minimum`` over dotted numeric parts.
+
+    Non-numeric components compare as 0 — a malformed version never
+    qualifies as new enough (fail-closed).
+    """
+
+    def _parts(value: str) -> tuple[int, int, int]:
+        out: list[int] = []
+        for piece in value.strip().split(".")[:3]:
+            try:
+                out.append(int(piece))
+            except ValueError:
+                out.append(0)
+        while len(out) < 3:
+            out.append(0)
+        return (out[0], out[1], out[2])
+
+    return _parts(version) >= _parts(minimum)
+
+
+def connector_supports_v2(bridge_version: str = BRIDGE_VERSION) -> bool:
+    """Whether this Bridge speaks protocol v2 (§14.1 negotiation)."""
+    return version_at_least(bridge_version, V2_MIN_CONNECTOR_VERSION)
 
 
 @dataclass(frozen=True)
 class V2Negotiation:
     """Result of the Platform v2 handshake (P3-owned wire shape).
 
-    ``negotiated`` is True only after the Platform has completed a
-    v2 handshake with this Bridge (contract version bump, risk-engine
-    and consent proof). ``schema_version`` records the negotiated
-    contract version for the audit trail. No production code path
-    constructs a negotiated instance today — CONTRACT v1 defines no
-    v2 handshake — so the default is unnegotiated.
+    ``negotiated`` is True only after the Platform stamped
+    ``protocol_version: "2"`` on the command envelope AND this
+    Bridge speaks v2 (see :func:`negotiate_protocol_version`).
+    ``schema_version`` records the negotiated contract version for
+    the audit trail.
     """
 
     negotiated: bool = False
     schema_version: str | None = None
+
+
+def negotiate_protocol_version(
+    requested: str | None,
+    bridge_version: str = BRIDGE_VERSION,
+) -> V2Negotiation:
+    """Negotiate the protocol version for one command (§14.1).
+
+    A ``"2"`` request is honoured ONLY when this Bridge speaks v2;
+    anything else — absent, ``"1"``, unknown — negotiates down to
+    v1, fail-closed. The caller records the negotiated version and
+    refuses v2-only ops on a v1 negotiation.
+    """
+    if requested == "2" and connector_supports_v2(bridge_version):
+        return V2Negotiation(negotiated=True, schema_version=V2_SCHEMA_VERSION)
+    if requested not in (None, "1", "2"):
+        logger.warning("[V2] unknown protocol_version {!r} — negotiating down to v1 (fail-closed)", requested)
+    return V2Negotiation(negotiated=False, schema_version=None)
 
 
 @dataclass(frozen=True)
@@ -83,6 +149,11 @@ class V2OpenOrderRequest:
     order_kind: Literal["market", "limit", "stop", "stop_limit"] = "market"
     price: float | None = None
     stoplimit: float | None = None
+    #: Allowed deviation in MT5 points (0 = no deviation tolerated).
+    deviation: int = 20
+    #: Pending-order expiry, seconds from issue (0/absent =
+    #: good-til-cancelled). Refused above COMMAND_TTL_MAX_SECS.
+    expiry_secs: int | None = None
     comment: str = "NSE_OPEN"
 
     @classmethod
@@ -93,8 +164,11 @@ class V2OpenOrderRequest:
         as aliases of the Bridge-native ``order_kind`` / ``stoplimit``
         (Bridge name wins when both are present). A pending kind sent
         under either name is preserved — it must never silently fall
-        back to ``"market"``. Unknown kinds and missing required
-        fields fail loudly here, never at dispatch.
+        back to ``"market"``. Unknown kinds, unknown sides, missing
+        required fields, a pending kind without a price, a
+        ``stop_limit`` kind without a ``stop_limit`` price, a negative
+        deviation, an out-of-range expiry, and non-positive SL/TP
+        fail loudly here, never at dispatch.
         """
         if not isinstance(operation, Mapping):
             raise TypeError("v2 open_order operation is not a JSON object")
@@ -105,7 +179,7 @@ class V2OpenOrderRequest:
         if kind_raw in (None, ""):
             kind_raw = operation.get("order_type")
         order_kind = str(kind_raw).strip().lower() if kind_raw not in (None, "") else "market"
-        if order_kind not in ("market", "limit", "stop", "stop_limit"):
+        if order_kind not in ORDER_KINDS:
             raise ValueError(f"v2 open_order has unknown order kind {order_kind!r}")
         stoplimit_raw = operation.get("stoplimit")
         if stoplimit_raw is None:
@@ -131,8 +205,43 @@ class V2OpenOrderRequest:
         volume = _num(operation.get("volume"), "volume")
         if volume is None:
             raise ValueError("v2 open_order operation is missing 'volume'")
+        if volume <= 0:
+            raise ValueError("v2 open_order requires volume > 0")
         sl_value = _num(operation.get("sl"), "sl")
         tp_value = _num(operation.get("tp"), "tp")
+        if sl_value is not None and sl_value <= 0:
+            raise ValueError("v2 open_order sl must be > 0")
+        if tp_value is not None and tp_value <= 0:
+            raise ValueError("v2 open_order tp must be > 0")
+        price = _num(operation.get("price"), "price")
+        if order_kind in ("limit", "stop", "stop_limit") and (price is None or price <= 0):
+            raise ValueError(f"v2 open_order order_kind={order_kind} requires price > 0")
+        stoplimit = _num(stoplimit_raw, "stoplimit")
+        if order_kind == "stop_limit" and (stoplimit is None or stoplimit <= 0):
+            raise ValueError("v2 open_order order_kind=stop_limit requires stop_limit > 0")
+        if order_kind == "market" and price is not None:
+            # A price on a market entry is forbidden by §14.2
+            # (ignored server-side); the Bridge refuses rather than
+            # silently ignoring a field the sender thought mattered.
+            raise ValueError("v2 open_order order_kind=market forbids price")
+        deviation_raw = operation.get("deviation")
+        deviation = 20
+        if deviation_raw is not None:
+            deviation_num = _num(deviation_raw, "deviation")
+            if deviation_num is None or deviation_num < 0 or deviation_num > DEVIATION_MAX:
+                raise ValueError(f"v2 open_order deviation must be 0..{DEVIATION_MAX}")
+            if float(deviation_num) != int(deviation_num):
+                raise ValueError("v2 open_order deviation must be a whole number of points")
+            deviation = int(deviation_num)
+        expiry_raw = operation.get("expiry_secs")
+        expiry_secs: int | None = None
+        if expiry_raw is not None:
+            expiry_num = _num(expiry_raw, "expiry_secs")
+            if expiry_num is None or expiry_num < 0 or expiry_num > COMMAND_TTL_MAX_SECS:
+                raise ValueError(f"v2 open_order expiry_secs must be 0..{COMMAND_TTL_MAX_SECS}")
+            if float(expiry_num) != int(expiry_num):
+                raise ValueError("v2 open_order expiry_secs must be a whole number of seconds")
+            expiry_secs = int(expiry_num)
         comment = operation.get("comment")
         return cls(
             symbol=str(symbol).strip(),
@@ -141,8 +250,10 @@ class V2OpenOrderRequest:
             sl=sl_value if sl_value is not None else 0.0,
             tp=tp_value if tp_value is not None else 0.0,
             order_kind=cast(Literal["market", "limit", "stop", "stop_limit"], order_kind),
-            price=_num(operation.get("price"), "price"),
-            stoplimit=_num(stoplimit_raw, "stoplimit"),
+            price=price,
+            stoplimit=stoplimit,
+            deviation=deviation,
+            expiry_secs=expiry_secs,
             comment=str(comment) if comment not in (None, "") else "NSE_OPEN",
         )
 
@@ -175,11 +286,7 @@ def check_v2_open_order_available(
             "The Platform must ship the P3 contract and complete the v2 handshake (schema_version bump) first.",
             details={"gate": "negotiation", "negotiated": False},
         )
-    if (
-        negotiation.schema_version is not None
-        and V2_SCHEMA_VERSION is not None
-        and negotiation.schema_version != V2_SCHEMA_VERSION
-    ):
+    if negotiation.schema_version is not None and negotiation.schema_version != V2_SCHEMA_VERSION:
         raise BridgeError(
             ErrorCode.DISABLED,
             f"v2 open_order refused: negotiated schema_version {negotiation.schema_version!r} "
@@ -197,11 +304,11 @@ def execute_v2_open_order(
 ) -> dict[str, Any]:
     """Execute a v2 open — ONLY after both gates pass.
 
-    Dispatches through the proven local primitives
-    (:func:`market_order` / :func:`trade_send_pending_order`), which
-    carry the mandatory pre-send ``order_check`` and W4
-    reconciliation. This function is NOT called by the server command
-    path; the P3 work will call it after v2 negotiation.
+    Pre-validates the request against live MT5 state (symbol,
+    volume, SL/TP), then dispatches through the proven local
+    primitives (:func:`market_order` /
+    :func:`trade_send_pending_order`), which carry the mandatory
+    pre-send ``order_check`` and W4 reconciliation.
     """
     check_v2_open_order_available(flag_enabled=flag_enabled, negotiation=negotiation)
     if request.volume <= 0:
@@ -211,6 +318,26 @@ def execute_v2_open_order(
             http_status=422,
             details={"volume": request.volume},
         )
+    # MT5 pre-flight: symbol / volume / SL-TP geometry against the
+    # live tick, before anything is sent. Pending kinds reuse the
+    # structural validator inside trade_send_pending_order; market
+    # kinds get the same checks here.
+    if request.order_kind == "market":
+        reasons = validate_market_open_params(
+            ctx,
+            symbol=request.symbol,
+            side=request.side,
+            volume=request.volume,
+            sl=request.sl,
+            tp=request.tp,
+        )
+        if reasons:
+            raise BridgeError(
+                ErrorCode.VALIDATION,
+                f"Structurally invalid market open: {', '.join(reasons)}",
+                http_status=422,
+                details={"reasons": reasons, "symbol": request.symbol},
+            )
     logger.info(
         "[V2_OPEN_ORDER] dispatching {} {} {} (schema_version={})",
         request.side,
@@ -226,6 +353,7 @@ def execute_v2_open_order(
             volume=request.volume,
             sl=request.sl,
             tp=request.tp,
+            deviation=request.deviation,
             comment=request.comment,
         )
     pending_types = {"limit": "LIMIT", "stop": "STOP", "stop_limit": "STOP_LIMIT"}
@@ -236,6 +364,9 @@ def execute_v2_open_order(
             http_status=422,
             details={"order_kind": request.order_kind},
         )
+    expiration_utc: str | None = None
+    if request.expiry_secs:
+        expiration_utc = (datetime.now(UTC) + timedelta(seconds=request.expiry_secs)).isoformat().replace("+00:00", "Z")
     return trade_send_pending_order(
         ctx,
         PendingOrderRequest(
@@ -246,6 +377,7 @@ def execute_v2_open_order(
             stoplimit=request.stoplimit,
             sl=request.sl,
             tp=request.tp,
+            expiration_utc=expiration_utc,
             comment=request.comment,
         ),
     )

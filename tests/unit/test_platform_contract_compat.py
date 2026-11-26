@@ -204,3 +204,129 @@ async def test_redelivered_command_is_not_executed_twice():
     second = validator.validate(envelope)
     assert second.ok is False, "a redelivered command must be answered from the replay cache, not re-executed"
     assert second.rejection is RejectionReason.REPLAYED
+
+
+# ---------------------------------------------------------------------------
+# P3 v2 protocol (Bridge v1.4.0 B3) — versioned envelopes, v2 ops,
+# idempotency dedupe on replay, per-device fencing, server lifecycle.
+# Pinned against the Platform v2 contract (``connector::contract``,
+# MASTER §14, Platform origin/main).
+# ---------------------------------------------------------------------------
+
+
+def _v2_frame(**overrides):
+    envelope = {
+        "type": "command",
+        "command_id": new_uuid7_str(),
+        "account_id": "10011755849",
+        "device_id": "device-1",
+        "operation": {"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1},
+        "issued_at": "2026-11-21T10:00:00.000Z",
+        "expires_at": "2099-01-01T00:00:00.000Z",
+        "idempotency_key": "ignored-by-validator",
+        "protocol_version": "2",
+        "priority": 0,
+    }
+    envelope.update(overrides)
+    if "operation" in overrides and isinstance(overrides["operation"], dict):
+        envelope["operation"] = overrides["operation"]
+    return envelope
+
+
+def _v2_validator(**overrides):
+    from nse_bridge.server.commands import CommandValidator
+    from nse_bridge.server.rest import Entitlements
+
+    kwargs = {
+        "get_account_id": lambda: "10011755849",
+        "entitlements": Entitlements(history_sync=True, position_manager=True, auto_trade=True),
+    }
+    kwargs.update(overrides)
+    return CommandValidator("device-1", **kwargs)
+
+
+def test_v2_open_order_accepted_only_with_flag_and_v2_envelope():
+    """§14.1 negotiation: a v2 open is honoured only when the
+    envelope says "2" AND the operator flag is on. Either half
+    missing is a fail-closed refusal — the Platform's own gate
+    refuses v2 commands while its kill switch is engaged, and the
+    Bridge enforces its own gates on top."""
+    from nse_bridge.server.commands import RejectionReason
+
+    v_flag_on = _v2_validator(open_order_authorized=True)
+    assert v_flag_on.validate(_v2_frame()).ok is True
+    v_flag_off = _v2_validator(open_order_authorized=False)
+    assert v_flag_off.validate(_v2_frame()).rejection is RejectionReason.UNSUPPORTED_OPERATION
+    # v1 envelope (no protocol_version) + flag on: still refused.
+    v1 = _v2_frame()
+    del v1["protocol_version"]
+    assert v_flag_on.validate(v1).rejection is RejectionReason.UNSUPPORTED_OPERATION
+
+
+def test_v2_only_ops_refused_under_v1_but_admitted_under_v2():
+    """§14.1: cancel_order / partial_close exist ONLY in v2. A v1
+    Bridge (or a v1 envelope) must refuse them, never execute a
+    typed op it does not understand."""
+    from nse_bridge.server.commands import RejectionReason
+
+    v = _v2_validator()
+    for op in (
+        {"type": "cancel_order", "ticket": "7000001"},
+        {"type": "partial_close", "ticket": "9000001", "volume": 0.2},
+    ):
+        assert v.validate(_v2_frame(operation=op)).ok is True
+        v1 = _v2_frame(operation=op)
+        del v1["protocol_version"]
+        assert v.validate(v1).rejection is RejectionReason.UNSUPPORTED_OPERATION
+
+
+def test_v2_unknown_protocol_version_negotiates_down_to_v1():
+    """§14.1: unknown/unnegotiated = "1" (fail-closed). An envelope
+    claiming protocol "99" is treated as v1 — its v2-only op is
+    refused, and its v1 op still executes under v1 rules."""
+    from nse_bridge.server.commands import RejectionReason
+
+    v = _v2_validator(open_order_authorized=True)
+    weird = _v2_frame(protocol_version="99")
+    assert v.validate(weird).rejection is RejectionReason.UNSUPPORTED_OPERATION
+    close_v1 = _v2_frame(protocol_version="99", operation={"type": "close_position", "ticket": "9000001"})
+    assert v.validate(close_v1).ok is True
+
+
+def test_v2_redelivery_returns_stored_result_not_second_execution(monkeypatch):
+    """§14.5 idempotency: the Platform replays delivered-but-unacked
+    commands on reconnect. The Bridge answers from its idempotency
+    store — the stored terminal result, stamped deduplicated — and
+    MT5 is never touched a second time."""
+    from nse_bridge.config import BridgeSettings
+    from nse_bridge.engine.common import BridgeContext
+    from nse_bridge.mt5.driver import Mt5Driver
+    from nse_bridge.server.commands import CommandExecutor
+
+    settings = BridgeSettings(_env_file=None, server_token="<redacted>", device_id="device-1")
+    ctx = BridgeContext(settings=settings, driver=Mt5Driver(settings))
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "nse_bridge.engine.trading.close_position",
+        lambda ctx_, ticket, volume=None: (
+            calls.append(ticket)
+            or {
+                "status": "done",
+                "ticket": ticket,
+                "retcode": 10009,
+            }
+        ),
+    )
+    try:
+        executor = CommandExecutor(ctx, _v2_validator())
+        frame = _v2_frame(operation={"type": "close_position", "ticket": "9000001"})
+        frame["idempotency_key"] = frame["command_id"]
+        _, first = executor.execute(frame)
+        assert first["status"] == "executed"
+        assert len(calls) == 1
+        _, second = executor.execute(frame)
+        assert second["status"] == "executed"
+        assert second["deduplicated"] is True
+        assert len(calls) == 1
+    finally:
+        ctx.driver.disconnect()

@@ -469,10 +469,16 @@ class ServerChannel:
             )
         if self._executor is None:
             rest = self._rest
+            # B3 (P3 v2): the v2 flag is the operator half of the
+            # open_order gate — the other half is the negotiated v2
+            # envelope, checked per command in the validator. The
+            # flag alone never opens an open; without it, v2 opens
+            # stay UnsupportedOperation.
             validator = CommandValidator(
                 device_id,
                 get_account_id=self._bound_account_id,
                 entitlements=lambda: rest.entitlements,
+                open_order_authorized=self.ctx.settings.enable_v2_open_order,
             )
             self._executor = CommandExecutor(
                 self.ctx,
