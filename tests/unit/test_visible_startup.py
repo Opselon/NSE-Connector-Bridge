@@ -386,9 +386,12 @@ def test_open_window_passes_bundled_icon_to_webview_start_on_windows(monkeypatch
     )
     monkeypatch.setitem(sys.modules, "webview", fake_webview)
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(window_mod, "app_icon_path", lambda: Path("/fake/assets/icon.ico"))
+    icon_path = Path("/fake/assets/icon.ico")
+    monkeypatch.setattr(window_mod, "app_icon_path", lambda: icon_path)
     assert window_mod.open_window("http://127.0.0.1:8788/ui", open_timeout_s=5.0) == "webview"
-    assert started_kwargs.get("icon") == "/fake/assets/icon.ico"
+    # Compare against str(Path(...)), not the literal: on Windows the
+    # same path renders with backslashes.
+    assert started_kwargs.get("icon") == str(icon_path)
 
 
 def test_splash_degrades_without_tkinter(monkeypatch, no_tkinter):
