@@ -245,6 +245,209 @@ def test_chunk_items_pages():
 
 
 @pytest.mark.unit
+def test_flush_delay_backoff_values():
+    from nse_bridge.server.sync import SyncEngine as _SE
+
+    assert _SE.flush_delay_s(0) == 5.0
+    assert _SE.flush_delay_s(1) == 10.0
+    assert _SE.flush_delay_s(2) == 20.0
+    assert _SE.flush_delay_s(3) == 40.0
+    assert _SE.flush_delay_s(4) == 60.0  # capped, never hammers a dead server
+    assert _SE.flush_delay_s(10) == 60.0
+
+
+class _AlwaysFailingRest:
+    """Fails every send; retryable or not, per construction."""
+
+    def __init__(self, *, retryable: bool = True) -> None:
+        from nse_bridge.server.errors import ServerErrorCode
+
+        self._retryable = retryable
+        self._code = ServerErrorCode.SERVER_UNAVAILABLE if retryable else ServerErrorCode.MALFORMED_RESPONSE
+        self.calls = 0
+
+    async def send_batch(self, batch: dict[str, Any]) -> SyncAck:
+        from nse_bridge.server.errors import ServerError
+
+        self.calls += 1
+        raise ServerError(self._code, "boom", retryable=self._retryable)
+
+
+class _FlakyRest:
+    """Fails the first ``fail_times`` sends (retryable), then accepts."""
+
+    def __init__(self, *, fail_times: int = 1) -> None:
+        self.fail_times = fail_times
+        self.sent: list[dict[str, Any]] = []
+        self.calls = 0
+
+    async def send_batch(self, batch: dict[str, Any]) -> SyncAck:
+        from nse_bridge.server.errors import ServerError, ServerErrorCode
+
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise ServerError(ServerErrorCode.SERVER_UNAVAILABLE, "boom", retryable=True)
+        self.sent.append(batch)
+        return SyncAck(accepted=True, batch_id=batch["batch_id"])
+
+
+@pytest.mark.unit
+async def test_flush_retries_with_the_same_batch_id():
+    """A lost ack must not double-apply: the retry reuses the batch id
+    (the idempotency key), so the server dedups it."""
+    rest = _FlakyRest(fail_times=1)
+    engine = _engine(rest)
+    batch = engine.enqueue("history_orders", {"orders": [{"ticket": 1}], "deals": []})
+    sent, failed = await engine.flush()
+    assert (sent, failed) == (0, 1)
+    assert engine.pending_count() == 1
+    assert engine.attempts_for(batch["batch_id"]) == 1
+    sent, failed = await engine.flush()
+    assert (sent, failed) == (1, 0)
+    assert [b["batch_id"] for b in rest.sent] == [batch["batch_id"]]
+    assert engine.attempts_for(batch["batch_id"]) == 0  # ack clears the count
+    assert engine.dead_letter_count() == 0
+
+
+@pytest.mark.unit
+async def test_non_retryable_failure_dead_letters_on_first_failure():
+    """A server rejection (accepted: false / malformed) can never
+    succeed on retry — it dead-letters immediately, not after 5."""
+    rest = _AlwaysFailingRest(retryable=False)
+    engine = _engine(rest)
+    batch = engine.enqueue("history_orders", {"orders": [{"ticket": 1}], "deals": []})
+    sent, failed = await engine.flush()
+    assert (sent, failed) == (0, 1)
+    assert engine.pending_count() == 0  # gone from the queue, terminal
+    assert engine.dead_letter_count() == 1
+    entry = engine.dead_letter_snapshot()[0]
+    assert entry["batch"]["batch_id"] == batch["batch_id"]
+    assert entry["attempts"] == 1
+    assert entry["error_code"] == "malformed_response"
+    # A second flush does NOT resurrect it.
+    sent, failed = await engine.flush()
+    assert (sent, failed) == (0, 0)
+    assert rest.calls == 1
+
+
+@pytest.mark.unit
+async def test_retryable_failure_dead_letters_after_max_attempts():
+    from nse_bridge.server.sync import SYNC_MAX_ATTEMPTS
+
+    rest = _AlwaysFailingRest(retryable=True)
+    engine = _engine(rest)
+    batch = engine.enqueue("history_orders", {"orders": [{"ticket": 1}], "deals": []})
+    for attempt in range(SYNC_MAX_ATTEMPTS - 1):
+        sent, failed = await engine.flush()
+        assert (sent, failed) == (0, 1)
+        assert engine.pending_count() == 1  # still queued, still retryable
+        assert engine.attempts_for(batch["batch_id"]) == attempt + 1
+    sent, failed = await engine.flush()
+    assert (sent, failed) == (0, 1)
+    assert engine.pending_count() == 0
+    assert engine.dead_letter_count() == 1
+    assert engine.dead_letter_snapshot()[0]["attempts"] == SYNC_MAX_ATTEMPTS
+    assert engine.dead_letter_snapshot()[0]["error_code"] == "server_unavailable"
+    assert rest.calls == SYNC_MAX_ATTEMPTS  # bounded — never an infinite silent retry
+
+
+@pytest.mark.unit
+async def test_unexpected_send_failure_requeues_instead_of_losing_batches():
+    """A non-ServerError from send_batch used to lose every batch the
+    flush had already popped. They must survive, in order."""
+
+    class _ExplodingRest:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+            self.armed = True
+
+        async def send_batch(self, batch: dict[str, Any]) -> SyncAck:
+            if self.armed:
+                self.armed = False
+                raise RuntimeError("transport blew up")
+            self.sent.append(batch)
+            return SyncAck(accepted=True, batch_id=batch["batch_id"])
+
+    rest = _ExplodingRest()
+    engine = _engine(rest)
+    engine.enqueue("history_orders", {"orders": [{"ticket": 1}], "deals": []})
+    engine.enqueue("history_orders", {"orders": [{"ticket": 2}], "deals": []})
+    sent, failed = await engine.flush()
+    assert (sent, failed) == (0, 1)
+    assert engine.pending_count() == 2
+    sent, failed = await engine.flush()
+    assert (sent, failed) == (2, 0)
+    assert [b["items"]["orders"][0]["ticket"] for b in rest.sent] == [1, 2]
+
+
+@pytest.mark.unit
+async def test_enqueue_replay_dedup_same_batch_id():
+    """Replaying a batch id that is already pending is a no-op — a
+    reconnect replay can never double-queue the same batch."""
+    rest = FakeRest()
+    engine = _engine(rest)
+    first = engine.enqueue(
+        "history_orders", {"orders": [{"ticket": 1}], "deals": []}, batch_id="01900000000000000000000001"
+    )
+    second = engine.enqueue(
+        "history_orders", {"orders": [{"ticket": 1}], "deals": []}, batch_id="01900000000000000000000001"
+    )
+    assert second is first
+    assert engine.pending_count() == 1
+    sent, failed = await engine.flush()
+    assert (sent, failed) == (1, 0)
+    assert len(rest.sent) == 1
+
+
+@pytest.mark.unit
+async def test_snapshot_supersede_drops_attempt_count():
+    """A superseded snapshot starts fresh: the old attempt count must
+    not leak into the new batch's retry budget."""
+    rest = _FlakyRest(fail_times=1)
+    engine = _engine(rest)
+    old = engine.enqueue("account", {"account": {"login": "1"}, "terminal": {}})
+    sent, failed = await engine.flush()
+    assert (sent, failed) == (0, 1)
+    assert engine.attempts_for(old["batch_id"]) == 1
+    new = engine.enqueue("account", {"account": {"login": "1"}, "terminal": {}})
+    assert engine.attempts_for(old["batch_id"]) == 0
+    assert new["batch_id"] != old["batch_id"]
+    sent, failed = await engine.flush()
+    assert (sent, failed) == (1, 0)
+
+
+@pytest.mark.unit
+async def test_reset_for_account_switch_clears_retry_and_dead_letter_state():
+    rest = _AlwaysFailingRest(retryable=False)
+    engine = _engine(rest)
+    batch = engine.enqueue("history_orders", {"orders": [{"ticket": 1}], "deals": []})
+    await engine.flush()
+    assert engine.dead_letter_count() == 1
+    engine.reset_for_account_switch()
+    assert engine.dead_letter_count() == 0
+    assert engine.attempts_for(batch["batch_id"]) == 0
+    assert engine._accepted_batch_ids == set()
+
+
+@pytest.mark.unit
+def test_queue_eviction_log_names_the_evicted_item():
+    """The eviction warning used to name the NEW item's id, not the
+    evicted one's — the log must identify what was actually lost."""
+    queue = BoundedPendingQueue(2, "test/q")
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(m), level="WARNING", format="{message}")
+    try:
+        queue.put({"batch_id": "evicted-one"}, item_id="evicted-one")
+        queue.put({"batch_id": "kept-one"}, item_id="kept-one")
+        queue.put({"batch_id": "new-one"}, item_id="new-one")
+    finally:
+        logger.remove(handler_id)
+    joined = "".join(messages)
+    assert "evicted-one" in joined
+    assert "new-one" not in joined
+
+
+@pytest.mark.unit
 def test_manifest_only_truthful_fields():
     manifest = build_manifest("dev-1")
     assert manifest["device_id"] == "dev-1"

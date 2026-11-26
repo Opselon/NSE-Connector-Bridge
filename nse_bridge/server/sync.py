@@ -31,6 +31,48 @@ Rules implemented here:
   the older one, so the queue can never grow from the 1 s / 2 s
   pollers. An evicted history batch is re-created from the checkpoint
   on the next cycle.
+- DROP POLICY (B4, stated once here — the queue, the checkpoint and
+  the dead-letter list implement it together, in this order):
+  1. Snapshots first: a newer ``account`` / ``positions`` batch
+     supersedes the older unsent one. The dropped snapshot is stale
+     by definition — the next poller cycle builds a fresher one — so
+     dropping it loses nothing.
+  2. History next, oldest first: when the 32-batch history queue is
+     full the OLDEST batch is evicted. It is the safest to drop
+     because the checkpoint has NOT advanced past it (the checkpoint
+     only moves on a server ack), so the next ``sync_history`` cycle
+     re-fetches exactly that range and re-creates the batch.
+  3. Dead-letter last, never silently: a batch that exhausts its
+     bounded retries (or fails non-retryably) leaves the queue for
+     the dead-letter list — recorded with its attempt count and error
+     code, surfaced as an ERROR telemetry event, and kept (bounded
+     32, oldest dead-letter entry discarded with a warning) until the
+     operator / next cycle deals with it. A dead-lettered HISTORY
+     batch is re-created on the next ``sync_history`` from the
+     checkpoint (new batch id, fresh attempts); a dead-lettered
+     snapshot is superseded by the next poller snapshot. Nothing is
+     ever dropped without a log line and a recovery path.
+- Retries (B4): a batch is retried at most ``SYNC_MAX_ATTEMPTS``
+  flush-level attempts (the REST client already retries each send
+  internally, bounded, with backoff — see ``server/rest.py``), with
+  the flush loop backing off exponentially between attempts
+  (``SYNC_FLUSH_BASE_INTERVAL_S`` doubling to
+  ``SYNC_FLUSH_BACKOFF_CAP_S``). Non-retryable failures (server
+  rejection ``accepted: false``, auth errors) dead-letter on the
+  FIRST failure — retrying them can never succeed. Retries reuse
+  the SAME ``batch_id`` (the idempotency key): if the server stored
+  the batch but the ack was lost, the retry is deduped server-side
+  instead of double-applied. There is no infinite silent retry: a
+  batch either gets accepted, or lands in the dead-letter list with
+  an ERROR log + telemetry event.
+- Resume without duplication (B4): on reconnect / restart the engine
+  restores the checkpoint from the durable store and re-fetches from
+  it — the checkpoint only ever advances on a server ack, so the
+  re-fetched range is exactly the undelivered range; replays reuse
+  the same batch id while queued and get a fresh id only when
+  re-created from the checkpoint after dead-lettering. Enqueueing a
+  batch id that is already pending is a no-op (returns the queued
+  batch) — a replay can never double-queue the same batch.
 - Ack 200 ``{accepted, batch_id}``; ``accepted: false`` carries an
   error (§3.6). Unacked batches stay queued; recovery after downtime
   uses the checkpoint + history range queries.
@@ -69,7 +111,7 @@ from loguru import logger
 from ..journal.accounting import label_account_snapshot, label_closed_position, surface_balance_operations
 from ..journal.collector import JournalCollector
 from ..timeutil import normalize_utc
-from .errors import ServerError
+from .errors import ServerError, ServerErrorCode
 from .queue import BoundedPendingQueue
 from .rest import RestClient
 from .sync_checkpoint import SyncCheckpointStore
@@ -81,6 +123,10 @@ if TYPE_CHECKING:
 __all__ = [
     "BATCH_KINDS",
     "EPOCH_ISO",
+    "SYNC_DEAD_LETTER_MAX_ITEMS",
+    "SYNC_FLUSH_BACKOFF_CAP_S",
+    "SYNC_FLUSH_BASE_INTERVAL_S",
+    "SYNC_MAX_ATTEMPTS",
     "SyncBatch",
     "SyncCheckpoint",
     "SyncEngine",
@@ -95,6 +141,42 @@ EPOCH_ISO = "1970-01-01T00:00:00Z"
 PAGE_SIZE = 500
 PAGE_PAUSE_S = 0.25
 MAX_PENDING_BATCHES = 32
+
+#: Bounded retries (B4): a batch gets at most this many flush-level
+#: send attempts before it dead-letters. Each send already retries
+#: internally in the REST client (bounded, with backoff), so this is
+#: the outer bound — the total worst case per batch is
+#: SYNC_MAX_ATTEMPTS * (RestClient.max_retries + 1) sends, after
+#: which the batch is terminal, never retried silently forever.
+SYNC_MAX_ATTEMPTS = 5
+#: Dead-letter list bound: oldest dead-letter entry is discarded
+#: WITH a warning when full (same discipline as every other queue).
+SYNC_DEAD_LETTER_MAX_ITEMS = 32
+#: Flush-loop cadence: base interval, doubling after each consecutive
+#: failed flush up to the cap (never a tight retry loop into a dead
+#: server — the 2026-11-26 live session queued 2 batches for 10+ min
+#: with no backoff story at all).
+SYNC_FLUSH_BASE_INTERVAL_S = 5.0
+SYNC_FLUSH_BACKOFF_CAP_S = 60.0
+
+#: Sync retry classification (B4, CONTRACT §3.6): the terminal codes
+#: are the ones that can never succeed on retry — fatal auth
+#: (``ServerError.is_fatal_auth``: key invalid/revoked, subscription
+#: expired, device limit, account not authorized, feature not
+#: enabled) and ``malformed_response`` (the server rejected the batch
+#: with ``accepted: false``). Everything else — 429 rate-limited,
+#: 5xx server-unavailable, transport errors — is retryable with
+#: backoff. Classification is by CODE, not by the ``retryable`` flag
+#: on the exception: a 5xx raised without the flag set (a test fake,
+#: a future caller) is still retryable, and a server rejection is
+#: still terminal even if some caller marked it retryable.
+_TERMINAL_SYNC_CODES = frozenset({ServerErrorCode.MALFORMED_RESPONSE})
+
+
+def _is_terminal_sync_error(exc: ServerError) -> bool:
+    """True when retrying this batch can never succeed (§3.6)."""
+    return exc.is_fatal_auth or exc.code in _TERMINAL_SYNC_CODES
+
 
 #: Item keys scanned (recursively) for broker times when advancing the
 #: checkpoint. A value that does not parse orders nothing (§3.3).
@@ -285,6 +367,22 @@ class SyncEngine:
         )
         # Latest unsent snapshot per kind (account / positions only).
         self._pending_snapshots: dict[str, dict[str, Any]] = {}
+        # B4 retry/dead-letter state. ``_attempts`` counts flush-level
+        # send attempts per batch id (reset on ack, on dead-letter, on
+        # supersede, on account switch). ``_dead_letter`` is the
+        # terminal state: entries are {"batch", "attempts",
+        # "error_code"} — a batch lands here only after exhausting its
+        # retries or failing non-retryably, and is never silently
+        # retried again. ``_accepted_batch_ids`` records every batch
+        # id the server acked in this process — sync_history advances
+        # the checkpoint ONLY for ids in this set (a batch that merely
+        # left the queue — evicted, dead-lettered — must never advance
+        # it; the pre-B4 "not pending means accepted" check did exactly
+        # that on the dead-letter path).
+        self._attempts: dict[str, int] = {}
+        self._dead_letter: list[dict[str, Any]] = []
+        self._accepted_batch_ids: set[str] = set()
+        self._consecutive_flush_failures = 0
         self._flush_lock = asyncio.Lock()
         self._flush_stop = asyncio.Event()
         self._flush_task: asyncio.Task | None = None
@@ -359,12 +457,31 @@ class SyncEngine:
     # ------------------------------------------------------------------
     # queueing
     # ------------------------------------------------------------------
-    def enqueue(self, kind: str, items: dict[str, Any]) -> dict[str, Any]:
+    def enqueue(self, kind: str, items: dict[str, Any], *, batch_id: str | None = None) -> dict[str, Any]:
         """Queue a batch. Snapshot kinds keep only the latest batch;
         history kinds go to the bounded 32-queue (oldest evicted with
-        a warning, §3.3). Returns the built batch."""
-        batch = build_batch(kind, items)
+        a warning, §3.3). Returns the built batch.
+
+        Replay dedup (B4): when ``batch_id`` is given and a batch
+        with that id is already pending, the queued batch is returned
+        unchanged — a replay after reconnect can never double-queue
+        the same batch. A superseded snapshot drops its attempt count
+        (the new snapshot starts fresh).
+        """
+        if batch_id is not None:
+            for pending in self._pending_snapshots.values():
+                if pending.get("batch_id") == batch_id:
+                    logger.debug("[SYNC] replay dedup: batch {} already queued, not re-queued", batch_id)
+                    return pending
+            for pending in self._pending_history.snapshot():
+                if pending.get("batch_id") == batch_id:
+                    logger.debug("[SYNC] replay dedup: batch {} already queued, not re-queued", batch_id)
+                    return pending
+        batch = build_batch(kind, items, batch_id=batch_id)
         if kind in ("account", "positions"):
+            previous = self._pending_snapshots.get(kind)
+            if previous is not None:
+                self._attempts.pop(previous.get("batch_id", ""), None)
             self._pending_snapshots[kind] = batch
         else:
             self._pending_history.put(batch, item_id=batch["batch_id"])
@@ -372,6 +489,68 @@ class SyncEngine:
 
     def pending_count(self) -> int:
         return len(self._pending_snapshots) + len(self._pending_history)
+
+    def dead_letter_count(self) -> int:
+        """How many batches reached the terminal dead-letter state."""
+        return len(self._dead_letter)
+
+    def dead_letter_snapshot(self) -> list[dict[str, Any]]:
+        """Dead-letter entries (oldest first): each is ``{"batch",
+        "attempts", "error_code"}``. The batch dicts are the queued
+        copies — callers must not mutate them."""
+        return [dict(entry) for entry in self._dead_letter]
+
+    def attempts_for(self, batch_id: str) -> int:
+        """Flush-level send attempts recorded for ``batch_id`` (0 when
+        never attempted / already acked / dead-lettered)."""
+        return self._attempts.get(batch_id, 0)
+
+    def _dead_letter_batch(self, batch: dict[str, Any], error_code: str) -> None:
+        """Move ``batch`` to the terminal dead-letter state (B4).
+
+        Bounded (32, oldest entry discarded with a warning), logged
+        as an ERROR, and reported as ERROR telemetry — a dead-lettered
+        batch is never retried silently. Recovery: a history batch is
+        re-created on the next ``sync_history`` from the checkpoint
+        (the checkpoint never advanced past it); a snapshot batch is
+        superseded by the next poller snapshot.
+        """
+        batch_id = str(batch.get("batch_id", "?"))
+        attempts = self._attempts.pop(batch_id, 0)
+        if len(self._dead_letter) >= SYNC_DEAD_LETTER_MAX_ITEMS:
+            dropped = self._dead_letter.pop(0)
+            logger.warning(
+                "[SYNC] dead-letter list full (max {}): discarded oldest dead-lettered batch {}",
+                SYNC_DEAD_LETTER_MAX_ITEMS,
+                dropped["batch"].get("batch_id"),
+            )
+        self._dead_letter.append({"batch": batch, "attempts": attempts, "error_code": error_code})
+        logger.error(
+            "[SYNC] batch {} (kind {}) dead-lettered after {} attempt(s): {} — "
+            "it will NOT be retried; history is re-created from the checkpoint on the next sync",
+            batch_id,
+            batch.get("kind"),
+            attempts,
+            error_code,
+        )
+        telemetry = getattr(self.ctx, "telemetry", None) if self.ctx is not None else None
+        if telemetry is not None:
+            telemetry.error(
+                "sync.batch_dead_letter",
+                component="server.sync",
+                error_code=error_code,
+                details={"batch_id": batch_id, "kind": batch.get("kind"), "attempts": attempts},
+            )
+
+    @staticmethod
+    def flush_delay_s(consecutive_failures: int, *, base_s: float = SYNC_FLUSH_BASE_INTERVAL_S) -> float:
+        """Flush-loop delay after ``consecutive_failures`` failed
+        flushes: base interval doubling per failure, capped — so a
+        dead server is not hammered every 5 s forever, and a
+        recovered server is retried within a minute at most."""
+        if consecutive_failures <= 0:
+            return base_s
+        return min(base_s * (2**consecutive_failures), SYNC_FLUSH_BACKOFF_CAP_S)
 
     def _is_batch_pending(self, batch_id: str) -> bool:
         """True when a batch is still queued (not yet accepted by the server)."""
@@ -392,6 +571,18 @@ class SyncEngine:
         key; the caller surfaces the distinct user-facing state. When
         enrolment is FAILED_AUTH (terminal for this key) nothing is
         sent at all — batches stay queued, unacked, for a future key.
+
+        Bounded retries (B4): every failed send counts one attempt
+        against that batch id. A retryable failure (429 / 5xx /
+        transport) is re-queued with the SAME batch id (idempotency
+        key — a lost ack never double-applies server-side) until
+        ``SYNC_MAX_ATTEMPTS``; then the batch dead-letters. A
+        non-retryable failure (server rejection ``accepted: false``,
+        auth errors) dead-letters on the FIRST failure — retrying it
+        can never succeed. An unexpected (non-ServerError) send
+        failure is treated as retryable, and the unsent batches are
+        re-queued before it propagates — a popped batch is never lost
+        to an exception. ``CancelledError`` re-queues then re-raises.
         """
         enrolment = getattr(self.ctx, "enrolment", None) if self.ctx is not None else None
         if enrolment is not None and enrolment.to_dict().get("state") == "failed_auth":
@@ -413,47 +604,107 @@ class SyncEngine:
                     break
                 batches.append(batch)
             for index, batch in enumerate(batches):
+                batch_id = str(batch.get("batch_id", "?"))
                 try:
                     ack = await self.rest.send_batch(batch)
-                    if ack.batch_id and ack.batch_id != batch["batch_id"]:
-                        logger.warning(
-                            "[SYNC] ack batch_id {} does not match sent {}",
-                            ack.batch_id,
-                            batch["batch_id"],
-                        )
-                    sent += 1
+                except asyncio.CancelledError:
+                    # Outcome unknown (may have reached the server) —
+                    # re-queue with the SAME batch id and let the
+                    # caller decide; never swallow a cancellation.
+                    self._requeue_in_order(batches[index:])
+                    raise
                 except ServerError as exc:
                     failed += 1
+                    self._attempts[batch_id] = self._attempts.get(batch_id, 0) + 1
+                    attempts = self._attempts[batch_id]
+                    # Terminal by CODE (§3.6 — see _is_terminal_sync_error),
+                    # never by the exception's retryable flag.
+                    dead_lettered = _is_terminal_sync_error(exc) or attempts >= SYNC_MAX_ATTEMPTS
+                    if dead_lettered:
+                        logger.warning(
+                            "[SYNC] batch {} (kind {}) failed non-retryably ({}) or exhausted "
+                            "its {} attempts — dead-lettering, keeping {} queued",
+                            batch_id,
+                            batch["kind"],
+                            exc.code.value,
+                            SYNC_MAX_ATTEMPTS,
+                            self.pending_count(),
+                        )
+                        self._dead_letter_batch(batch, exc.code.value)
+                    else:
+                        logger.warning(
+                            "[SYNC] batch {} (kind {}) failed: {} (attempt {}/{}) — keeping {} queued",
+                            batch_id,
+                            batch["kind"],
+                            exc.code.value,
+                            attempts,
+                            SYNC_MAX_ATTEMPTS,
+                            self.pending_count(),
+                        )
+                        telemetry = getattr(self.ctx, "telemetry", None) if self.ctx is not None else None
+                        if telemetry is not None:
+                            telemetry.warn(
+                                "sync.batch_failed",
+                                component="server.sync",
+                                error_code=exc.code.value,
+                                details={
+                                    "batch_id": batch_id,
+                                    "kind": batch["kind"],
+                                    "attempts": attempts,
+                                    "pending": self.pending_count(),
+                                },
+                            )
+                    # Re-queue every batch AFTER the failed one, in
+                    # original order (they were already popped). The
+                    # failed batch itself is re-queued too, unless it
+                    # just dead-lettered.
+                    rest = batches[index + 1 :]
+                    if dead_lettered:
+                        self._requeue_in_order(rest)
+                    else:
+                        self._requeue_in_order([batch] + rest)
+                    break
+                except Exception as exc:  # noqa: BLE001 — an unexpected send failure must not lose popped batches
+                    failed += 1
+                    self._attempts[batch_id] = self._attempts.get(batch_id, 0) + 1
+                    attempts = self._attempts[batch_id]
                     logger.warning(
-                        "[SYNC] batch {} (kind {}) failed: {} — keeping {} queued",
-                        batch["batch_id"],
+                        "[SYNC] batch {} (kind {}) failed unexpectedly: {} (attempt {}/{}) — keeping {} queued",
+                        batch_id,
                         batch["kind"],
-                        exc.code.value,
+                        type(exc).__name__,
+                        attempts,
+                        SYNC_MAX_ATTEMPTS,
                         self.pending_count(),
                     )
-                    telemetry = getattr(self.ctx, "telemetry", None) if self.ctx is not None else None
-                    if telemetry is not None:
-                        telemetry.warn(
-                            "sync.batch_failed",
-                            component="server.sync",
-                            error_code=exc.code.value,
-                            details={
-                                "batch_id": batch["batch_id"],
-                                "kind": batch["kind"],
-                                "pending": self.pending_count(),
-                            },
-                        )
-                    # Re-queue the failed batch AND every batch after
-                    # it, in original order (they were already popped).
-                    self._requeue_in_order(batches[index:])
+                    if attempts >= SYNC_MAX_ATTEMPTS:
+                        self._dead_letter_batch(batch, type(exc).__name__)
+                        self._requeue_in_order(batches[index + 1 :])
+                    else:
+                        self._requeue_in_order(batches[index:])
                     break
+                if ack.batch_id and ack.batch_id != batch["batch_id"]:
+                    logger.warning(
+                        "[SYNC] ack batch_id {} does not match sent {}",
+                        ack.batch_id,
+                        batch["batch_id"],
+                    )
+                self._attempts.pop(batch_id, None)
+                self._accepted_batch_ids.add(batch_id)
+                sent += 1
+        if failed:
+            self._consecutive_flush_failures += 1
+        else:
+            self._consecutive_flush_failures = 0
         return sent, failed
 
     def _requeue_in_order(self, batches: list[dict[str, Any]]) -> None:
         """Put unsent batches back in original order.
 
         Snapshot kinds go back to the latest slot; history kinds go
-        back to the FRONT of the bounded queue, in order.
+        back to the FRONT of the bounded queue, in order. A batch
+        already queued (replayed concurrently) is skipped, never
+        duplicated.
         """
         history = [b for b in batches if b["kind"] not in ("account", "positions")]
         for batch in batches:
@@ -462,18 +713,29 @@ class SyncEngine:
         if history:
             remaining = self._pending_history.clear()
             for batch in history + remaining:
+                if self._is_batch_pending(str(batch.get("batch_id", ""))):
+                    continue
                 self._pending_history.put(batch, item_id=batch.get("batch_id"))
 
     async def flush_loop(self, interval_s: float = 5.0) -> None:
-        """Background flusher (started by the app lifespan)."""
+        """Background flusher (started by the app lifespan).
+
+        After consecutive failed flushes the wait backs off
+        exponentially (``flush_delay_s``: 5 s → 10 s → 20 s → 40 s,
+        capped at 60 s) instead of hammering a dead server every 5 s
+        forever; the first successful flush resets the delay to the
+        base interval.
+        """
         self._flush_stop.clear()
         while not self._flush_stop.is_set():
             try:
                 await self.flush()
             except Exception as exc:  # noqa: BLE001 — flusher must not die
+                self._consecutive_flush_failures += 1
                 logger.warning("[SYNC] flush loop error: {}", type(exc).__name__)
             try:
-                await asyncio.wait_for(self._flush_stop.wait(), timeout=interval_s)
+                delay = self.flush_delay_s(self._consecutive_flush_failures, base_s=interval_s)
+                await asyncio.wait_for(self._flush_stop.wait(), timeout=delay)
             except TimeoutError:
                 pass
 
@@ -568,16 +830,16 @@ class SyncEngine:
                 # was accepted. If the process restarted after the
                 # checkpoint persisted but before the (in-memory
                 # re-queued) batch was flushed, that range was never
-                # re-fetched — silent history loss. A still-pending batch
-                # is retried and the checkpoint stays behind, so a
-                # restart re-fetches it. Soundness: flush() holds
-                # _flush_lock for the whole send loop, and this check
-                # runs after our flush() returned — no send is in flight
-                # for this batch, so "not pending" means accepted, not
-                # "mid-send". (Eviction from the bounded queue cannot
-                # occur here: each page is flushed before the next is
-                # enqueued.)
-                if not self._is_batch_pending(batch["batch_id"]):
+                # re-fetched — silent history loss. B4 tightens the
+                # check itself: "not pending" is NOT proof of delivery
+                # (a dead-lettered or queue-evicted batch is also not
+                # pending), so the checkpoint advances only for batch
+                # ids the flush actually acked (``_accepted_batch_ids``).
+                # A still-pending batch is retried and the checkpoint
+                # stays behind, so a restart re-fetches it; a
+                # dead-lettered batch is re-created from the checkpoint
+                # on the next cycle with a fresh batch id.
+                if batch["batch_id"] in self._accepted_batch_ids:
                     # R1: broker-local epochs shift by the configured
                     # offset; without a ctx there is no configured
                     # offset (0 = UTC).
@@ -639,6 +901,13 @@ class SyncEngine:
         self._pending_snapshots.clear()
         self._last_positions = None
         self._last_orders = None
+        # B4: the old account's retry/dead-letter state must not leak
+        # into the new account — its batches are gone, so their
+        # attempts, dead letters and acks go with them.
+        self._attempts.clear()
+        self._dead_letter.clear()
+        self._accepted_batch_ids.clear()
+        self._consecutive_flush_failures = 0
         if self.journal is not None:
             # The new account must not inherit the old account's dedup
             # state or events (§7.3).

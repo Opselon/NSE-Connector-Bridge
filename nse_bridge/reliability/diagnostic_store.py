@@ -179,7 +179,10 @@ class DurableDiagnosticStore:
     # ------------------------------------------------------------------
     def _rewrite_locked(self, records: list[dict[str, Any]]) -> None:
         """Write ``records`` atomically (temp file + replace). Enforces
-        the byte cap by dropping the oldest records first."""
+        the byte cap by dropping the oldest records first. Crash-safe
+        (B4): the temp file is fsynced before the replace and the
+        directory is fsynced after it, so a crash leaves the old file
+        or the new file, never a torn one."""
         payload = "\n".join(json.dumps(r, ensure_ascii=False, default=str) for r in records)
         if payload:
             payload += "\n"
@@ -197,8 +200,21 @@ class DurableDiagnosticStore:
             encoded = payload.encode("utf-8")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.write_bytes(encoded)
+        with open(tmp, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, self.path)
+        try:
+            dir_fd = os.open(self.path.parent, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dir_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(dir_fd)
 
 
 class DurableDiagnosticQueue(DiagnosticQueue):
