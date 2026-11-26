@@ -79,6 +79,12 @@ except Exception:  # noqa: BLE001 — a backend missing on this host is not fata
     pass
 
 datas += [("nse_bridge/gui/static", "nse_bridge/gui/static")]
+# The application icon as a runtime data file (in addition to the
+# exe resource below): the splash window and the pywebview window
+# load it at runtime via nse_bridge.gui.icon.app_icon_path()
+# (LoadImageW / webview.start(icon=...)). Without this the frozen
+# exe has no .ico file to load — only the exe resource remains.
+datas += [("assets/icon.ico", "assets")]
 
 a = Analysis(
     ["run_bridge.py"],

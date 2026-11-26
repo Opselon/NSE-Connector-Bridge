@@ -82,3 +82,32 @@ def test_icon_is_bundled_by_packaging() -> None:
     assert 'exe_kwargs["icon"] = "assets/icon.ico"' in spec, "bridge.spec does not embed assets/icon.ico"
     iss = (REPO_ROOT / "windows" / "NSE-MT5-Bridge.iss").read_text(encoding="utf-8")
     assert "SetupIconFile=..\\assets\\icon.ico" in iss, "installer does not use assets/icon.ico"
+
+
+def test_icon_is_bundled_as_runtime_data_in_spec() -> None:
+    """The frozen exe must ALSO ship the .ico as data: the splash
+    window and the pywebview window load it at runtime from
+    ``sys._MEIPASS`` — the exe resource alone gives them no file to
+    load (v1.4.0 shipped the resource but no window ever set an
+    icon from it)."""
+    spec = (REPO_ROOT / "bridge.spec").read_text(encoding="utf-8")
+    assert '("assets/icon.ico", "assets")' in spec, "bridge.spec does not bundle assets/icon.ico as data"
+
+
+def test_icon_path_resolves_to_committed_asset() -> None:
+    """The runtime resolver finds exactly the committed asset."""
+    from nse_bridge.gui.icon import app_icon_path
+
+    assert app_icon_path() == ICON_PATH
+
+
+def test_splash_and_main_window_load_the_icon() -> None:
+    """The runtime wiring: the splash sets WM_SETICON from the
+    bundled icon (see test_b1_nonblocking_startup for the
+    behavioural pin) and the native window passes it to
+    ``webview.start(icon=...)``."""
+    splash_src = (REPO_ROOT / "nse_bridge" / "gui" / "splash.py").read_text(encoding="utf-8")
+    assert "set_window_icon" in splash_src, "splash never sets a window icon"
+    assert "app_icon_path" in splash_src, "splash never resolves the bundled icon"
+    window_src = (REPO_ROOT / "nse_bridge" / "gui" / "window.py").read_text(encoding="utf-8")
+    assert 'start_kwargs["icon"]' in window_src, "native window never passes an icon to webview.start"

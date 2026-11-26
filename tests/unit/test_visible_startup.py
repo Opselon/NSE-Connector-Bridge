@@ -62,21 +62,40 @@ def _reset_splash():
 def fake_windll(monkeypatch):
     """A fake ``ctypes.windll`` so the Win32 splash/tray/dialog code
     runs on Linux CI. Return values are real ints (handles), never
-    MagicMocks, so the ctypes Structure assignments behave."""
+    MagicMocks, so the ctypes Structure assignments behave.
+
+    Records which thread created windows (``_nse_created_on``) and
+    which thread pumped messages (``_nse_pumped_on``): the v1.4.0
+    hang was a window created on one thread and pumped on another,
+    so the tests pin them to the SAME thread."""
     windll = MagicMock()
     user32 = windll.user32
     user32.RegisterClassW.return_value = 1
-    user32.CreateWindowExW.return_value = 0x1000
+    created_on: list[int] = []
+    pumped_on: list[int] = []
+
+    def _create_window(*args, **kwargs):
+        created_on.append(threading.get_ident())
+        return 0x1000
+
+    def _get_message(*args, **kwargs):
+        pumped_on.append(threading.get_ident())
+        return 0  # pump loop exits immediately
+
+    user32.CreateWindowExW.side_effect = _create_window
     user32.GetSystemMetrics.return_value = 1920
-    user32.GetMessageW.return_value = 0  # pump loop exits immediately
+    user32.GetMessageW.side_effect = _get_message
     user32.SetWindowTextW.return_value = 1
+    user32.SendMessageTimeoutW.return_value = 1
     user32.PostMessageW.return_value = 1
+    user32.PostThreadMessageW.return_value = 1
     user32.PostQuitMessage.return_value = 1
     user32.ShowWindow.return_value = True
     user32.UpdateWindow.return_value = True
     user32.DefWindowProcW.return_value = 0
     user32.LoadCursorW.return_value = 0
     user32.LoadIconW.return_value = 0x2000
+    user32.LoadImageW.return_value = 0x2000
     user32.CreatePopupMenu.return_value = 0x5000
     user32.AppendMenuW.return_value = True
     user32.SetForegroundWindow.return_value = True
@@ -91,6 +110,8 @@ def fake_windll(monkeypatch):
     windll.shell32.Shell_NotifyIconW.return_value = True
     windll.shell32.ExtractIconW.return_value = 0x4000
     windll.gdi32.CreateFontW.return_value = 0x6000
+    windll._nse_created_on = created_on
+    windll._nse_pumped_on = pumped_on
     monkeypatch.setattr(ctypes, "windll", windll, raising=False)
     monkeypatch.setattr(sys, "platform", "win32")
     return windll
@@ -304,17 +325,70 @@ def test_splash_windows_path_shows_updates_and_hides(fake_windll):
     texts = [call.args[3].value for call in timeout_calls]
     assert "Starting server…" in texts
     # B1: the progress bar moves with StartupProgress (PBM_SETPOS).
+    # Post-release fix: the move goes through the BOUNDED
+    # SendMessageTimeoutW — a plain SendMessageW to a window whose
+    # owner thread stopped pumping blocks the caller forever.
     splash.set_splash_progress(0.5)
     pos_calls = [
         call
-        for call in fake_windll.user32.SendMessageW.call_args_list
+        for call in fake_windll.user32.SendMessageTimeoutW.call_args_list
         if call.args[1] == 0x0402  # PBM_SETPOS
     ]
     assert pos_calls and pos_calls[-1].args[2] == 50
+    assert pos_calls[-1].args[4] == 0x0002  # SMTO_ABORTIFHUNG
+    assert not [call for call in fake_windll.user32.SendMessageW.call_args_list if call.args[1] == 0x0402], (
+        "progress must never use an unbounded SendMessageW"
+    )
     splash.hide_splash()
     assert shown.visible is False
     fake_windll.user32.PostMessageW.assert_called()
     assert splash.splash_visible() is False
+
+
+def test_tray_window_created_and_pumped_on_same_thread(fake_windll):
+    """Same Win32 thread-affinity rule as the splash: the tray's
+    message window must be created on its pump thread, or its
+    right-click menu / double-click / Quit callbacks are never
+    delivered (v1.4.0 created it on the main thread and pumped it
+    on ``nse-tray-pump``)."""
+    tray = start_tray(on_open=lambda: None)
+    assert tray.available is True
+    created_on = fake_windll._nse_created_on
+    pumped_on = fake_windll._nse_pumped_on
+    assert created_on, "no tray window was created"
+    assert pumped_on, "no tray message pump ran"
+    assert len(set(created_on)) == 1 and len(set(pumped_on)) == 1
+    assert created_on[0] == pumped_on[0]
+    assert created_on[0] != threading.get_ident()
+    tray.stop()
+    assert tray.available is False
+
+
+def test_open_window_passes_bundled_icon_to_webview_start_on_windows(monkeypatch):
+    """The native window's icon comes from ``webview.start(icon=...)``
+    on Windows (``create_window`` takes no icon): the WinForms
+    backend uses it, otherwise it falls back to the exe's icon
+    resource."""
+    import nse_bridge.gui.window as window_mod
+
+    shown_event = threading.Event()
+    started_kwargs: dict = {}
+    fake_window = SimpleNamespace(events=SimpleNamespace(shown=shown_event), destroy=lambda: None)
+
+    def _start(*args, **kwargs):
+        started_kwargs.update(kwargs)
+        shown_event.set()
+
+    fake_webview = SimpleNamespace(
+        create_window=lambda *a, **k: fake_window,
+        start=_start,
+        windows=[fake_window],
+    )
+    monkeypatch.setitem(sys.modules, "webview", fake_webview)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(window_mod, "app_icon_path", lambda: Path("/fake/assets/icon.ico"))
+    assert window_mod.open_window("http://127.0.0.1:8788/ui", open_timeout_s=5.0) == "webview"
+    assert started_kwargs.get("icon") == "/fake/assets/icon.ico"
 
 
 def test_splash_degrades_without_tkinter(monkeypatch, no_tkinter):

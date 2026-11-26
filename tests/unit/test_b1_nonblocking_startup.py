@@ -57,24 +57,46 @@ def _reset_splash():
 def fake_windll(monkeypatch):
     """A fake ``ctypes.windll`` so the Win32 splash code runs on
     Linux CI. Return values are real ints (handles), never
-    MagicMocks, so the ctypes Structure assignments behave."""
+    MagicMocks, so the ctypes Structure assignments behave.
+
+    Records which thread created windows (``_nse_created_on``) and
+    which thread pumped messages (``_nse_pumped_on``): the v1.4.0
+    hang was a window created on one thread and pumped on another,
+    so the tests pin them to the SAME thread."""
     windll = MagicMock()
     user32 = windll.user32
     user32.RegisterClassW.return_value = 1
-    user32.CreateWindowExW.return_value = 0x1000
+    created_on: list[int] = []
+    pumped_on: list[int] = []
+
+    def _create_window(*args, **kwargs):
+        created_on.append(threading.get_ident())
+        return 0x1000
+
+    def _get_message(*args, **kwargs):
+        pumped_on.append(threading.get_ident())
+        return 0  # pump loop exits immediately
+
+    user32.CreateWindowExW.side_effect = _create_window
     user32.GetSystemMetrics.return_value = 1920
-    user32.GetMessageW.return_value = 0  # pump loop exits immediately
+    user32.GetMessageW.side_effect = _get_message
     user32.SetWindowTextW.return_value = 1
+    user32.SendMessageTimeoutW.return_value = 1
     user32.PostMessageW.return_value = 1
+    user32.PostThreadMessageW.return_value = 1
     user32.PostQuitMessage.return_value = 1
     user32.ShowWindow.return_value = True
     user32.UpdateWindow.return_value = True
     user32.DefWindowProcW.return_value = 0
     user32.LoadCursorW.return_value = 0
     user32.LoadIconW.return_value = 0x2000
+    user32.LoadImageW.return_value = 0x2000
     user32.MessageBoxW.return_value = 1
     windll.kernel32.GetModuleHandleW.return_value = 0x3000
     windll.gdi32.CreateFontW.return_value = 0x6000
+    windll.shell32.ExtractIconW.return_value = 0x4000
+    windll._nse_created_on = created_on
+    windll._nse_pumped_on = pumped_on
     monkeypatch.setattr(ctypes, "windll", windll, raising=False)
     monkeypatch.setattr(sys, "platform", "win32")
     return windll
@@ -194,6 +216,166 @@ def test_splash_watchdog_does_not_hide_a_newer_splash(fake_windll):
     time.sleep(0.6)  # past the FIRST splash's lifetime
     assert splash.splash_visible() is True
     splash.hide_splash()
+
+
+def test_splash_window_created_and_pumped_on_same_thread(fake_windll):
+    """The v1.4.0 hang, pinned: the splash was created on the main
+    thread and pumped on ``nse-splash-pump`` — but ``GetMessageW``
+    only ever retrieves the CALLING thread's messages, so the pump
+    blocked forever on its own empty queue while the window's real
+    messages were never dispatched and Windows flagged it
+    "(Not Responding)". Creation and pumping must happen on the
+    SAME thread, and that thread must not be the caller's."""
+    from nse_bridge.gui import splash
+
+    shown = splash.show_splash("NSE MT5 Bridge v1.4.0", "Starting…")
+    assert shown.visible is True
+    created_on = fake_windll._nse_created_on
+    pumped_on = fake_windll._nse_pumped_on
+    assert created_on, "no splash window was created"
+    assert pumped_on, "no splash message pump ran"
+    assert len(set(created_on)) == 1 and len(set(pumped_on)) == 1
+    assert created_on[0] == pumped_on[0]
+    assert created_on[0] != threading.get_ident()
+    splash.hide_splash()
+    assert splash.splash_visible() is False
+
+
+def test_splash_hide_really_destroys_window(fake_windll):
+    """``hide()`` only reports closed once the pump thread has
+    actually exited: the posted ``WM_CLOSE`` is dispatched by the
+    owner pump, the window is destroyed, ``WM_DESTROY`` posts
+    ``WM_QUIT``. v1.4.0 returned after a 2 s join with the window
+    still up and marked it closed anyway."""
+    from nse_bridge.gui import splash
+
+    shown = splash.show_splash()
+    assert shown.visible is True
+    splash.hide_splash()
+    assert shown.visible is False
+    assert shown._pump_thread is None or not shown._pump_thread.is_alive()
+    close_calls = [
+        call
+        for call in fake_windll.user32.PostMessageW.call_args_list
+        if call.args[1] == 0x0010  # WM_CLOSE
+    ]
+    assert close_calls, "expected WM_CLOSE to be posted to the splash window"
+
+
+def test_splash_progress_update_is_bounded(fake_windll):
+    """A progress update must never block the caller: it goes
+    through ``SendMessageTimeoutW``/``SMTO_ABORTIFHUNG``, never a
+    plain ``SendMessageW`` (which blocks forever when the owner
+    thread stops pumping)."""
+    from nse_bridge.gui import _win32, splash
+
+    shown = splash.show_splash()
+    assert shown.visible is True
+    splash.set_splash_progress(0.5)
+    pos_calls = [
+        call for call in fake_windll.user32.SendMessageTimeoutW.call_args_list if call.args[1] == _win32.PBM_SETPOS
+    ]
+    assert pos_calls and pos_calls[-1].args[2] == 50
+    assert pos_calls[-1].args[4] == _win32.SMTO_ABORTIFHUNG
+    assert not [call for call in fake_windll.user32.SendMessageW.call_args_list if call.args[1] == _win32.PBM_SETPOS], (
+        "progress must never use an unbounded SendMessageW"
+    )
+    splash.hide_splash()
+
+
+def test_splash_sets_window_icon(fake_windll):
+    """The splash window carries the NSE icon: the bundled ``.ico``
+    is loaded and set via ``WM_SETICON`` (big + small — title bar
+    and taskbar). v1.4.0 registered the class with ``hIcon=None``
+    and never set an icon, so Windows showed the generic icon."""
+    from nse_bridge.gui import _win32, splash
+
+    shown = splash.show_splash()
+    assert shown.visible is True
+    load_calls = fake_windll.user32.LoadImageW.call_args_list
+    assert load_calls, "expected the bundled icon to be loaded"
+    assert load_calls[0].args[1].endswith("icon.ico")
+    icon_calls = [call for call in fake_windll.user32.SendMessageW.call_args_list if call.args[1] == _win32.WM_SETICON]
+    assert icon_calls, "expected WM_SETICON on the splash window"
+    assert {call.args[2] for call in icon_calls} == {_win32.ICON_BIG, _win32.ICON_SMALL}
+    splash.hide_splash()
+
+
+def test_splash_watchdog_hides_splash_even_after_current_cleared(fake_windll):
+    """The 180 s watchdog must rescue a splash whose ``hide()``
+    already ran once without closing it: v1.4.0's watchdog checked
+    ``_CURRENT is splash`` and ``main()``'s hide had already cleared
+    ``_CURRENT``, so it never fired. The watchdog acts on the splash
+    object it was started for, not on ``_CURRENT``."""
+    from nse_bridge.gui import splash
+
+    shown = splash.show_splash(max_lifetime_s=0.3)
+    assert shown.visible is True
+    # Simulate main() having hidden once (clearing _CURRENT) while
+    # the window itself stayed up.
+    splash._CURRENT = None
+    assert shown.visible is True
+    deadline = time.monotonic() + 5
+    while shown.visible and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert shown.visible is False
+
+
+def test_splash_hide_recovers_when_close_is_never_dispatched(monkeypatch):
+    """The v1.4.0 hang, end to end at the seam: the pump thread is
+    stuck — its ``GetMessageW`` never returns, so the posted
+    ``WM_CLOSE`` is never dispatched and the window never destroys
+    itself. ``hide()`` must still get rid of the window via the
+    bounded ``WM_QUIT``-to-the-pump-thread fallback instead of
+    reporting success and orphaning a dead window."""
+    quit_posted = threading.Event()
+    windll = MagicMock()
+    user32 = windll.user32
+    user32.RegisterClassW.return_value = 1
+    user32.CreateWindowExW.return_value = 0x1000
+    user32.GetSystemMetrics.return_value = 1920
+
+    def _get_message(*args, **kwargs):
+        # A wedged pump: blocks until WM_QUIT is posted to the thread.
+        quit_posted.wait(timeout=10)
+        return 0
+
+    def _post_thread_message(*args, **kwargs):
+        quit_posted.set()
+        return 1
+
+    user32.GetMessageW.side_effect = _get_message
+    user32.SetWindowTextW.return_value = 1
+    user32.SendMessageTimeoutW.return_value = 1
+    user32.PostMessageW.return_value = 1
+    user32.PostThreadMessageW.side_effect = _post_thread_message
+    user32.PostQuitMessage.return_value = 1
+    user32.ShowWindow.return_value = True
+    user32.UpdateWindow.return_value = True
+    user32.DefWindowProcW.return_value = 0
+    user32.LoadCursorW.return_value = 0
+    user32.LoadIconW.return_value = 0x2000
+    user32.LoadImageW.return_value = 0x2000
+    user32.MessageBoxW.return_value = 1
+    windll.kernel32.GetModuleHandleW.return_value = 0x3000
+    windll.gdi32.CreateFontW.return_value = 0x6000
+    windll.shell32.ExtractIconW.return_value = 0x4000
+    monkeypatch.setattr(ctypes, "windll", windll, raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    from nse_bridge.gui import splash
+
+    started = time.monotonic()
+    shown = splash.show_splash()
+    assert shown.visible is True
+    assert shown._pump_thread is not None and shown._pump_thread.is_alive()
+    splash.hide_splash()
+    assert time.monotonic() - started < 10.0
+    assert shown.visible is False
+    assert not shown._pump_thread.is_alive()
+    # The polite WM_CLOSE alone did not unstick the pump — the
+    # WM_QUIT fallback had to be used.
+    assert user32.PostThreadMessageW.call_args_list
 
 
 # ---------------------------------------------------------------------------

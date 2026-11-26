@@ -28,10 +28,18 @@ the open stays on the caller's thread and only the watchdog is a
 separate thread; ``webview.windows`` is populated by
 ``create_window`` already, so it cannot tell "loop running" from
 "created but hung" — the window's ``events.shown`` is the signal.
+``create_window`` takes no icon: the native window's icon comes
+from ``webview.start(icon=...)`` — the WinForms backend uses that
+file when set and otherwise falls back to the exe's first icon
+resource (``ExtractIconW(sys.executable, 0)``) — so on Windows the
+bundled ``assets/icon.ico`` is passed explicitly (it is the same
+asset ``bridge.spec`` embeds in the exe); other platforms leave
+the default.
 """
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from typing import Any
@@ -39,6 +47,7 @@ from typing import Any
 from loguru import logger
 
 from .browser import open_dashboard
+from .icon import app_icon_path
 
 #: Return values of :func:`open_window`.
 WINDOW_WEBVIEW = "webview"
@@ -139,7 +148,15 @@ def open_window(
             watchdog.start()
             # ``start(func)`` invokes func as the GUI loop starts;
             # the watchdog's real signal is the window's shown event.
-            webview.start(lambda: started.set())
+            # Windows only: hand pywebview the bundled icon — its
+            # WinForms backend uses it for the window/taskbar icon,
+            # falling back to the exe's icon resource without it.
+            start_kwargs: dict[str, Any] = {}
+            if sys.platform == "win32":
+                icon_path = app_icon_path()
+                if icon_path is not None:
+                    start_kwargs["icon"] = str(icon_path)
+            webview.start(lambda: started.set(), **start_kwargs)
             if timed_out.is_set():
                 return WINDOW_TIMEOUT
             return WINDOW_WEBVIEW
