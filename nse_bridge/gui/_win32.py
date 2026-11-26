@@ -31,8 +31,18 @@ WM_DESTROY = 0x0002
 WM_COMMAND = 0x0111
 WM_SETFONT = 0x0030
 WM_SETTEXT = 0x000C
+WM_SETICON = 0x0080
+WM_QUIT = 0x0012
 WM_RBUTTONUP = 0x0205
 WM_LBUTTONDBLCLK = 0x0203
+
+#: ``LoadImageW`` image type / load flag for loading an .ico file.
+IMAGE_ICON = 1
+LR_LOADFROMFILE = 0x00000010
+
+#: ``WM_SETICON`` icon sizes.
+ICON_SMALL = 0
+ICON_BIG = 1
 
 #: ``SendMessageTimeoutW`` flag: return at once when the target
 #: thread is hung instead of blocking the caller.
@@ -143,6 +153,8 @@ def _configure(user32: Any) -> None:
         user32.SetWindowTextW.restype = wintypes.BOOL
         user32.PostMessageW.argtypes = [wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM]
         user32.PostMessageW.restype = wintypes.BOOL
+        user32.PostThreadMessageW.argtypes = [wintypes.DWORD, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM]
+        user32.PostThreadMessageW.restype = wintypes.BOOL
         user32._nse_prototypes_set = True
     except Exception:  # noqa: BLE001, S110 — a fake/test user32 may not accept prototypes; calls still go through
         pass
@@ -154,10 +166,18 @@ def def_window_proc(user32: Any, hwnd: int, msg: int, wparam: int, lparam: int) 
     return int(user32.DefWindowProcW(hwnd, msg, wparam, lparam))
 
 
-def register_class(user32: Any, name: str, wndproc: Any, hinstance: int) -> bool:
+def register_class(user32: Any, name: str, wndproc: Any, hinstance: int, hicon: int = 0) -> bool:
     """Register a window class; ``False`` when registration failed
     (e.g. the class already exists — which is fine, the caller retries
-    creation anyway and treats failure there as unavailable)."""
+    creation anyway and treats failure there as unavailable).
+
+    ``hicon`` is the class icon (0 = none: Windows then shows the
+    generic application icon in the title bar). A class registered
+    earlier in the process keeps ITS icon — re-registering with a
+    different icon does not replace it — so callers must also set
+    the per-window icon with :func:`set_window_icon`, which always
+    wins for that window.
+    """
     _configure(user32)
     try:
         cls = WNDCLASSW()
@@ -166,7 +186,7 @@ def register_class(user32: Any, name: str, wndproc: Any, hinstance: int) -> bool
         cls.cbClsExtra = 0
         cls.cbWndExtra = 0
         cls.hInstance = hinstance
-        cls.hIcon = None
+        cls.hIcon = hicon or None
         cls.hCursor = user32.LoadCursorW(None, IDC_ARROW)
         cls.hbrBackground = _BRUSH_DIALOG
         cls.lpszMenuName = None
@@ -227,6 +247,51 @@ def create_child(
         return int(hwnd or 0)
     except Exception:  # noqa: BLE001
         return 0
+
+
+def load_icon_file(user32: Any, path: str, size: int = 0) -> int:
+    """Load an ``.ico`` file as an ``HICON`` (``0`` on failure).
+
+    ``size`` 0 loads the icon's native (largest) size. Best-effort:
+    a missing file or an unloadable icon is "no icon", never an error.
+    """
+    try:
+        user32.LoadImageW.restype = ctypes.c_void_p
+    except Exception:  # noqa: BLE001, S110 — a fake/test user32 may not accept prototypes
+        pass
+    try:
+        icon = user32.LoadImageW(None, path, IMAGE_ICON, size, size, LR_LOADFROMFILE)
+        return int(icon or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def load_icon_from_executable(shell32: Any, exe_path: str) -> int:
+    """The first icon resource embedded in ``exe_path`` (``0`` when
+    the exe carries none — e.g. a dev run from a plain python.exe)."""
+    try:
+        shell32.ExtractIconW.restype = _HICON
+    except Exception:  # noqa: BLE001, S110
+        pass
+    try:
+        return int(shell32.ExtractIconW(None, exe_path, 0) or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def set_window_icon(user32: Any, hwnd: int, hicon: int) -> None:
+    """Set a window's big (title bar / taskbar / Alt-Tab) and small
+    (title bar) icons. Must be called from the window's owning thread
+    — a cross-thread ``SendMessageW`` to a hung owner blocks the
+    caller, which is exactly the hang this module exists to avoid.
+    No-op for a zero icon."""
+    if not hicon:
+        return
+    try:
+        user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon)
+        user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon)
+    except Exception:  # noqa: BLE001, S110
+        pass
 
 
 def center_on_screen(user32: Any, width: int, height: int) -> tuple[int, int]:
@@ -296,10 +361,32 @@ def set_progress_range(user32: Any, hwnd: int, maximum: int = 100) -> None:
         pass
 
 
-def set_progress_pos(user32: Any, hwnd: int, pos: int) -> None:
-    """Move a progress bar to ``pos`` (best-effort, never raises)."""
+def set_progress_pos(user32: Any, hwnd: int, pos: int, timeout_ms: int = 500) -> None:
+    """Move a progress bar to ``pos`` (best-effort, never raises).
+
+    Bounded via ``SendMessageTimeoutW``/``SMTO_ABORTIFHUNG`` like
+    :func:`set_text_timeout`: a plain ``SendMessageW`` to a window
+    whose owner thread stopped pumping blocks the caller forever —
+    the v1.4.0 splash called this from the main thread while its
+    pump was wedged, so a progress update could freeze startup.
+    """
+    _configure(user32)
     try:
-        user32.SendMessageW(hwnd, PBM_SETPOS, pos, 0)
+        user32.SendMessageTimeoutW.argtypes = [
+            wintypes.HWND,
+            ctypes.c_uint,
+            wintypes.WPARAM,
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_ssize_t),
+        ]
+        user32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
+    except Exception:  # noqa: BLE001, S110 — a fake/test user32 may not accept prototypes
+        pass
+    try:
+        result = ctypes.c_ssize_t(0)
+        user32.SendMessageTimeoutW(hwnd, PBM_SETPOS, pos, None, SMTO_ABORTIFHUNG, timeout_ms, ctypes.byref(result))
     except Exception:  # noqa: BLE001, S110
         pass
 
@@ -329,11 +416,101 @@ def pump_messages(user32: Any) -> None:
         return
 
 
+def start_owner_thread(
+    user32: Any, name: str, create_fn: Callable[[], bool]
+) -> tuple[threading.Thread, threading.Event]:
+    """Create a window on a dedicated thread and pump its messages
+    there.
+
+    Win32 thread affinity (the v1.4.0 splash hang): a window's
+    messages live on the message queue of the thread that CREATED
+    it. ``GetMessageW`` only ever retrieves the CALLING thread's
+    messages, so a pump running on any other thread blocks forever
+    on its own empty queue while the window's real messages are
+    never dispatched — Windows then flags the window
+    "(Not Responding)", ``WM_CLOSE`` is never delivered, and no
+    watchdog post can rescue it. B1 created the splash on the main
+    thread and pumped it on ``nse-splash-pump`` — that exact
+    mismatch. The fix is to create AND pump on the SAME thread:
+    ``create_fn`` runs on the new thread (it builds the window and
+    returns whether one exists) and the thread then runs
+    :func:`pump_messages` until ``WM_QUIT``.
+
+    Returns ``(thread, started)``; ``started`` is set once
+    ``create_fn`` returns, so the caller can bound its wait for the
+    window to exist. Never raises.
+    """
+    started = threading.Event()
+
+    def _run() -> None:
+        created = False
+        try:
+            created = bool(create_fn())
+        except Exception:  # noqa: BLE001 — a failed create is "no window", never a crash
+            created = False
+        finally:
+            started.set()
+        if created:
+            pump_messages(user32)
+
+    thread = threading.Thread(target=_run, daemon=True, name=name)
+    thread.start()
+    return thread, started
+
+
 def start_pump_thread(user32: Any, name: str) -> threading.Thread:
-    """Run :func:`pump_messages` on a daemon thread."""
+    """Run :func:`pump_messages` on a daemon thread.
+
+    .. deprecated::
+        Kept only for callers whose window already lives on the
+        calling thread is a WRONG pattern — see
+        :func:`start_owner_thread`. A window created on thread A and
+        pumped on thread B is never pumped at all (Win32 thread
+        affinity); new code must create the window on the pump
+        thread via :func:`start_owner_thread`.
+    """
     thread = threading.Thread(target=pump_messages, args=(user32,), daemon=True, name=name)
     thread.start()
     return thread
+
+
+def quit_pump_thread(user32: Any, thread: threading.Thread) -> bool:
+    """Post ``WM_QUIT`` to a pump thread's message queue so its
+    ``GetMessageW`` returns 0 and the thread exits. Asynchronous and
+    never blocks. Windows destroys the windows a thread created
+    when that thread exits, so this also destroys a window whose
+    ``WM_CLOSE`` was never dispatched — the last-resort close.
+    ``False`` when the thread has no queue yet / no native id."""
+    try:
+        native_id = thread.native_id
+        if not native_id:
+            return False
+        return bool(user32.PostThreadMessageW(native_id, WM_QUIT, 0, 0))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def close_window_and_wait(user32: Any, hwnd: int, pump_thread: threading.Thread | None, timeout_s: float = 2.0) -> bool:
+    """Close a window owned by ``pump_thread`` and wait for its pump
+    to exit (i.e. the window is actually destroyed). ``True`` when
+    the pump thread is gone afterwards.
+
+    Order: polite ``WM_CLOSE`` first (the window's own handling
+    destroys it, ``WM_DESTROY`` posts ``WM_QUIT``), then — only if
+    the pump is still alive past ``timeout_s`` — ``WM_QUIT`` posted
+    straight to the pump thread, which exits and takes its windows
+    with it. Every step is bounded; a stuck window can delay the
+    caller by at most ~``2 * timeout_s`` and never forever.
+    """
+    close_window(user32, hwnd)
+    if pump_thread is None:
+        return True
+    pump_thread.join(timeout=timeout_s)
+    if not pump_thread.is_alive():
+        return True
+    quit_pump_thread(user32, pump_thread)
+    pump_thread.join(timeout=timeout_s)
+    return not pump_thread.is_alive()
 
 
 #: A WndProc implementation: ``(hwnd, msg, wparam, lparam) -> LRESULT``.

@@ -15,6 +15,12 @@ warning; the browser remains the visible surface there.
 The icon is taken from the running executable itself
 (``ExtractIconW(sys.executable, 0)``) — the frozen exe already
 carries the NSE icon resource, so no icon file has to be bundled.
+
+The message window is created AND pumped on one dedicated thread
+(:func:`nse_bridge.gui._win32.start_owner_thread`): Win32 thread
+affinity means a window created on the main thread and pumped on
+another never receives its messages at all — the v1.4.0 splash
+hang, which also left this tray's menu/Quit callbacks undelivered.
 """
 
 from __future__ import annotations
@@ -194,30 +200,37 @@ class TrayIcon:
         user32 = self._user32
         self._wndproc = _win32.make_wndproc(user32, self._handler)
         hinstance = _win32.module_handle(windll.kernel32)
-        _win32.register_class(user32, _TRAY_CLASS, self._wndproc, hinstance)
-        # Message-only window: never visible, exists only to receive
-        # the tray callbacks and the popup menu.
-        self._hwnd = _win32.create_window(
-            user32, _TRAY_CLASS, "NSE MT5 Bridge Tray", 0, 0, 0, 0, hinstance, _win32.WS_POPUP
-        )
-        if not self._hwnd:
-            return False
-        self._icon = self._load_icon()
-        data = NOTIFYICONDATAW()
-        data.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
-        data.hWnd = self._hwnd
-        data.uID = 1
-        data.uFlags = NIF_MESSAGE | NIF_TIP | (NIF_ICON if self._icon else 0)
-        data.uCallbackMessage = _TRAY_CALLBACK_MESSAGE
-        data.hIcon = self._icon
-        data.szTip = self._tooltip[:127]
-        try:
-            if not self._shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data)):
+
+        def _build() -> bool:
+            # Runs on the pump thread: this thread creates the
+            # message window AND pumps it (Win32 thread affinity).
+            self._hwnd = _win32.create_window(
+                user32, _TRAY_CLASS, "NSE MT5 Bridge Tray", 0, 0, 0, 0, hinstance, _win32.WS_POPUP
+            )
+            if not self._hwnd:
                 return False
-        except Exception:  # noqa: BLE001
-            return False
-        self._pump_thread = _win32.start_pump_thread(user32, "nse-tray-pump")
-        return True
+            self._icon = self._load_icon()
+            data = NOTIFYICONDATAW()
+            data.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+            data.hWnd = self._hwnd
+            data.uID = 1
+            data.uFlags = NIF_MESSAGE | NIF_TIP | (NIF_ICON if self._icon else 0)
+            data.uCallbackMessage = _TRAY_CALLBACK_MESSAGE
+            data.hIcon = self._icon
+            data.szTip = self._tooltip[:127]
+            try:
+                if not self._shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data)):
+                    return False
+            except Exception:  # noqa: BLE001
+                return False
+            return True
+
+        _win32.register_class(user32, _TRAY_CLASS, self._wndproc, hinstance)
+        self._pump_thread, started = _win32.start_owner_thread(user32, "nse-tray-pump", _build)
+        # Bounded wait for the window to exist; the tray must never
+        # block startup.
+        started.wait(timeout=5.0)
+        return bool(self._hwnd)
 
     def update_tooltip(self, text: str) -> None:
         """Change the hover tooltip (no-op when unavailable)."""
@@ -250,9 +263,9 @@ class TrayIcon:
             except Exception:  # noqa: BLE001, S110
                 pass
             if self._user32 is not None:
-                _win32.close_window(self._user32, self._hwnd)
-        if self._pump_thread is not None:
-            self._pump_thread.join(timeout=2.0)
+                # Bounded close: WM_CLOSE first, WM_QUIT to the pump
+                # thread as a last resort (see _win32).
+                _win32.close_window_and_wait(self._user32, self._hwnd, self._pump_thread)
 
 
 def start_tray(

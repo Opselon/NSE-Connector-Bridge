@@ -25,13 +25,32 @@ v1.4.0 B1 — non-blocking startup: the splash NEVER blocks the
 Bridge. Bridge startup runs on a background thread
 (:mod:`nse_bridge.main`) and reports named steps through
 :class:`StartupProgress`; the main thread paints them here. Every
-splash wait is bounded: status updates use a timeout
-(:func:`_win32.set_text_timeout` — a hung pump can never freeze the
+splash wait is bounded: status AND progress updates use a timeout
+(:func:`_win32.set_text_timeout` / the bounded
+:func:`_win32.set_progress_pos` — a hung pump can never freeze the
 caller), and a watchdog hides the splash after
 ``SPLASH_MAX_LIFETIME_S`` even if startup is still going, so a
 stuck boot can never leave a permanent dead "please wait" window.
 The API server starts independently of the splash: a splash that
 cannot be shown (or is auto-hidden) changes nothing about boot.
+
+v1.4.0 post-release fix — the window MUST be created on the thread
+that pumps it (Win32 thread affinity: ``GetMessageW`` only ever
+retrieves the CALLING thread's messages, so B1's "create on the
+main thread, pump on ``nse-splash-pump``" meant the pump blocked
+forever on its own empty queue while the window's real messages
+were never dispatched — Windows flagged the splash
+"(Not Responding)" at "Ready" even though boot had completed, and
+the posted ``WM_CLOSE`` / the 180 s watchdog could never destroy
+it). The splash window is therefore created AND pumped on one
+dedicated thread (:func:`_win32.start_owner_thread`); the main
+thread only posts to it through bounded calls, and ``hide()`` only
+reports the window closed once its pump thread has actually
+exited (``WM_CLOSE`` first, ``WM_QUIT`` to the pump thread as a
+bounded last resort — a thread's windows die with it), so a failed
+hide stays visible and retryable instead of silently orphaning
+the window. The same affinity bug lived in the tray window; it
+uses the same helper (see :mod:`nse_bridge.gui.tray`).
 
 Implementation: stdlib-only, no third-party imports, so
 ``run_bridge.py`` can show it before importing the (heavy) bridge
@@ -47,6 +66,7 @@ startup failure.
 from __future__ import annotations
 
 import queue
+import sys
 import threading
 import time
 from typing import Any
@@ -54,6 +74,7 @@ from typing import Any
 from loguru import logger
 
 from . import _win32
+from .icon import app_icon_path
 
 _SPLASH_CLASS = "NSEBridgeSplash"
 _SPLASH_WIDTH = 460
@@ -182,12 +203,22 @@ class Splash:
         except (TypeError, ValueError):
             self._progress = 0.0
 
-    def hide(self) -> None:
-        """Close the window (no-op when unavailable)."""
+    def hide(self) -> bool:
+        """Close the window (no-op when unavailable). ``True`` when
+        no window remains."""
+        return True
 
 
 class _Win32Splash(Splash):
-    """Native Win32 splash window (ctypes, no dependencies)."""
+    """Native Win32 splash window (ctypes, no dependencies).
+
+    The window is created AND pumped on one dedicated thread (see
+    the module docstring): creating it on the calling thread and
+    pumping it on another is the v1.4.0 hang — the pump never sees
+    the window's messages. ``hide()`` only marks the splash closed
+    once that thread has actually exited, so a failed close stays
+    visible and retryable.
+    """
 
     def __init__(self, title: str, status: str) -> None:
         super().__init__(visible=False)
@@ -195,7 +226,10 @@ class _Win32Splash(Splash):
         self._hwnd = 0
         self._status_hwnd = 0
         self._progress_hwnd = 0
+        self._icon = 0
         self._pump_thread: threading.Thread | None = None
+        self._started: threading.Event | None = None
+        self._hide_requested = threading.Event()
         self._wndproc = None
         self._fonts: list[int] = []
         self._closed = False
@@ -213,6 +247,17 @@ class _Win32Splash(Splash):
             return 0
         return _win32.def_window_proc(self._user32, hwnd, msg, wparam, lparam)
 
+    def _load_icon(self, user32: Any, shell32: Any) -> int:
+        """The NSE icon for this window: the bundled ``.ico`` first
+        (dev checkout and frozen exe alike), then the exe's own icon
+        resource, else 0 (generic icon — no worse than before)."""
+        path = app_icon_path()
+        if path is not None:
+            icon = _win32.load_icon_file(user32, str(path))
+            if icon:
+                return icon
+        return _win32.load_icon_from_executable(shell32, sys.executable)
+
     def _create(self, title: str, status: str) -> None:
         windll = _win32.windll()
         if windll is None:
@@ -221,56 +266,77 @@ class _Win32Splash(Splash):
         kernel32 = windll.kernel32
         self._user32 = user32
         self._wndproc = _win32.make_wndproc(user32, self._handler)
-        hinstance = _win32.module_handle(kernel32)
-        _win32.register_class(user32, _SPLASH_CLASS, self._wndproc, hinstance)
-        x, y = _win32.center_on_screen(user32, _SPLASH_WIDTH, _SPLASH_HEIGHT)
-        style = _win32.WS_OVERLAPPED | _win32.WS_CAPTION | _win32.WS_SYSMENU | _win32.WS_VISIBLE
-        self._hwnd = _win32.create_window(
-            user32, _SPLASH_CLASS, title, x, y, _SPLASH_WIDTH, _SPLASH_HEIGHT, hinstance, style
-        )
-        if not self._hwnd:
-            return
-        label_style = _win32.WS_CHILD | _win32.WS_VISIBLE
-        title_hwnd = _win32.create_child(user32, "STATIC", title, self._hwnd, 20, 16, 420, 30, hinstance, label_style)
-        self._status_hwnd = _win32.create_child(
-            user32, "STATIC", status, self._hwnd, 20, 52, 420, 24, hinstance, label_style
-        )
-        # Real progress bar under the status line: the v1.3.x splash
-        # showed only a text line, so a stuck boot looked identical
-        # to a healthy slow one. The bar moves with StartupProgress.
-        self._progress_hwnd = _win32.create_child(
-            user32, "msctls_progress32", "", self._hwnd, 20, 82, 420, 14, hinstance, label_style
-        )
-        if self._progress_hwnd:
-            _win32.set_progress_range(user32, self._progress_hwnd, 100)
-        note1 = _win32.create_child(
-            user32,
-            "STATIC",
-            "First launch can take up to a minute — Windows scans the app.",
-            self._hwnd,
-            20,
-            106,
-            420,
-            20,
-            hinstance,
-            label_style,
-        )
-        note2 = _win32.create_child(
-            user32,
-            "STATIC",
-            "The dashboard opens automatically when the bridge is ready.",
-            self._hwnd,
-            20,
-            128,
-            420,
-            20,
-            hinstance,
-            label_style,
-        )
-        self._apply_fonts(user32, title_hwnd, self._status_hwnd, note1, note2)
-        _win32.show_window(user32, self._hwnd)
-        self._pump_thread = _win32.start_pump_thread(user32, "nse-splash-pump")
-        self.visible = True
+
+        def _build() -> bool:
+            # Runs on the pump thread: this thread creates the window
+            # AND pumps it (Win32 thread affinity — creating it on
+            # the caller and pumping it here was the v1.4.0 hang).
+            hinstance = _win32.module_handle(kernel32)
+            self._icon = self._load_icon(user32, windll.shell32)
+            _win32.register_class(user32, _SPLASH_CLASS, self._wndproc, hinstance, hicon=self._icon)
+            x, y = _win32.center_on_screen(user32, _SPLASH_WIDTH, _SPLASH_HEIGHT)
+            style = _win32.WS_OVERLAPPED | _win32.WS_CAPTION | _win32.WS_SYSMENU | _win32.WS_VISIBLE
+            self._hwnd = _win32.create_window(
+                user32, _SPLASH_CLASS, title, x, y, _SPLASH_WIDTH, _SPLASH_HEIGHT, hinstance, style
+            )
+            if not self._hwnd:
+                return False
+            # Per-window icon: wins over the class icon (a class
+            # registered earlier in the process keeps ITS icon).
+            _win32.set_window_icon(user32, self._hwnd, self._icon)
+            label_style = _win32.WS_CHILD | _win32.WS_VISIBLE
+            title_hwnd = _win32.create_child(
+                user32, "STATIC", title, self._hwnd, 20, 16, 420, 30, hinstance, label_style
+            )
+            self._status_hwnd = _win32.create_child(
+                user32, "STATIC", status, self._hwnd, 20, 52, 420, 24, hinstance, label_style
+            )
+            # Real progress bar under the status line: the v1.3.x splash
+            # showed only a text line, so a stuck boot looked identical
+            # to a healthy slow one. The bar moves with StartupProgress.
+            self._progress_hwnd = _win32.create_child(
+                user32, "msctls_progress32", "", self._hwnd, 20, 82, 420, 14, hinstance, label_style
+            )
+            if self._progress_hwnd:
+                _win32.set_progress_range(user32, self._progress_hwnd, 100)
+            note1 = _win32.create_child(
+                user32,
+                "STATIC",
+                "First launch can take up to a minute — Windows scans the app.",
+                self._hwnd,
+                20,
+                106,
+                420,
+                20,
+                hinstance,
+                label_style,
+            )
+            note2 = _win32.create_child(
+                user32,
+                "STATIC",
+                "The dashboard opens automatically when the bridge is ready.",
+                self._hwnd,
+                20,
+                128,
+                420,
+                20,
+                hinstance,
+                label_style,
+            )
+            self._apply_fonts(user32, title_hwnd, self._status_hwnd, note1, note2)
+            _win32.show_window(user32, self._hwnd)
+            if self._hide_requested.is_set():
+                # hide() was called while the window was still being
+                # built: close it now, on its owning thread.
+                _win32.close_window(user32, self._hwnd)
+            return True
+
+        self._pump_thread, self._started = _win32.start_owner_thread(user32, "nse-splash-pump", _build)
+        # Bounded wait for the window to exist: the splash must never
+        # block startup, even if window creation itself stalls.
+        if self._started is not None:
+            self._started.wait(timeout=5.0)
+        self.visible = bool(self._hwnd)
 
     def _apply_fonts(self, user32: Any, title_hwnd: int, status_hwnd: int, note1: int, note2: int) -> None:
         """Best-effort Segoe UI fonts; the default system font is fine
@@ -311,15 +377,30 @@ class _Win32Splash(Splash):
         if self.visible and self._progress_hwnd and self._user32 is not None:
             _win32.set_progress_pos(self._user32, self._progress_hwnd, int(self._progress * 100))
 
-    def hide(self) -> None:
+    def hide(self) -> bool:
+        """Close the window; ``True`` only once its pump thread has
+        actually exited (the window is really gone). A failed close
+        leaves the splash visible so the caller — or the watchdog —
+        retries instead of orphaning a dead window (v1.4.0: ``hide()``
+        set ``visible = False`` after a 2 s join even though the
+        posted ``WM_CLOSE`` was never dispatched, so the window
+        stayed up forever and the watchdog's identity check then
+        refused to touch it)."""
         if self._closed:
-            return
-        self._closed = True
-        self.visible = False
-        if self._hwnd and self._user32 is not None:
-            _win32.close_window(self._user32, self._hwnd)
-        if self._pump_thread is not None:
-            self._pump_thread.join(timeout=2.0)
+            return True
+        self._hide_requested.set()
+        if self._started is not None:
+            # The window may still be mid-creation on its thread.
+            self._started.wait(timeout=5.0)
+        if not self._hwnd or self._user32 is None:
+            self._closed = True
+            self.visible = False
+            return True
+        destroyed = _win32.close_window_and_wait(self._user32, self._hwnd, self._pump_thread)
+        if destroyed:
+            self._closed = True
+            self.visible = False
+        return destroyed
 
 
 class _TkSplash(Splash):
@@ -403,12 +484,17 @@ class _TkSplash(Splash):
         if self.visible:
             self._progress_updates.put(self._progress * 100)
 
-    def hide(self) -> None:
-        if self._closed_flag():
-            return
-        self.visible = False
+    def hide(self) -> bool:
+        if self._closed_flag() and not self._thread.is_alive():
+            return True
         self._close.set()
         self._thread.join(timeout=2.0)
+        if self._thread.is_alive():
+            # Close failed: allow a retry (the poll loop resumes).
+            self._close.clear()
+            return False
+        self.visible = False
+        return True
 
     def _closed_flag(self) -> bool:
         return self._close.is_set()
@@ -419,18 +505,43 @@ class _TkSplash(Splash):
 _CURRENT: Splash | None = None
 
 
+def _hide_specific(splash: Splash) -> bool:
+    """Hide one splash object and drop it from ``_CURRENT`` when it
+    is the current one and is really gone. ``True`` when no window
+    remains."""
+    global _CURRENT
+    try:
+        gone = splash.hide()
+    except Exception:  # noqa: BLE001
+        gone = False
+    if _CURRENT is splash and gone:
+        _CURRENT = None
+    return gone
+
+
 def _start_splash_watchdog(splash: Splash, max_lifetime_s: float) -> None:
     """Hide ``splash`` after ``max_lifetime_s`` even if startup is
     still going — the bounded wait that guarantees the splash can
-    never become a permanent dead window. Only fires while this exact
-    splash is still the current one; a normal hide/close (dashboard
-    up) cancels it implicitly. Daemon thread: never blocks exit."""
+    never become a permanent dead window. Acts on the splash object
+    it was started for, NOT on ``_CURRENT``: by the time it fires,
+    the main thread may already have called :func:`hide_splash`
+    once (which clears ``_CURRENT``) without the window actually
+    closing — v1.4.0's ``_CURRENT is splash`` check then refused to
+    touch it, so the watchdog could never rescue a stuck splash.
+    Retries once a few seconds later if the first close did not
+    take. Daemon thread: never blocks exit."""
 
     def _watch() -> None:
         time.sleep(max_lifetime_s)
-        if _CURRENT is splash and splash.visible:
-            logger.warning("[GUI] splash auto-hidden after {:.0f} s bounded wait", max_lifetime_s)
-            hide_splash()
+        if not splash.visible:
+            return
+        logger.warning("[GUI] splash auto-hidden after {:.0f} s bounded wait", max_lifetime_s)
+        if _hide_specific(splash):
+            return
+        time.sleep(5.0)
+        if splash.visible:
+            logger.error("[GUI] splash window did not close after bounded wait — continuing without it")
+            _hide_specific(splash)
 
     threading.Thread(target=_watch, daemon=True, name="nse-splash-watchdog").start()
 
@@ -477,14 +588,12 @@ def set_splash_progress(fraction: float) -> None:
 
 
 def hide_splash() -> None:
-    """Close the splash window, if one is shown. Never raises."""
-    global _CURRENT
-    if _CURRENT is not None:
-        try:
-            _CURRENT.hide()
-        except Exception:  # noqa: BLE001, S110
-            pass
-        _CURRENT = None
+    """Close the splash window, if one is shown. Never raises. When
+    the window does not actually close, the splash stays current so
+    a later call (or the watchdog) retries — silently dropping it
+    was how v1.4.0 orphaned a "(Not Responding)" window."""
+    if _CURRENT is not None and not _hide_specific(_CURRENT):
+        logger.warning("[GUI] splash window did not close — continuing without it")
 
 
 def splash_visible() -> bool:
