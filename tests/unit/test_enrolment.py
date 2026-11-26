@@ -16,7 +16,7 @@ from nse_bridge.engine.common import BridgeContext
 from nse_bridge.mt5.driver import Mt5Driver
 from nse_bridge.realtime.bus import EventBus
 from nse_bridge.realtime.channel import ServerChannel
-from nse_bridge.server.enrolment import EnrolmentManager, enrolment_backoff_delay
+from nse_bridge.server.enrolment import MAX_TRANSIENT_ATTEMPTS, EnrolmentManager, enrolment_backoff_delay
 from nse_bridge.server.errors import ServerErrorCode
 from nse_bridge.server.rest import RestClient
 
@@ -45,7 +45,7 @@ def _record_sleep(sleeps: list[float]):
     return _sleep
 
 
-def _manager(handler, **overrides):
+def _manager(handler, manager_kwargs=None, **overrides):
     """EnrolmentManager + RestClient over a MockTransport.
 
     Returns ``(manager, rest, sleeps, ctx)``; the caller closes ``rest``.
@@ -64,6 +64,7 @@ def _manager(handler, **overrides):
         rest,
         retry_base_s=0.05,
         jitter=False,
+        **(manager_kwargs or {}),
     )
     return manager, rest, sleeps, ctx
 
@@ -327,6 +328,168 @@ async def test_reset_for_new_key_clears_failed_auth_and_reenrols():
     assert manager._ctx.validate_key_result is None
     assert await manager.enrol_once() is True
     assert manager.state == "registered"
+    await rest.close()
+
+
+# ---------------------------------------------------------------------------
+# B2: terminal FAILED after N transient failures + slow-schedule retry
+# ---------------------------------------------------------------------------
+def _always_503(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(503, json={"error": {"code": "unavailable", "message": "down"}})
+
+
+@pytest.mark.unit
+async def test_enrolment_terminal_failed_after_10_transient_failures():
+    """MAX_TRANSIENT_ATTEMPTS = 10: the 10th consecutive transient
+    failure lands in FAILED (terminal for the fast-retry cycle) with
+    the exact server reason kept verbatim and a scheduled slow retry —
+    never a permanent "validating" and never unbounded fast retries."""
+    assert MAX_TRANSIENT_ATTEMPTS == 10
+    manager, rest, _sleeps, _ctx = _manager(
+        _always_503,
+        # Slow retry is long here on purpose: the supervisor must still
+        # be sitting in FAILED (not already on its next cycle) while
+        # the assertions below read the terminal state.
+        manager_kwargs={"retry_cap_s": 0.05, "slow_retry_s": 30.0},
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(manager.run(stop))
+    try:
+        deadline = asyncio.get_event_loop().time() + 10.0
+        while manager.state != "failed":
+            assert asyncio.get_event_loop().time() < deadline, f"stuck in {manager.state}"
+            await asyncio.sleep(0.05)
+        assert manager.to_dict()["attempts"] == 10
+        assert manager.to_dict()["transient_failures"] == 10
+        assert manager.to_dict()["terminal"] is True
+        assert manager.to_dict()["last_error"] == "server_unavailable"
+        assert manager.to_dict()["last_error_message"] == "down"
+        assert manager.to_dict()["next_retry_at"] is not None
+        # Fast backoff ran for the first 9 failures only (the 10th
+        # goes terminal instead of scheduling another fast retry).
+        assert len(manager.backoff_delays) == 9
+        # The WS channel gate refuses a terminal enrolment.
+        assert await manager.wait_until_registered(stop) is False
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+    await rest.close()
+
+
+@pytest.mark.unit
+async def test_enrolment_failed_slow_retry_recovers():
+    """After FAILED the supervisor keeps retrying on the slow schedule
+    (FAILED_SLOW_RETRY_S) — a recovered server re-registers the device
+    instead of needing a restart or a new key."""
+    mode = {"ok": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not mode["ok"]:
+            return _always_503(request)
+        if request.url.path.endswith("validate-key"):
+            return _ok_validate(request)
+        if request.url.path.endswith("manifest"):
+            return httpx.Response(200, json={"accepted": True, "manifest_hash": "deadbeef"})
+        return _ok_register(request)
+
+    manager, rest, _sleeps, _ctx = _manager(
+        handler,
+        manager_kwargs={"retry_cap_s": 0.05, "slow_retry_s": 0.2},
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(manager.run(stop))
+    try:
+        deadline = asyncio.get_event_loop().time() + 10.0
+        while manager.state != "failed":
+            assert asyncio.get_event_loop().time() < deadline, f"stuck in {manager.state}"
+            await asyncio.sleep(0.05)
+        mode["ok"] = True  # the server recovers
+        deadline = asyncio.get_event_loop().time() + 10.0
+        while manager.state != "registered":
+            assert asyncio.get_event_loop().time() < deadline, f"stuck in {manager.state}"
+            await asyncio.sleep(0.05)
+        assert manager.to_dict()["terminal"] is False
+        assert manager.to_dict()["next_retry_at"] is None
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+    await rest.close()
+
+
+@pytest.mark.unit
+async def test_stale_validating_watchdog_drives_enrolment():
+    """The 2026-11-26 incident: a re-auth whose completion callback
+    never fires left the manager parked in VALIDATING forever. The
+    watchdog drives an enrolment attempt once VALIDATING outlives
+    VALIDATING_STALE_S, so the state always resolves."""
+    manager, rest, _sleeps, _ctx = _manager(
+        lambda request: (
+            _ok_validate(request)
+            if request.url.path.endswith("validate-key")
+            else (
+                httpx.Response(200, json={"accepted": True, "manifest_hash": "deadbeef"})
+                if request.url.path.endswith("manifest")
+                else _ok_register(request)
+            )
+        ),
+        manager_kwargs={"validating_stale_s": 0.3},
+    )
+    assert await manager.enrol_once() is True
+    assert manager.state == "registered"
+    # A §3.2 re-auth starts (VALIDATING) and its completion never
+    # lands — the supervisor must not park there forever.
+    manager.note_reauth_start()
+    assert manager.state == "validating"
+    stop = asyncio.Event()
+    task = asyncio.create_task(manager.run(stop))
+    try:
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while manager.state != "registered":
+            assert asyncio.get_event_loop().time() < deadline, f"stuck in {manager.state}"
+            await asyncio.sleep(0.05)
+        assert manager.to_dict()["attempts"] == 2  # watchdog drove the second attempt
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+    await rest.close()
+
+
+@pytest.mark.unit
+async def test_request_revalidation_reruns_enrolment():
+    """request_revalidation() (WS-auth failures while REST validation
+    succeeds) wakes the parked supervisor, which re-runs enrol_once —
+    the recovery path for a stale device session."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path.endswith("validate-key"):
+            return _ok_validate(request)
+        if request.url.path.endswith("manifest"):
+            return httpx.Response(200, json={"accepted": True, "manifest_hash": "deadbeef"})
+        return _ok_register(request)
+
+    manager, rest, _sleeps, _ctx = _manager(handler)
+    assert await manager.enrol_once() is True
+    stop = asyncio.Event()
+    task = asyncio.create_task(manager.run(stop))
+    try:
+        await asyncio.sleep(0.2)  # supervisor parked in REGISTERED
+        assert manager.request_revalidation() is True
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while calls.count("/api/v1/connector/validate-key") < 2:
+            assert asyncio.get_event_loop().time() < deadline, "revalidation never ran"
+            await asyncio.sleep(0.05)
+        assert manager.state == "registered"
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+    # Not honoured outside REGISTERED (the supervisor owns retries):
+    # a fresh manager that never registered refuses the request.
+    manager2, rest2, _sleeps2, _ctx2 = _manager(handler)
+    manager2._set_state("failed_transient")
+    assert manager2.request_revalidation() is False
+    await rest2.close()
     await rest.close()
 
 

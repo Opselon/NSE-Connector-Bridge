@@ -135,12 +135,53 @@ def get_bridge_health(ctx: BridgeContext, params: None) -> dict[str, Any]:
     error_rate = total_fail / total_calls if total_calls else 0.0
     terminal = ctx.driver.refresh_terminal() or {}
     mt5_ok = ctx.driver.connected and bool(terminal.get("connected", False))
+    # B2: the server link is a first-class health signal, not a single
+    # boolean. Enrolment (terminal states + the server's verbatim
+    # reason), the WS state machine (auth vs transport vs enrolment
+    # failure + next attempt), the last heartbeat sent/received on
+    # either transport, and whether data sending is gated — with the
+    # bounded queue depths — all land here so the dashboard and the
+    # diagnostics summary can show the truth instead of "RETRY / —".
+    enrolment = ctx.enrolment_status()
+    channel_state = ctx.server_channel_state
+    enrolment_state = str(enrolment.get("state") or "not_configured")
+    send_gated = enrolment_state != "registered"
+    if send_gated:
+        gate_reason = enrolment.get("last_error_message") or enrolment.get("last_error") or enrolment_state
+        send_gated_reason = f"enrolment {enrolment_state}: {gate_reason}"
+    else:
+        send_gated_reason = None
+    sync_engine = getattr(ctx, "sync_engine", None)
+    try:
+        sync_pending = sync_engine.pending_count() if sync_engine is not None else None
+    except Exception:  # noqa: BLE001 — a failing probe degrades to None, never fails health
+        sync_pending = None
     checks = {
         "mt5_connected": mt5_ok,
         "total_mt5_calls": total_calls,
         "total_mt5_failures": total_fail,
         "mt5_error_rate": round(error_rate, 4),
-        "server_channel_connected": ctx.server_channel_state.get("connected", False),
+        "server_channel_connected": channel_state.get("connected", False),
+        "enrolment_state": enrolment_state,
+        "enrolment_terminal": bool(enrolment.get("terminal", enrolment_state in ("failed_auth", "failed"))),
+        "enrolment_last_error": enrolment.get("last_error"),
+        "enrolment_last_error_message": enrolment.get("last_error_message"),
+        "enrolment_attempts": enrolment.get("attempts"),
+        "enrolment_next_retry_at": enrolment.get("next_retry_at"),
+        "ws_state": channel_state.get("ws_state"),
+        "ws_last_error_kind": channel_state.get("last_error_kind"),
+        "ws_last_error": channel_state.get("last_error"),
+        "ws_last_error_detail": channel_state.get("last_error_detail"),
+        "ws_next_attempt_at": channel_state.get("next_attempt_at"),
+        "ws_auth_failures": channel_state.get("ws_auth_failures"),
+        "last_heartbeat_sent_at": channel_state.get("last_heartbeat_sent_at"),
+        "last_heartbeat_received_at": channel_state.get("last_heartbeat_received_at"),
+        "heartbeat_via": channel_state.get("heartbeat_via"),
+        "send_gated": send_gated,
+        "send_gated_reason": send_gated_reason,
+        "outbound_queued": channel_state.get("outbound_queued"),
+        "pending_results": channel_state.get("pending_results"),
+        "sync_pending_batches": sync_pending,
     }
     return {
         "healthy": mt5_ok,

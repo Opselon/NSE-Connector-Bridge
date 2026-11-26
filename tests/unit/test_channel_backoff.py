@@ -109,3 +109,102 @@ async def test_channel_heartbeat_timing_defaults():
     assert settings.heartbeat_interval_s == 15.0  # §5.3
     assert settings.reconnect_initial_ms == 500  # §5.4
     assert settings.reconnect_max_ms == 30000
+
+
+# ---------------------------------------------------------------------------
+# B2: WS connect-failure classification — a WS-auth failure (HTTP 401)
+# is a different failure from an enrolment failure, and the dashboard
+# must show the server's verbatim reason, never a bare type name.
+# ---------------------------------------------------------------------------
+class _FakeWsResponse:
+    """Duck-typed websockets InvalidStatus.response."""
+
+    def __init__(self, status_code: int, body: bytes = b"") -> None:
+        self.status_code = status_code
+        self.body = body
+
+
+class _FakeInvalidStatus(Exception):
+    def __init__(self, status_code: int, body: bytes = b"") -> None:
+        super().__init__(f"server rejected WebSocket connection: HTTP {status_code}")
+        self.response = _FakeWsResponse(status_code, body)
+
+
+@pytest.mark.unit
+def test_classify_ws_401_key_revoked_verbatim():
+    from nse_bridge.realtime.channel import classify_ws_connect_error
+
+    info = classify_ws_connect_error(
+        _FakeInvalidStatus(401, b'{"error": {"code": "key_revoked", "message": "key revoked by owner"}}')
+    )
+    assert info["kind"] == "ws_auth"
+    assert info["http_status"] == 401
+    assert info["code"] == "key_revoked"
+    assert info["message"] == "key revoked by owner"
+    assert info["detail"] == "WS handshake failed: HTTP 401 key_revoked — key revoked by owner"
+
+
+@pytest.mark.unit
+def test_classify_ws_401_key_invalid_and_403():
+    from nse_bridge.realtime.channel import classify_ws_connect_error
+
+    info = classify_ws_connect_error(_FakeInvalidStatus(401, b'{"error": {"code": "key_invalid", "message": "bad key"}}'))
+    assert info["kind"] == "ws_auth"
+    assert info["code"] == "key_invalid"
+    info = classify_ws_connect_error(
+        _FakeInvalidStatus(403, b'{"error": {"code": "subscription_expired", "message": "plan ended"}}')
+    )
+    assert info["kind"] == "ws_auth"
+    assert info["http_status"] == 403
+    assert info["code"] == "subscription_expired"
+
+
+@pytest.mark.unit
+def test_classify_ws_500_is_transport_not_auth():
+    from nse_bridge.realtime.channel import classify_ws_connect_error
+
+    info = classify_ws_connect_error(_FakeInvalidStatus(500, b""))
+    assert info["kind"] == "ws_transport"
+    assert info["http_status"] == 500
+    assert info["detail"] == "WS handshake failed: HTTP 500"
+
+
+@pytest.mark.unit
+def test_classify_ws_timeout_and_refused_are_transport():
+    from nse_bridge.realtime.channel import classify_ws_connect_error
+
+    info = classify_ws_connect_error(TimeoutError("timed out"))
+    assert info["kind"] == "ws_transport"
+    assert info["code"] == "handshake_timeout"
+    assert "timed out" in info["detail"]
+    info = classify_ws_connect_error(ConnectionRefusedError("mock ws down"))
+    assert info["kind"] == "ws_transport"
+    assert "ConnectionRefusedError" in info["detail"]
+
+
+@pytest.mark.unit
+def test_classify_ws_real_invalid_status():
+    """The classifier reads a real websockets InvalidStatus (the
+    exception websockets.connect raises on a non-101 handshake)."""
+    from websockets.datastructures import Headers
+    from websockets.exceptions import InvalidStatus
+    from websockets.http11 import Response
+
+    from nse_bridge.realtime.channel import classify_ws_connect_error
+
+    exc = InvalidStatus(
+        Response(401, "Unauthorized", Headers(), b'{"error": {"code": "key_invalid", "message": "bad key"}}')
+    )
+    info = classify_ws_connect_error(exc)
+    assert info["kind"] == "ws_auth"
+    assert info["http_status"] == 401
+    assert info["code"] == "key_invalid"
+
+
+@pytest.mark.unit
+def test_outbound_queue_total_queued():
+    queue = _OutboundQueue(maxsize=10)
+    assert queue.total_queued == 0
+    queue.put_chart({"type": "chart.data", "symbol": "EURUSD"})
+    queue.put_result({"event_type": "action.result", "correlation_id": "c1"})
+    assert queue.total_queued == 2

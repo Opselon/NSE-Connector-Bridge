@@ -433,6 +433,14 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         else:
             broker = None
             probe_mode = "light"
+        # B2: /health also names the server-link state — enrolment,
+        # WS state machine, last heartbeat (either transport), and
+        # whether data sending is gated on enrolment. No key material,
+        # only states + timestamps; the authenticated get_bridge_health
+        # command remains the authoritative check.
+        channel_state = ctx.server_channel_state
+        enrolment = ctx.enrolment_status()
+        enrolment_state = str(enrolment.get("state") or "not_configured")
         return {
             "ok": True,
             "status": "alive",
@@ -440,6 +448,23 @@ def create_app(ctx: BridgeContext) -> FastAPI:
             "mt5_connected": ctx.driver.connected,
             "broker_connected": broker["connected"] if broker else None,
             "broker": broker,
+            "server": {
+                "enrolment_state": enrolment_state,
+                "enrolment_terminal": bool(
+                    enrolment.get("terminal", enrolment_state in ("failed_auth", "failed"))
+                ),
+                "enrolment_last_error": enrolment.get("last_error"),
+                "enrolment_last_error_message": enrolment.get("last_error_message"),
+                "ws_state": channel_state.get("ws_state"),
+                "ws_connected": bool(channel_state.get("connected", False)),
+                "ws_last_error_kind": channel_state.get("last_error_kind"),
+                "ws_last_error_detail": channel_state.get("last_error_detail"),
+                "ws_next_attempt_at": channel_state.get("next_attempt_at"),
+                "last_heartbeat_sent_at": channel_state.get("last_heartbeat_sent_at"),
+                "last_heartbeat_received_at": channel_state.get("last_heartbeat_received_at"),
+                "heartbeat_via": channel_state.get("heartbeat_via"),
+                "send_gated": enrolment_state != "registered",
+            },
         }
 
     @app.get(

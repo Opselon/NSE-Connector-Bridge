@@ -16,6 +16,9 @@ live wakes the WS supervisor immediately.
 from __future__ import annotations
 
 import asyncio
+import json
+import time
+from datetime import datetime as _dt
 from pathlib import Path
 from typing import Any
 
@@ -187,3 +190,79 @@ async def test_heartbeat_loop_posts_manifest_via_rest_when_ws_down(tmp_path: Pat
     await _run_heartbeat_loop(channel)
     assert len(rest.manifests) == 1  # posted once, then the hash is known
     assert rest.manifests[0]["manifest_hash"] == build_manifest("dev-1")["manifest_hash"]
+
+
+# ---------------------------------------------------------------------------
+# B2: every heartbeat is recorded (WS or REST) — the dashboard must
+# never show "—" for a heartbeat the server recorded (2026-11-26:
+# "Last heartbeat —" while the server logged heartbeats that minute,
+# because only WS heartbeats were ever recorded).
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+async def test_rest_heartbeat_records_last_heartbeat(tmp_path: Path):
+    rest = _FakeRest(pending_commands=0)
+    channel = _channel(tmp_path, rest)
+    channel._request_ws_open = lambda: False  # type: ignore[method-assign]
+    await _run_heartbeat_loop(channel)
+    assert rest.heartbeats >= 1
+    state = channel.ctx.server_channel_state
+    assert state["last_heartbeat_at"] is not None  # epoch, read by the dashboard
+    assert state["last_server_heartbeat_at"] is not None
+    assert state["heartbeat_via"] == "rest"
+    # ISO-8601 UTC + local timestamps, never "—" once a beat happened.
+    _dt.fromisoformat(state["last_heartbeat_sent_at"])
+    _dt.fromisoformat(state["last_heartbeat_received_at"])
+    _dt.fromisoformat(state["last_heartbeat_sent_at_local"])
+    _dt.fromisoformat(state["last_heartbeat_received_at_local"])
+    # Queue depth + send-gate state are published with the beat.
+    assert state["outbound_queued"] == 0
+    assert state["pending_results"] == 0
+    assert state["send_gated"] is False  # no enrolment wired: ungated
+
+
+@pytest.mark.unit
+async def test_ws_heartbeat_frame_records_received_timestamp(tmp_path: Path):
+    channel = _channel(tmp_path, _FakeRest())
+    assert channel.ctx.server_channel_state["last_server_heartbeat_at"] is None
+    await channel._handle_server_message('{"type": "heartbeat"}')
+    state = channel.ctx.server_channel_state
+    assert state["last_server_heartbeat_at"] is not None
+    assert state["heartbeat_via"] == "ws"
+    _dt.fromisoformat(state["last_heartbeat_received_at"])
+    _dt.fromisoformat(state["last_heartbeat_received_at_local"])
+
+
+@pytest.mark.unit
+async def test_ws_heartbeat_loop_sends_and_records(tmp_path: Path):
+    """The WS heartbeat loop records every heartbeat it SENDS (epoch +
+    ISO UTC + local) — the "Last heartbeat sent" field is the send,
+    not the reply."""
+    class _FakeWS:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, raw: str) -> None:
+            self.sent.append(raw)
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            return None
+
+    channel = _channel(tmp_path, _FakeRest())
+    ws = _FakeWS()
+    channel._last_heartbeat_reply_at = time.monotonic()  # session just started
+    task = asyncio.create_task(channel._heartbeat_loop(ws))
+    try:
+        await asyncio.sleep(2.5)  # loop clamps its interval to >= 1 s
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    assert len(ws.sent) >= 1
+    assert json.loads(ws.sent[0])["type"] == "heartbeat"
+    state = channel.ctx.server_channel_state
+    assert state["last_heartbeat_at"] is not None
+    assert state["heartbeat_via"] == "ws"
+    _dt.fromisoformat(state["last_heartbeat_sent_at"])
+    _dt.fromisoformat(state["last_heartbeat_sent_at_local"])

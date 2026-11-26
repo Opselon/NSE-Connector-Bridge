@@ -52,6 +52,36 @@ doubling → 30 s + jitter (0–100 ms), reset on a successful session;
 clean ``close()`` on shutdown. The server re-sends only ``pending``
 commands on reconnect, never ``executed``/``rejected``/``expired``;
 the client ALSO dedups (replay cache, §6.2).
+
+WS state machine (B2 — the dashboard reads this, never a bare
+"RETRY"): ``ctx.server_channel_state`` carries ``ws_state``
+(``disconnected`` / ``connecting`` / ``connected`` / ``retrying`` /
+``auth_failed`` / ``blocked_enrolment`` / ``stopped``),
+``last_error_kind`` (``ws_auth`` / ``ws_transport`` / ``enrolment`` /
+``config``), ``last_error_detail`` (the exact failure, verbatim where
+the server supplied it — e.g. ``WS handshake failed: HTTP 401
+key_revoked — key revoked``), and ``next_attempt_at`` (ISO-8601 UTC
+of the next reconnect attempt). A WS-auth failure (HTTP 401/403 on
+the handshake) is a DIFFERENT failure from an enrolment failure:
+the key can validate over REST while the WS handshake 401s (stale
+device session). After ``MAX_WS_AUTH_FAILURES`` consecutive WS-auth
+failures the channel asks enrolment to revalidate once
+(``request_revalidation``) instead of hammering the handshake with
+the same key; if the key itself is bad that revalidation lands in
+FAILED_AUTH and the channel stays down with the reason exposed.
+
+Heartbeats (B2 — the dashboard must never show "—" for a heartbeat
+that happened): every heartbeat SENT and every heartbeat RECEIVED is
+recorded in ``ctx.server_channel_state`` as an epoch
+(``last_heartbeat_at`` / ``last_server_heartbeat_at``, the fields the
+dashboard already reads) AND as ISO-8601 UTC + local timestamps
+(``last_heartbeat_sent_at`` / ``last_heartbeat_received_at`` and
+their ``_local`` twins), with ``heartbeat_via`` (``"ws"`` or
+``"rest"``). The REST heartbeat (§3.4) is a heartbeat too: while the
+WS is down it is the keep-alive the server records, so it updates
+the same fields — the 2026-11-26 incident showed "Last heartbeat —"
+while the server recorded heartbeats in the same minute, because
+only WS heartbeats were ever recorded.
 """
 
 from __future__ import annotations
@@ -62,7 +92,7 @@ import random
 import time
 from collections import deque
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from loguru import logger
@@ -91,7 +121,7 @@ from ..server.rest import RestClient
 from ..server.sync import SyncEngine
 from ..server.sync_checkpoint import CHECKPOINT_FILENAME, SyncCheckpointStore
 
-__all__ = ["ServerChannel", "backoff_delay", "backoff_with_jitter"]
+__all__ = ["ServerChannel", "backoff_delay", "backoff_with_jitter", "classify_ws_connect_error"]
 
 HEARTBEAT_DEAD_S = 45.0  # §5.3: session dead after 45 s without a frame
 OUTBOUND_MAX = 128  # §5.3/§5.4: bounded channels, 128 messages each way
@@ -99,6 +129,13 @@ BACKOFF_INITIAL_S = 0.5  # §5.4: initial 500 ms
 BACKOFF_CAP_S = 30.0  # §5.4: capped at 30 s
 BACKOFF_FACTOR = 2.0  # §5.4: doubling
 JITTER_MAX_S = 0.1  # §5.4: jitter of subsec_nanos % 100 ms
+#: Consecutive WS-handshake auth failures (HTTP 401/403) after which
+#: the channel asks enrolment to revalidate once instead of hammering
+#: the handshake with the same key. N = 5: enough to rule out a
+#: transient handshake glitch, small enough that a stale session is
+#: re-registered within ~a minute of backoff. The count resets on any
+#: successful session or non-auth failure.
+MAX_WS_AUTH_FAILURES = 5
 
 
 def backoff_delay(
@@ -114,6 +151,76 @@ def backoff_delay(
 def backoff_with_jitter(delay_s: float) -> float:
     """Add the §5.4 jitter: a uniform 0–100 ms on top of the delay."""
     return delay_s + random.uniform(0, JITTER_MAX_S)
+
+
+def classify_ws_connect_error(exc: BaseException) -> dict[str, Any]:
+    """Classify a WS connect failure for the state machine + UI.
+
+    Returns ``{"kind", "http_status", "code", "message", "detail"}``:
+
+    - ``kind == "ws_auth"`` — the handshake got HTTP 401/403. The
+      server's reason is carried verbatim where the handshake
+      response body had one (``error.code`` / ``error.message``,
+      e.g. ``key_revoked``) — a WS-auth failure is NOT an enrolment
+      failure and must not be displayed as one.
+    - ``kind == "ws_transport"`` — handshake timeout, refused
+      connection, or any non-HTTP failure.
+    - ``kind == "config"`` is never produced here (start-time config
+      errors are recorded by ``start()`` directly).
+
+    Duck-typed on ``exc.response.status_code`` /
+    ``exc.response.body`` (``websockets.exceptions.InvalidStatus``)
+    so fakes can drive it in tests without a socket.
+    """
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        code: str | None = None
+        message: str | None = None
+        body = getattr(response, "body", b"") or b""
+        if isinstance(body, (bytes, bytearray)):
+            try:
+                payload = json.loads(body.decode("utf-8", "replace"))
+            except (ValueError, UnicodeDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                error = payload.get("error")
+                if isinstance(error, dict):
+                    if isinstance(error.get("code"), str):
+                        code = error["code"]
+                    if isinstance(error.get("message"), str):
+                        message = error["message"]
+                elif isinstance(payload.get("code"), str):
+                    code = payload["code"]
+                elif isinstance(payload.get("message"), str):
+                    message = payload["message"]
+        detail = f"WS handshake failed: HTTP {status}"
+        if code:
+            detail += f" {code}"
+        if message:
+            detail += f" — {message}"
+        return {
+            "kind": "ws_auth" if status in (401, 403) else "ws_transport",
+            "http_status": status,
+            "code": code,
+            "message": message,
+            "detail": detail,
+        }
+    if isinstance(exc, TimeoutError):
+        return {
+            "kind": "ws_transport",
+            "http_status": None,
+            "code": "handshake_timeout",
+            "message": None,
+            "detail": "WS handshake timed out (no response from server)",
+        }
+    return {
+        "kind": "ws_transport",
+        "http_status": None,
+        "code": None,
+        "message": None,
+        "detail": f"{type(exc).__name__}: {exc}"[:200],
+    }
 
 
 class _OutboundQueue:
@@ -141,6 +248,13 @@ class _OutboundQueue:
 
     def _total(self) -> int:
         return len(self._results) + len(self._charts)
+
+    @property
+    def total_queued(self) -> int:
+        """Messages currently queued (results + charts) — surfaced in
+        the channel state so health can show the bounded queue depth
+        instead of letting it grow invisibly while sending is gated."""
+        return self._total()
 
     def put_result(self, frame: dict[str, Any]) -> None:
         if self._total() >= self.maxsize:
@@ -271,6 +385,11 @@ class ServerChannel:
             32, "channel/results", self._durable_store
         )
         self._record_restart_recovery()
+        # Consecutive WS-handshake auth failures (HTTP 401/403).
+        # At MAX_WS_AUTH_FAILURES the channel asks enrolment to
+        # revalidate once instead of hammering the handshake; the
+        # count resets on any success or non-auth failure.
+        self._ws_auth_failures = 0
         self._last_server_frame_at: float = 0.0
         self._last_login: str | None = None
         self._rest = rest_client
@@ -347,6 +466,66 @@ class ServerChannel:
     def _bound_account_id(self) -> str | None:
         login = self.ctx.driver.connection_state_dict().get("login")
         return str(login) if login is not None else None
+
+    # ------------------------------------------------------------------
+    # B2 state machine: heartbeat timestamps + queue/send-gate state.
+    # Every heartbeat — WS or REST — is recorded here, as an epoch
+    # (the fields the dashboard already reads) AND as ISO-8601 UTC +
+    # local timestamps, with ``heartbeat_via`` naming the transport.
+    # A heartbeat the server recorded must never display as "—".
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _iso_now() -> str:
+        return datetime.now(UTC).isoformat()
+
+    @staticmethod
+    def _iso_local_now() -> str:
+        return datetime.now().astimezone().isoformat()
+
+    def _note_heartbeat_sent(self, via: str) -> None:
+        state = self.ctx.server_channel_state
+        state["last_heartbeat_at"] = time.time()
+        state["last_heartbeat_sent_at"] = self._iso_now()
+        state["last_heartbeat_sent_at_local"] = self._iso_local_now()
+        state["heartbeat_via"] = via
+
+    def _note_heartbeat_received(self, via: str, *, server_time: str | None = None) -> None:
+        state = self.ctx.server_channel_state
+        state["last_server_heartbeat_at"] = time.time()
+        state["last_heartbeat_received_at"] = self._iso_now()
+        state["last_heartbeat_received_at_local"] = self._iso_local_now()
+        state["heartbeat_via"] = via
+        if server_time is not None:
+            # The server's own clock at the heartbeat (§3.4 response).
+            state["last_heartbeat_server_time"] = server_time
+
+    def _refresh_queue_state(self) -> None:
+        """Publish bounded-queue depth + send-gate state.
+
+        Data sending is gated on enrolment (§5.1: the channel must
+        not open, and sync must not send, before REGISTERED). While
+        gated the outbound queue is BOUNDED (128) and the pending
+        results queue is BOUNDED (32, durable) — they cannot grow
+        without bound — but health must say so honestly instead of
+        letting a stuck queue look like a healthy idle: ``send_gated``
+        names the gate and ``send_gated_reason`` the exact enrolment
+        state + server reason behind it.
+        """
+        state = self.ctx.server_channel_state
+        state["outbound_queued"] = self._outbound.total_queued
+        state["pending_results"] = len(self._pending_results)
+        if self._enrolment is not None:
+            enrol = self._enrolment.to_dict()
+            gated = enrol.get("state") != "registered"
+            state["send_gated"] = gated
+            if gated:
+                reason = enrol.get("last_error_message") or enrol.get("last_error") or enrol.get("state")
+                state["send_gated_reason"] = f"enrolment {enrol.get('state')}: {reason}"
+            else:
+                state["send_gated_reason"] = None
+        else:
+            state["send_gated"] = False
+            state["send_gated_reason"] = None
 
     # ------------------------------------------------------------------
     # REST heartbeat → WS (§3.4) + manifest (§4.1)
@@ -510,10 +689,18 @@ class ServerChannel:
             logger.error("[CHANNEL] refusing to connect: {}", exc)
             state = self.ctx.server_channel_state
             state["enabled"] = False
+            state["ws_state"] = "stopped"
+            state["last_error_kind"] = "config"
+            state["last_error_detail"] = str(exc)
             state["last_error"] = str(exc)
             return
         if not self.ctx.settings.server_token:
             logger.warning("[CHANNEL] server_token missing — outbound channel disabled")
+            state = self.ctx.server_channel_state
+            state["ws_state"] = "stopped"
+            state["last_error_kind"] = "config"
+            state["last_error_detail"] = "server_token missing — outbound channel disabled"
+            state["last_error"] = state["last_error_detail"]
             return
         self._ensure_components()
         self._stop.clear()
@@ -522,6 +709,7 @@ class ServerChannel:
         state = self.ctx.server_channel_state
         state["enabled"] = True
         state["url"] = url
+        state["ws_state"] = "connecting"
 
     def _start_rest_heartbeat(self) -> None:
         """Start the REST heartbeat loop (§3.4), if not already running."""
@@ -563,10 +751,18 @@ class ServerChannel:
             if rest is None or not self.ctx.settings.server_token:
                 continue
             try:
+                # The REST heartbeat is a real heartbeat: the server
+                # records it while the WS is down, so it updates the
+                # same last-heartbeat fields the dashboard reads —
+                # otherwise the dashboard shows "—" while the server
+                # recorded heartbeats in the same minute (2026-11-26).
+                self._note_heartbeat_sent("rest")
                 result = await rest.heartbeat()
             except Exception as exc:  # noqa: BLE001 — a failed heartbeat never kills the loop
                 logger.debug("[CHANNEL] REST heartbeat failed: {}", type(exc).__name__)
                 continue
+            self._note_heartbeat_received("rest", server_time=result.server_time)
+            self._refresh_queue_state()
             logger.debug("[CHANNEL] REST heartbeat ok (pending_commands={})", result.pending_commands)
             # §3.4 (verified behaviour — see _request_ws_open): the
             # server says commands are waiting and no WS is live, so
@@ -622,6 +818,8 @@ class ServerChannel:
         state = self.ctx.server_channel_state
         state["enabled"] = False
         state["connected"] = False
+        state["ws_state"] = "stopped"
+        state["next_attempt_at"] = None
 
     # ------------------------------------------------------------------
     async def _run(self) -> None:
@@ -639,13 +837,25 @@ class ServerChannel:
                     state = self.ctx.server_channel_state
                     state["connected"] = False
                     status = self._enrolment.to_dict()
-                    state["last_error"] = f"enrolment {status['state']}" + (
-                        f": {status['last_error']}" if status.get("last_error") else ""
-                    )
-                    logger.error("[CHANNEL] not connecting — {}", state["last_error"])
+                    # WS-auth failure and enrolment failure are
+                    # different failures with different fixes: name
+                    # the enrolment state AND the server's verbatim
+                    # reason (e.g. key_revoked — key revoked).
+                    detail = f"enrolment {status['state']}"
+                    if status.get("last_error"):
+                        detail += f": {status['last_error']}"
+                    if status.get("last_error_message"):
+                        detail += f" — {status['last_error_message']}"
+                    state["last_error"] = detail
+                    state["last_error_detail"] = detail
+                    state["last_error_kind"] = "enrolment"
+                    state["ws_state"] = "blocked_enrolment"
+                    state["next_attempt_at"] = status.get("next_retry_at")
+                    logger.error("[CHANNEL] not connecting — {}", detail)
                     return
             try:
                 logger.info("[CHANNEL] connecting to {}", url)
+                self.ctx.server_channel_state["ws_state"] = "connecting"
                 import websockets  # lazy import keeps startup fast
 
                 headers = {
@@ -666,8 +876,15 @@ class ServerChannel:
                     self._last_server_frame_at = time.monotonic()
                     state = self.ctx.server_channel_state
                     state["connected"] = True
+                    state["ws_state"] = "connected"
                     state["last_connected_at"] = time.time()
                     state["last_error"] = None
+                    state["last_error_kind"] = None
+                    state["last_error_detail"] = None
+                    state["last_error_http_status"] = None
+                    state["next_attempt_at"] = None
+                    self._ws_auth_failures = 0
+                    state["ws_auth_failures"] = 0
                     logger.info("[CHANNEL] connected to {}", url)
                     telemetry = self._telemetry()
                     if telemetry is not None:
@@ -683,11 +900,39 @@ class ServerChannel:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — any disconnect error restarts the loop
+                info = classify_ws_connect_error(exc)
                 state = self.ctx.server_channel_state
                 state["connected"] = False
                 state["reconnects"] = int(state.get("reconnects", 0)) + 1
-                state["last_error"] = type(exc).__name__
-                logger.warning("[CHANNEL] disconnected: {} — reconnecting", type(exc).__name__)
+                # Never report a bare exception type name ("InvalidStatus")
+                # as the error: the dashboard must show the exact failure
+                # — HTTP status + the server's verbatim reason.
+                state["last_error_kind"] = info["kind"]
+                state["last_error_detail"] = info["detail"]
+                state["last_error"] = info["detail"]
+                state["last_error_http_status"] = info["http_status"]
+                if info["kind"] == "ws_auth":
+                    self._ws_auth_failures += 1
+                    state["ws_state"] = "auth_failed"
+                    state["ws_auth_failures"] = self._ws_auth_failures
+                    if self._ws_auth_failures >= MAX_WS_AUTH_FAILURES:
+                        # The key validates over REST but the WS
+                        # handshake keeps 401ing — the device session
+                        # is stale. Ask enrolment to re-register once
+                        # per threshold crossing instead of hammering
+                        # the handshake with the same key; if the key
+                        # itself is bad the revalidation lands in
+                        # FAILED_AUTH and the channel stays down.
+                        self._ws_auth_failures = 0
+                        state["ws_auth_failures"] = 0
+                        enrolment = self._enrolment
+                        if enrolment is not None and hasattr(enrolment, "request_revalidation"):
+                            enrolment.request_revalidation()
+                else:
+                    self._ws_auth_failures = 0
+                    state["ws_auth_failures"] = 0
+                    state["ws_state"] = "retrying"
+                logger.warning("[CHANNEL] disconnected: {} — reconnecting", info["detail"])
                 telemetry = self._telemetry()
                 if telemetry is not None:
                     telemetry.warn(
@@ -707,6 +952,12 @@ class ServerChannel:
                 self._ws = None
                 state = self.ctx.server_channel_state
                 state["connected"] = False
+                if state.get("ws_state") == "connected":
+                    # The session ended without an exception (e.g. the
+                    # heartbeat loop declared it dead) — a reconnect
+                    # follows unless stopping, so say retrying, not
+                    # connected.
+                    state["ws_state"] = "retrying"
             if self._stop.is_set():
                 break
             delay = backoff_with_jitter(
@@ -716,6 +967,9 @@ class ServerChannel:
                     cap_s=self.ctx.settings.reconnect_max_ms / 1000.0,
                 )
             )
+            self.ctx.server_channel_state["next_attempt_at"] = (
+                datetime.now(UTC) + timedelta(seconds=delay)
+            ).isoformat()
             logger.info("[CHANNEL] reconnect in {:.2f}s (attempt {})", delay, attempt)
             await self._wait_backoff(delay)
 
@@ -726,6 +980,9 @@ class ServerChannel:
         self._last_server_frame_at = time.monotonic()
         self._last_heartbeat_reply_at = time.monotonic()
         self._session_got_frame = False
+        # Fresh session: publish the bounded-queue depth + send-gate
+        # state so health never shows a stale queue picture.
+        self._refresh_queue_state()
         # Re-send any results that never made it out (§6.5: results
         # persist in the bounded pending queue across reconnects).
         # Clear the wire queue first: anything still queued from the
@@ -840,9 +1097,10 @@ class ServerChannel:
             # each heartbeat tick and send a manifest.update frame
             # when it did. Unchanged hash = no-op (tracker).
             self._maybe_send_manifest_update()
+            self._refresh_queue_state()
             try:
                 await ws.send(json.dumps({"type": "heartbeat", "device_id": self._device_id()}))
-                self.ctx.server_channel_state["last_heartbeat_at"] = time.time()
+                self._note_heartbeat_sent("ws")
             except Exception as exc:  # noqa: BLE001 — a failed send ends the session
                 logger.debug("[CHANNEL] heartbeat send failed: {}", type(exc).__name__)
                 return
@@ -859,6 +1117,7 @@ class ServerChannel:
                 if frame.get("event_type") == "action.result":
                     self._outbound.put_result(frame)
                 return
+            self._refresh_queue_state()
             if frame.get("event_type") == "action.result":
                 correlation = frame.get("correlation_id")
                 if correlation:
@@ -1015,7 +1274,7 @@ class ServerChannel:
             logger.debug("[CHANNEL] server ack for batch {}", msg.get("batch_id"))
         elif mtype == "heartbeat":
             self._last_heartbeat_reply_at = time.monotonic()
-            self.ctx.server_channel_state["last_server_heartbeat_at"] = time.time()
+            self._note_heartbeat_received("ws")
         elif mtype == "chart.request":
             await self._handle_chart_request(msg)
         elif mtype == "chart.subscribe":
