@@ -74,6 +74,20 @@ class MockServerState:
     commands_sent: list[dict[str, Any]] = field(default_factory=list)
     subscriptions: dict[str, dict[str, Any]] = field(default_factory=dict)
     manifests: list[dict[str, Any]] = field(default_factory=list)
+    # --- latency-bench hooks (scripts/bench_realtime.py) -----------------
+    # Monotonic arrival timestamps, recorded on the mock's WS loop:
+    # ``result_arrivals`` maps correlation_id -> time.monotonic() when
+    # the action.result frame arrived; ``chart_arrivals`` records
+    # (frame type, request/subscription id, arrival) for chart frames.
+    # ``live_ws`` is the currently connected client socket (None when
+    # disconnected) so the bench can push command/chart frames on
+    # demand instead of only receiving the canned demo command.
+    # Keyed by device_id: the bench also opens raw WS clients (RTT
+    # probe) against the same mock, and a single slot would be
+    # overwritten by whichever client connected last.
+    result_arrivals: dict[str, float] = field(default_factory=dict)
+    chart_arrivals: list[tuple[str, str | None, float]] = field(default_factory=list)
+    live_ws_by_device: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def record_batch(self, batch: dict[str, Any]) -> None:
@@ -307,6 +321,7 @@ async def _ws_handler(ws: Any, state: MockServerState) -> None:
         return
     with state._lock:
         state.ws_connections += 1
+        state.live_ws_by_device[device_id] = ws
     print(f"[MOCK] WS connected device={device_id}")
 
     async def send_demo() -> None:
@@ -338,10 +353,15 @@ async def _ws_handler(ws: Any, state: MockServerState) -> None:
                 await ws.send(json.dumps({"type": "heartbeat"}))
             elif mtype == "action.result":
                 state.record_result(msg)
+                with state._lock:
+                    state.result_arrivals[msg.get("correlation_id")] = time.monotonic()
                 print(f"[MOCK] action.result correlation={msg.get('correlation_id')} status={msg.get('status')}")
             elif mtype in ("chart.data", "chart.tick"):
                 with state._lock:
                     state.chart_frames_received.append(msg)
+                    state.chart_arrivals.append(
+                        (mtype, msg.get("request_id") or msg.get("subscription_id"), time.monotonic())
+                    )
             elif mtype == "chart.request":
                 await _answer_chart_request(ws, msg)
             elif mtype == "chart.subscribe":
@@ -354,6 +374,9 @@ async def _ws_handler(ws: Any, state: MockServerState) -> None:
     except websockets.ConnectionClosed:
         pass
     finally:
+        with state._lock:
+            if state.live_ws_by_device.get(device_id) is ws:
+                del state.live_ws_by_device[device_id]
         demo_task.cancel()
         print("[MOCK] WS disconnected")
 
@@ -520,6 +543,46 @@ class MockServer:
     @property
     def ws_url(self) -> str:
         return f"ws://{self.host}:{self._ws_port}/api/v1/connector/ws"
+
+    def send_json(self, payload: dict[str, Any], timeout: float = 5.0, device_id: str = "bench-device-001") -> float:
+        """Send one JSON frame to the live WS client (bench control path).
+
+        Returns the ``time.monotonic()`` timestamp taken immediately
+        before the send is scheduled on the mock's WS loop, so the
+        bench can measure server-send -> bridge-receive -> result
+        round-trips. Raises RuntimeError when no client is connected.
+        """
+        with self.state._lock:
+            ws = self.state.live_ws_by_device.get(device_id)
+        if ws is None or self._ws_loop is None:
+            raise RuntimeError(f"mock server has no live WS client for device {device_id!r}")
+        t0 = time.monotonic()
+        fut = asyncio.run_coroutine_threadsafe(ws.send(json.dumps(payload)), self._ws_loop)
+        fut.result(timeout=timeout)
+        return t0
+
+    def wait_for_result(self, correlation_id: str, timeout: float = 10.0) -> dict[str, Any] | None:
+        """Block until the mock records an action.result, or None on timeout."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self.state._lock:
+                for result in self.state.results:
+                    if result.get("correlation_id") == correlation_id:
+                        return result
+            time.sleep(0.02)
+        return None
+
+    def wait_for_chart(self, key: str, timeout: float = 10.0) -> dict[str, Any] | None:
+        """Block until a chart.data/chart.tick frame with the given
+        request_id (or subscription_id) arrives, or None on timeout."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self.state._lock:
+                for frame in self.state.chart_frames_received:
+                    if frame.get("request_id") == key or frame.get("subscription_id") == key:
+                        return frame
+            time.sleep(0.02)
+        return None
 
     def start(self) -> MockServer:
         self._rest_thread = threading.Thread(target=self._rest_httpd.serve_forever, name="mock-rest", daemon=True)

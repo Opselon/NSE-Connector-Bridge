@@ -1,0 +1,756 @@
+{
+  "meta": {
+    "generated_at": "2026-11-26T07:21:35.734636+00:00",
+    "environment": {
+      "host": "htch-runtime",
+      "os": "Linux 7.0.0-44-generic",
+      "python": "3.12.3",
+      "cpu_count": 4,
+      "load_avg_1_5_15": [
+        6.66,
+        5.33,
+        3.82
+      ],
+      "mem_total_mib": 7934,
+      "transport": "local loopback 127.0.0.1 (mock server + fake MT5, same VM)",
+      "note": "Loopback only. The user-PC -> Germany-server network leg is UNMEASURED (see verdict)."
+    },
+    "params": {
+      "command_samples": 100,
+      "tick_cycles": 8,
+      "chart_samples": 20,
+      "mt5_latency_profiles_ms_per_call": [
+        0.0,
+        5.0
+      ],
+      "chart_fetch_latency_ms": 20.0
+    },
+    "method": "Real ServerChannel + CommandExecutor + ChartService; mock Platform server (scripts/mock_server.py) on loopback; FakeMt5 behind a serialized single-worker thread mirroring Mt5Driver.run. No production, no live MT5."
+  },
+  "ws_rtt": {
+    "handshake_ms": {
+      "n": 5,
+      "p50_ms": 1.838,
+      "p95_ms": 5.824,
+      "p99_ms": 5.824,
+      "mean_ms": 2.808,
+      "max_ms": 5.824
+    },
+    "heartbeat_rtt_ms": {
+      "n": 100,
+      "p50_ms": 0.153,
+      "p95_ms": 0.93,
+      "p99_ms": 2.303,
+      "mean_ms": 0.888,
+      "max_ms": 62.865
+    }
+  },
+  "commands_mt5_0ms": {
+    "label": "close_position, MT5 IPC 0ms/call (Bridge floor)",
+    "mt5_latency_ms_per_call": 0.0,
+    "steps_ms": {
+      "ws_in": {
+        "n": 100,
+        "p50_ms": 1.442,
+        "p95_ms": 11.933,
+        "p99_ms": 58.276,
+        "mean_ms": 4.929,
+        "max_ms": 59.453
+      },
+      "dispatch": {
+        "n": 100,
+        "p50_ms": 0.352,
+        "p95_ms": 6.004,
+        "p99_ms": 14.765,
+        "mean_ms": 1.61,
+        "max_ms": 41.939
+      },
+      "mt5_execute": {
+        "n": 100,
+        "p50_ms": 3.169,
+        "p95_ms": 53.327,
+        "p99_ms": 59.135,
+        "mean_ms": 7.527,
+        "max_ms": 65.916
+      },
+      "enqueue_wait": {
+        "n": 100,
+        "p50_ms": 0.144,
+        "p95_ms": 1.896,
+        "p99_ms": 3.156,
+        "mean_ms": 0.545,
+        "max_ms": 10.097
+      },
+      "ws_send_ingest": {
+        "n": 100,
+        "p50_ms": 0.613,
+        "p95_ms": 2.051,
+        "p99_ms": 3.411,
+        "mean_ms": 0.874,
+        "max_ms": 3.924
+      },
+      "total": {
+        "n": 100,
+        "p50_ms": 7.963,
+        "p95_ms": 64.039,
+        "p99_ms": 71.375,
+        "mean_ms": 15.486,
+        "max_ms": 77.483
+      }
+    },
+    "failures": [],
+    "driver_ops": {
+      "positions_get": {
+        "calls": 103,
+        "avg_ms": 1.752,
+        "max_ms": 52.623,
+        "total_ms": 180.503
+      },
+      "symbol_info_tick": {
+        "calls": 100,
+        "avg_ms": 1.76,
+        "max_ms": 59.841,
+        "total_ms": 175.958
+      },
+      "symbol_info": {
+        "calls": 100,
+        "avg_ms": 1.1,
+        "max_ms": 55.488,
+        "total_ms": 110.016
+      },
+      "mt5_constants": {
+        "calls": 100,
+        "avg_ms": 0.435,
+        "max_ms": 5.0,
+        "total_ms": 43.518
+      },
+      "order_check": {
+        "calls": 100,
+        "avg_ms": 0.787,
+        "max_ms": 40.411,
+        "total_ms": 78.733
+      },
+      "order_send_close": {
+        "calls": 100,
+        "avg_ms": 0.478,
+        "max_ms": 5.896,
+        "total_ms": 47.801
+      }
+    },
+    "max_worker_queue_depth": 1
+  },
+  "commands_mt5_5ms": {
+    "label": "close_position, MT5 IPC 5.0ms/call",
+    "mt5_latency_ms_per_call": 5.0,
+    "steps_ms": {
+      "ws_in": {
+        "n": 100,
+        "p50_ms": 1.827,
+        "p95_ms": 54.804,
+        "p99_ms": 57.57,
+        "mean_ms": 6.639,
+        "max_ms": 58.404
+      },
+      "dispatch": {
+        "n": 100,
+        "p50_ms": 0.362,
+        "p95_ms": 4.474,
+        "p99_ms": 52.126,
+        "mean_ms": 2.367,
+        "max_ms": 59.315
+      },
+      "mt5_execute": {
+        "n": 100,
+        "p50_ms": 74.445,
+        "p95_ms": 95.107,
+        "p99_ms": 140.292,
+        "mean_ms": 61.342,
+        "max_ms": 162.362
+      },
+      "enqueue_wait": {
+        "n": 100,
+        "p50_ms": 0.24,
+        "p95_ms": 4.33,
+        "p99_ms": 52.216,
+        "mean_ms": 2.496,
+        "max_ms": 63.784
+      },
+      "ws_send_ingest": {
+        "n": 100,
+        "p50_ms": 1.015,
+        "p95_ms": 14.245,
+        "p99_ms": 52.385,
+        "mean_ms": 4.031,
+        "max_ms": 61.637
+      },
+      "total": {
+        "n": 100,
+        "p50_ms": 85.354,
+        "p95_ms": 111.208,
+        "p99_ms": 155.957,
+        "mean_ms": 76.875,
+        "max_ms": 188.671
+      }
+    },
+    "failures": [],
+    "driver_ops": {
+      "positions_get": {
+        "calls": 105,
+        "avg_ms": 12.138,
+        "max_ms": 67.089,
+        "total_ms": 1274.469
+      },
+      "symbol_info_tick": {
+        "calls": 100,
+        "avg_ms": 8.986,
+        "max_ms": 65.253,
+        "total_ms": 898.56
+      },
+      "symbol_info": {
+        "calls": 100,
+        "avg_ms": 11.327,
+        "max_ms": 64.036,
+        "total_ms": 1132.715
+      },
+      "mt5_constants": {
+        "calls": 100,
+        "avg_ms": 0.731,
+        "max_ms": 22.048,
+        "total_ms": 73.138
+      },
+      "order_check": {
+        "calls": 100,
+        "avg_ms": 13.869,
+        "max_ms": 67.848,
+        "total_ms": 1386.932
+      },
+      "order_send_close": {
+        "calls": 100,
+        "avg_ms": 12.328,
+        "max_ms": 68.197,
+        "total_ms": 1232.822
+      }
+    },
+    "max_worker_queue_depth": 1
+  },
+  "ticks": {
+    "label": "chart.subscribe EURUSD M1 poll=5s include_ticks (fetch 5ms/hop)",
+    "cycles_requested": 8,
+    "cycles_measured": 8,
+    "frames_received": 16,
+    "steps_ms": {
+      "mt5_fetch": {
+        "n": 8,
+        "p50_ms": 28.192,
+        "p95_ms": 83.844,
+        "p99_ms": 83.844,
+        "mean_ms": 37.691,
+        "max_ms": 83.844
+      },
+      "build_enqueue": {
+        "n": 8,
+        "p50_ms": 0.272,
+        "p95_ms": 1.344,
+        "p99_ms": 1.344,
+        "mean_ms": 0.495,
+        "max_ms": 1.344
+      },
+      "ws_send_ingest": {
+        "n": 8,
+        "p50_ms": 1.375,
+        "p95_ms": 4.582,
+        "p99_ms": 4.582,
+        "mean_ms": 2.183,
+        "max_ms": 4.582
+      },
+      "total": {
+        "n": 8,
+        "p50_ms": 29.278,
+        "p95_ms": 87.801,
+        "p99_ms": 87.801,
+        "mean_ms": 40.369,
+        "max_ms": 87.801
+      }
+    },
+    "fetch_spans_ms": {
+      "fetch_candles": {
+        "n": 8,
+        "p50_ms": 6.42,
+        "p95_ms": 67.485,
+        "p99_ms": 67.485,
+        "mean_ms": 14.083,
+        "max_ms": 67.485
+      },
+      "fetch_ticks": {
+        "n": 8,
+        "p50_ms": 10.871,
+        "p95_ms": 60.539,
+        "p99_ms": 60.539,
+        "mean_ms": 20.61,
+        "max_ms": 60.539
+      }
+    }
+  },
+  "chart_500": {
+    "label": "chart.request count=500",
+    "count": 500,
+    "steps_ms": {
+      "ws_in": {
+        "n": 20,
+        "p50_ms": 2.798,
+        "p95_ms": 6.119,
+        "p99_ms": 58.2,
+        "mean_ms": 5.489,
+        "max_ms": 58.2
+      },
+      "handle_request": {
+        "n": 20,
+        "p50_ms": 78.99,
+        "p95_ms": 95.243,
+        "p99_ms": 99.53,
+        "mean_ms": 80.088,
+        "max_ms": 99.53
+      },
+      "deliver": {
+        "n": 20,
+        "p50_ms": 8.517,
+        "p95_ms": 12.394,
+        "p99_ms": 18.559,
+        "mean_ms": 8.096,
+        "max_ms": 18.559
+      },
+      "total": {
+        "n": 20,
+        "p50_ms": 91.341,
+        "p95_ms": 116.251,
+        "p99_ms": 166.871,
+        "mean_ms": 94.141,
+        "max_ms": 166.871
+      }
+    },
+    "frame_bytes": {
+      "n": 20,
+      "p50_ms": 67049.0,
+      "p95_ms": 67049.0,
+      "p99_ms": 67049.0,
+      "mean_ms": 67049.0,
+      "max_ms": 67049.0
+    },
+    "candles_per_frame": [
+      500,
+      500,
+      500
+    ],
+    "failures": [],
+    "driver_ops": {
+      "positions_get": {
+        "calls": 2,
+        "avg_ms": 5.371,
+        "max_ms": 67.089,
+        "total_ms": 10.743
+      },
+      "symbol_select": {
+        "calls": 20,
+        "avg_ms": 5.388,
+        "max_ms": 63.133,
+        "total_ms": 107.758
+      },
+      "copy_rates_from_pos": {
+        "calls": 20,
+        "avg_ms": 74.572,
+        "max_ms": 93.585,
+        "total_ms": 1491.448
+      }
+    }
+  },
+  "chart_1000": {
+    "label": "chart.request count=1000",
+    "count": 1000,
+    "steps_ms": {
+      "ws_in": {
+        "n": 10,
+        "p50_ms": 3.289,
+        "p95_ms": 6.055,
+        "p99_ms": 6.055,
+        "mean_ms": 3.207,
+        "max_ms": 6.055
+      },
+      "handle_request": {
+        "n": 10,
+        "p50_ms": 83.249,
+        "p95_ms": 102.226,
+        "p99_ms": 102.226,
+        "mean_ms": 82.241,
+        "max_ms": 102.226
+      },
+      "deliver": {
+        "n": 10,
+        "p50_ms": 16.483,
+        "p95_ms": 78.675,
+        "p99_ms": 78.675,
+        "mean_ms": 23.907,
+        "max_ms": 78.675
+      },
+      "total": {
+        "n": 10,
+        "p50_ms": 98.85,
+        "p95_ms": 173.637,
+        "p99_ms": 173.637,
+        "mean_ms": 110.037,
+        "max_ms": 173.637
+      }
+    },
+    "frame_bytes": {
+      "n": 10,
+      "p50_ms": 133927.0,
+      "p95_ms": 133927.0,
+      "p99_ms": 133927.0,
+      "mean_ms": 133927.0,
+      "max_ms": 133927.0
+    },
+    "candles_per_frame": [
+      1000,
+      1000,
+      1000
+    ],
+    "failures": [],
+    "driver_ops": {
+      "symbol_select": {
+        "calls": 10,
+        "avg_ms": 5.742,
+        "max_ms": 63.133,
+        "total_ms": 57.42
+      },
+      "copy_rates_from_pos": {
+        "calls": 10,
+        "avg_ms": 76.365,
+        "max_ms": 96.677,
+        "total_ms": 763.649
+      }
+    }
+  },
+  "chart_micro": {
+    "label": "in-process handle_request + json.dumps, count=500, fetch=0ms",
+    "handle_request_ms": {
+      "n": 200,
+      "p50_ms": 20.111,
+      "p95_ms": 81.531,
+      "p99_ms": 97.679,
+      "mean_ms": 37.449,
+      "max_ms": 103.86
+    },
+    "json_dumps_ms": {
+      "n": 200,
+      "p50_ms": 1.167,
+      "p95_ms": 6.227,
+      "p99_ms": 50.211,
+      "mean_ms": 3.184,
+      "max_ms": 58.895
+    },
+    "frame_bytes": {
+      "n": 200,
+      "p50_ms": 67049.0,
+      "p95_ms": 67049.0,
+      "p99_ms": 67049.0,
+      "mean_ms": 67049.0,
+      "max_ms": 67049.0
+    }
+  },
+  "contention_dashboard": {
+    "label": "close_position under dashboard load (6 hammer workers)",
+    "mt5_latency_ms_per_call": 5.0,
+    "steps_ms": {
+      "ws_in": {
+        "n": 50,
+        "p50_ms": 1.89,
+        "p95_ms": 8.687,
+        "p99_ms": 22.797,
+        "mean_ms": 3.315,
+        "max_ms": 22.797
+      },
+      "dispatch": {
+        "n": 50,
+        "p50_ms": 3.287,
+        "p95_ms": 61.102,
+        "p99_ms": 82.477,
+        "mean_ms": 8.84,
+        "max_ms": 82.477
+      },
+      "mt5_execute": {
+        "n": 50,
+        "p50_ms": 401.496,
+        "p95_ms": 541.038,
+        "p99_ms": 815.477,
+        "mean_ms": 394.333,
+        "max_ms": 815.477
+      },
+      "enqueue_wait": {
+        "n": 50,
+        "p50_ms": 0.806,
+        "p95_ms": 9.466,
+        "p99_ms": 46.049,
+        "mean_ms": 3.129,
+        "max_ms": 46.049
+      },
+      "ws_send_ingest": {
+        "n": 50,
+        "p50_ms": 2.706,
+        "p95_ms": 62.527,
+        "p99_ms": 78.518,
+        "mean_ms": 11.518,
+        "max_ms": 78.518
+      },
+      "total": {
+        "n": 50,
+        "p50_ms": 422.995,
+        "p95_ms": 610.535,
+        "p99_ms": 836.005,
+        "mean_ms": 421.135,
+        "max_ms": 836.005
+      }
+    },
+    "failures": [],
+    "driver_ops": {
+      "positions_get": {
+        "calls": 61,
+        "avg_ms": 69.072,
+        "max_ms": 195.25,
+        "total_ms": 4213.362
+      },
+      "symbol_info_tick": {
+        "calls": 50,
+        "avg_ms": 73.008,
+        "max_ms": 173.603,
+        "total_ms": 3650.397
+      },
+      "symbol_info": {
+        "calls": 50,
+        "avg_ms": 69.722,
+        "max_ms": 191.51,
+        "total_ms": 3486.087
+      },
+      "mt5_constants": {
+        "calls": 50,
+        "avg_ms": 43.348,
+        "max_ms": 105.963,
+        "total_ms": 2167.418
+      },
+      "order_check": {
+        "calls": 50,
+        "avg_ms": 59.261,
+        "max_ms": 108.258,
+        "total_ms": 2963.055
+      },
+      "order_send_close": {
+        "calls": 50,
+        "avg_ms": 81.026,
+        "max_ms": 492.23,
+        "total_ms": 4051.301
+      },
+      "terminal_info": {
+        "calls": 1312,
+        "avg_ms": 71.189,
+        "max_ms": 491.092,
+        "total_ms": 93399.896
+      }
+    },
+    "max_worker_queue_depth": 7,
+    "dashboard_load": {
+      "workers": 6,
+      "interval_s": 0.0,
+      "hammer_requests": 1387,
+      "hammer_failed": 0,
+      "hammer_seconds": 23.9,
+      "hammer_req_per_s": 58.1,
+      "hammer_request_ms": {
+        "n": 1387,
+        "p50_ms": 95.528,
+        "p95_ms": 241.534,
+        "p99_ms": 308.207,
+        "mean_ms": 103.136,
+        "max_ms": 622.208
+      }
+    }
+  },
+  "contention_dashboard_realistic": {
+    "label": "close_position under realistic dashboard load (1 worker, ~1 req/s)",
+    "mt5_latency_ms_per_call": 5.0,
+    "steps_ms": {
+      "ws_in": {
+        "n": 50,
+        "p50_ms": 1.625,
+        "p95_ms": 6.151,
+        "p99_ms": 18.488,
+        "mean_ms": 2.418,
+        "max_ms": 18.488
+      },
+      "dispatch": {
+        "n": 50,
+        "p50_ms": 0.763,
+        "p95_ms": 3.98,
+        "p99_ms": 9.115,
+        "mean_ms": 1.313,
+        "max_ms": 9.115
+      },
+      "mt5_execute": {
+        "n": 50,
+        "p50_ms": 68.986,
+        "p95_ms": 88.291,
+        "p99_ms": 97.614,
+        "mean_ms": 63.004,
+        "max_ms": 97.614
+      },
+      "enqueue_wait": {
+        "n": 50,
+        "p50_ms": 0.292,
+        "p95_ms": 2.651,
+        "p99_ms": 48.772,
+        "mean_ms": 1.635,
+        "max_ms": 48.772
+      },
+      "ws_send_ingest": {
+        "n": 50,
+        "p50_ms": 0.724,
+        "p95_ms": 3.093,
+        "p99_ms": 7.367,
+        "mean_ms": 1.219,
+        "max_ms": 7.367
+      },
+      "total": {
+        "n": 50,
+        "p50_ms": 79.003,
+        "p95_ms": 95.422,
+        "p99_ms": 102.505,
+        "mean_ms": 69.59,
+        "max_ms": 102.505
+      }
+    },
+    "failures": [],
+    "driver_ops": {
+      "positions_get": {
+        "calls": 53,
+        "avg_ms": 11.479,
+        "max_ms": 195.25,
+        "total_ms": 608.366
+      },
+      "symbol_info_tick": {
+        "calls": 50,
+        "avg_ms": 8.921,
+        "max_ms": 173.603,
+        "total_ms": 446.051
+      },
+      "symbol_info": {
+        "calls": 50,
+        "avg_ms": 11.108,
+        "max_ms": 191.51,
+        "total_ms": 555.396
+      },
+      "mt5_constants": {
+        "calls": 50,
+        "avg_ms": 2.645,
+        "max_ms": 105.963,
+        "total_ms": 132.254
+      },
+      "order_check": {
+        "calls": 50,
+        "avg_ms": 15.12,
+        "max_ms": 108.258,
+        "total_ms": 756.0
+      },
+      "order_send_close": {
+        "calls": 50,
+        "avg_ms": 12.305,
+        "max_ms": 492.23,
+        "total_ms": 615.253
+      },
+      "terminal_info": {
+        "calls": 8,
+        "avg_ms": 20.59,
+        "max_ms": 491.092,
+        "total_ms": 164.722
+      }
+    },
+    "max_worker_queue_depth": 7,
+    "dashboard_load": {
+      "workers": 1,
+      "interval_s": 1.0,
+      "hammer_requests": 10,
+      "hammer_failed": 0,
+      "hammer_seconds": 5.5,
+      "hammer_req_per_s": 1.8,
+      "hammer_request_ms": {
+        "n": 10,
+        "p50_ms": 25.098,
+        "p95_ms": 98.53,
+        "p99_ms": 98.53,
+        "mean_ms": 41.96,
+        "max_ms": 98.53
+      }
+    }
+  },
+  "contention_blocked_worker": {
+    "label": "close_position sent 10ms after a 300ms chart fetch started (same MT5 worker)",
+    "chart_fetch_ms": 300.0,
+    "steps_ms": {
+      "ws_in": {
+        "n": 10,
+        "p50_ms": 331.486,
+        "p95_ms": 370.474,
+        "p99_ms": 370.474,
+        "mean_ms": 343.417,
+        "max_ms": 370.474
+      },
+      "dispatch": {
+        "n": 10,
+        "p50_ms": 13.79,
+        "p95_ms": 81.35,
+        "p99_ms": 81.35,
+        "mean_ms": 41.294,
+        "max_ms": 81.35
+      },
+      "mt5_execute": {
+        "n": 10,
+        "p50_ms": 35.182,
+        "p95_ms": 86.118,
+        "p99_ms": 86.118,
+        "mean_ms": 48.254,
+        "max_ms": 86.118
+      },
+      "enqueue_wait": {
+        "n": 10,
+        "p50_ms": 0.217,
+        "p95_ms": 4.716,
+        "p99_ms": 4.716,
+        "mean_ms": 1.265,
+        "max_ms": 4.716
+      },
+      "ws_send_ingest": {
+        "n": 10,
+        "p50_ms": 1.096,
+        "p95_ms": 14.208,
+        "p99_ms": 14.208,
+        "mean_ms": 3.386,
+        "max_ms": 14.208
+      },
+      "total": {
+        "n": 10,
+        "p50_ms": 423.676,
+        "p95_ms": 493.022,
+        "p99_ms": 493.022,
+        "mean_ms": 437.615,
+        "max_ms": 493.022
+      },
+      "chart_fetch_roundtrip": {
+        "n": 10,
+        "p50_ms": 396.158,
+        "p95_ms": 458.82,
+        "p99_ms": 458.82,
+        "mean_ms": 405.631,
+        "max_ms": 458.82
+      }
+    },
+    "failures": [],
+    "max_worker_queue_depth": 7,
+    "queue_depth_before": 7
+  }
+}
