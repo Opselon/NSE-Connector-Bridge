@@ -450,9 +450,7 @@ def create_app(ctx: BridgeContext) -> FastAPI:
             "broker": broker,
             "server": {
                 "enrolment_state": enrolment_state,
-                "enrolment_terminal": bool(
-                    enrolment.get("terminal", enrolment_state in ("failed_auth", "failed"))
-                ),
+                "enrolment_terminal": bool(enrolment.get("terminal", enrolment_state in ("failed_auth", "failed"))),
                 "enrolment_last_error": enrolment.get("last_error"),
                 "enrolment_last_error_message": enrolment.get("last_error_message"),
                 "ws_state": channel_state.get("ws_state"),

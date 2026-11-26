@@ -237,6 +237,7 @@ async def test_ws_heartbeat_loop_sends_and_records(tmp_path: Path):
     """The WS heartbeat loop records every heartbeat it SENDS (epoch +
     ISO UTC + local) — the "Last heartbeat sent" field is the send,
     not the reply."""
+
     class _FakeWS:
         def __init__(self) -> None:
             self.sent: list[str] = []

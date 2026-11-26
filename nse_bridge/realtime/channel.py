@@ -390,6 +390,12 @@ class ServerChannel:
         # revalidate once instead of hammering the handshake; the
         # count resets on any success or non-auth failure.
         self._ws_auth_failures = 0
+        # In-flight chart.request tasks (latency hot spot 1): chart
+        # fetches run off the receive loop so a slow MT5 fetch can
+        # never delay the next incoming command. Tracked so session
+        # teardown can cancel them (like the other session tasks) and
+        # so a finished task is never GC'd mid-flight.
+        self._chart_request_tasks: set[asyncio.Task[None]] = set()
         self._last_server_frame_at: float = 0.0
         self._last_login: str | None = None
         self._rest = rest_client
@@ -1028,6 +1034,14 @@ class ServerChannel:
                     await task
                 except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 — teardown must never raise
                     logger.debug("[CHANNEL] session task teardown failed: {}", type(exc).__name__)
+            # In-flight chart.request tasks end with the session too:
+            # the fetch was abandoned with the old receive loop, and a
+            # late frame would be cleared by the next session's
+            # outbound reset anyway — the server re-requests.
+            for task in list(self._chart_request_tasks):
+                task.cancel()
+            if self._chart_request_tasks:
+                await asyncio.gather(*self._chart_request_tasks, return_exceptions=True)
             if self._chart is not None:
                 # Subscriptions die with the WS session (§17.1.3); the
                 # server re-subscribes on reconnect with fresh ids.
@@ -1276,7 +1290,18 @@ class ServerChannel:
             self._last_heartbeat_reply_at = time.monotonic()
             self._note_heartbeat_received("ws")
         elif mtype == "chart.request":
-            await self._handle_chart_request(msg)
+            # Latency hot spot 1 (PERFORMANCE-v14-baseline): the
+            # receive loop used to AWAIT the chart fetch inline, so a
+            # 300 ms MT5 fetch delayed the NEXT incoming command by
+            # ~330 ms (ws_in p50 331/367 ms) before the command's own
+            # execution even started. Chart requests run on a task
+            # now, like commands — the loop keeps receiving. Frames
+            # carry request_id, so concurrent fetches cannot confuse
+            # the server; the 30 s timeout + the session-teardown
+            # cancel in _session() bound every task.
+            task = asyncio.create_task(self._handle_chart_request(msg), name="nse-channel-chart-req")
+            self._chart_request_tasks.add(task)
+            task.add_done_callback(self._chart_request_tasks.discard)
         elif mtype == "chart.subscribe":
             if self._chart is not None:
                 error_frame = self._chart.handle_subscribe(msg)
@@ -1297,6 +1322,13 @@ class ServerChannel:
             logger.debug("[CHANNEL] ignored server message type={}", mtype)
 
     async def _handle_chart_request(self, msg: dict[str, Any]) -> None:
+        """Answer one ``chart.request`` (§17.1.1) on a background task.
+
+        Runs off the receive loop (latency hot spot 1) — so it must
+        never raise: an unhandled exception in a fire-and-forget task
+        would leave the server with no answer at all. Every failure
+        path answers with a chart error frame instead.
+        """
         if self._chart is None:
             return
         try:
@@ -1318,6 +1350,18 @@ class ServerChannel:
                     timeframe=str(msg.get("timeframe") or ""),
                     code="chart_timeout",
                     message="MT5 chart call exceeded the 30 s timeout",
+                )
+            ]
+        except Exception as exc:  # noqa: BLE001 — a chart failure must answer, never kill the task silently
+            logger.warning("[CHANNEL] chart.request {} failed: {}", msg.get("request_id"), type(exc).__name__)
+            frames = [
+                build_chart_error_frame(
+                    request_id=msg.get("request_id"),
+                    subscription_id=None,
+                    symbol=str(msg.get("symbol") or ""),
+                    timeframe=str(msg.get("timeframe") or ""),
+                    code="chart_error",
+                    message="chart request failed",
                 )
             ]
         for frame in frames:

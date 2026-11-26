@@ -148,7 +148,9 @@ def test_classify_ws_401_key_revoked_verbatim():
 def test_classify_ws_401_key_invalid_and_403():
     from nse_bridge.realtime.channel import classify_ws_connect_error
 
-    info = classify_ws_connect_error(_FakeInvalidStatus(401, b'{"error": {"code": "key_invalid", "message": "bad key"}}'))
+    info = classify_ws_connect_error(
+        _FakeInvalidStatus(401, b'{"error": {"code": "key_invalid", "message": "bad key"}}')
+    )
     assert info["kind"] == "ws_auth"
     assert info["code"] == "key_invalid"
     info = classify_ws_connect_error(
@@ -208,3 +210,76 @@ def test_outbound_queue_total_queued():
     queue.put_chart({"type": "chart.data", "symbol": "EURUSD"})
     queue.put_result({"event_type": "action.result", "correlation_id": "c1"})
     assert queue.total_queued == 2
+
+
+# ---------------------------------------------------------------------------
+# B2 latency hot spot 1 (PERFORMANCE-v14-baseline): the receive loop
+# used to await chart.request inline, so a slow MT5 chart fetch
+# delayed the next incoming command by ~330 ms. Chart requests run
+# on a task now, like commands — the loop keeps receiving.
+# ---------------------------------------------------------------------------
+class _SlowChartService:
+    """ChartService stub whose fetch blocks a worker thread for 0.5 s."""
+
+    class _Limiter:
+        def allow(self) -> bool:
+            return True
+
+        def would_allow(self) -> bool:
+            return True
+
+    def __init__(self) -> None:
+        self.rate_limiter = self._Limiter()
+
+    def handle_request(self, frame: dict) -> list[dict]:
+        import time
+
+        time.sleep(0.5)
+        return [{"type": "chart.data", "request_id": frame.get("request_id"), "candles": []}]
+
+
+class _ExplodingChartService(_SlowChartService):
+    def handle_request(self, frame: dict) -> list[dict]:
+        raise RuntimeError("boom")
+
+
+@pytest.mark.unit
+async def test_chart_request_does_not_block_receive_loop():
+    settings = BridgeSettings(_env_file=None, server_token="x", device_id="dev-1")
+    ctx = BridgeContext(settings=settings, driver=Mt5Driver(settings))
+    channel = ServerChannel(ctx, EventBus())
+    channel._chart = _SlowChartService()  # type: ignore[assignment]
+    started = asyncio.get_running_loop().time()
+    await channel._handle_server_message(
+        '{"type": "chart.request", "request_id": "r1", "symbol": "EURUSD", "timeframe": "M1"}'
+    )
+    elapsed = asyncio.get_running_loop().time() - started
+    # The old code awaited the 0.5 s fetch inline; the dispatch must
+    # return immediately now (the fetch runs on a task).
+    assert elapsed < 0.2, f"receive loop blocked {elapsed:.2f}s on chart.request"
+    assert len(channel._chart_request_tasks) == 1
+    # The frame still arrives — just later, off the loop.
+    frame = await asyncio.wait_for(channel._outbound.get(), timeout=5.0)
+    assert frame["request_id"] == "r1"
+    deadline = asyncio.get_event_loop().time() + 5.0
+    while channel._chart_request_tasks:
+        assert asyncio.get_event_loop().time() < deadline, "chart task never finished"
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.unit
+async def test_chart_request_failure_answers_with_error_frame():
+    """A chart fetch that raises unexpectedly must answer with a
+    chart error frame — a fire-and-forget task can never die silently
+    with no answer to the server."""
+    settings = BridgeSettings(_env_file=None, server_token="x", device_id="dev-1")
+    ctx = BridgeContext(settings=settings, driver=Mt5Driver(settings))
+    channel = ServerChannel(ctx, EventBus())
+    channel._chart = _ExplodingChartService()  # type: ignore[assignment]
+    await channel._handle_server_message(
+        '{"type": "chart.request", "request_id": "r2", "symbol": "EURUSD", "timeframe": "M1"}'
+    )
+    frame = await asyncio.wait_for(channel._outbound.get(), timeout=5.0)
+    assert frame["request_id"] == "r2"
+    assert frame["status"] == "error"
+    assert frame["error_code"] == "chart_error"

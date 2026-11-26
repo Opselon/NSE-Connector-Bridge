@@ -403,8 +403,7 @@ class EnrolmentManager:
             last_error_message=message[:200],
         )
         logger.warning(
-            "[ENROL] enrolment failed ({}: {}) — retrying with backoff "
-            "({}/{})",
+            "[ENROL] enrolment failed ({}: {}) — retrying with backoff ({}/{})",
             code,
             message[:120],
             self._transient_failures,
@@ -745,9 +744,7 @@ class EnrolmentManager:
                 # Terminal for the fast-retry cycle, but the slow
                 # schedule keeps trying: wait it out, reset the
                 # transient counter, then fall through to enrol_once.
-                self._status.next_retry_at = (
-                    datetime.now(UTC) + timedelta(seconds=self._slow_retry_s)
-                ).isoformat()
+                self._status.next_retry_at = (datetime.now(UTC) + timedelta(seconds=self._slow_retry_s)).isoformat()
                 await self._wait_or_stop(stop, self._slow_retry_s)
                 if stop.is_set() or not self.is_configured:
                     continue
