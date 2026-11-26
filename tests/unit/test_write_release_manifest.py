@@ -47,11 +47,11 @@ def _sha(path: Path) -> str:
 def test_single_exe_shape_is_backwards_compatible(tmp_path: Path):
     exe = _write(tmp_path / "NSE-MT5-Bridge.exe", b"fake-exe")
     out = tmp_path / "out"
-    proc = _run(str(exe), "--tag", "v1.3.1", "--out-dir", str(out))
+    proc = _run(str(exe), "--tag", "v1.4.0", "--out-dir", str(out))
     assert proc.returncode == 0, proc.stderr
     manifest = json.loads((out / "release-manifest.json").read_text(encoding="utf-8"))
     assert manifest["version"] == BRIDGE_VERSION
-    assert manifest["tag"] == "v1.3.1"
+    assert manifest["tag"] == "v1.4.0"
     assert manifest["platform"] == "windows-x64"
     assert manifest["platforms"] == ["windows-x64"]
     assert manifest["files"] == [
