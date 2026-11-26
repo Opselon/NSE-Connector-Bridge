@@ -23,6 +23,27 @@ States::
                       (``reset_for_new_key``) leaves this state.
     FAILED_TRANSIENT — 5xx / 429 / network error: retry with backoff
                       (500 ms doubling → 30 s + jitter, §5.4).
+    FAILED          — TERMINAL for this key's current retry cycle:
+                      ``MAX_TRANSIENT_ATTEMPTS`` consecutive transient
+                      failures with no success. The exact server reason
+                      is kept in ``last_error`` / ``last_error_message``
+                      (verbatim). The supervisor keeps retrying, but
+                      only on the slow schedule (``FAILED_SLOW_RETRY_S``)
+                      — fast retries have stopped, so the dashboard must
+                      show this as failed, not "validating".
+
+A VALIDATING state that never resolves is a bug, not a state: the
+only producer of a parked VALIDATING is the REST client's §3.2
+re-enrolment (``note_reauth_start``), and if its completion callback
+never fires (a non-ServerError escaping ``register-device``, a
+cancelled task) the supervisor used to park in VALIDATING forever —
+the channel gate waited forever, sync stayed queued, and the
+dashboard showed "Validating" for a 10+ minute session while the
+server recorded heartbeats. The supervisor therefore watches
+VALIDATING: if it lasts longer than ``VALIDATING_STALE_S`` (above the
+worst case for one register-device attempt, ~4 × 30 s + backoff) it
+drives an enrolment attempt itself, which always lands in a
+definitive state. VALIDATING is never terminal and never permanent.
 
 Re-enrolment after a 401 (§3.2): Phase 2's :mod:`nse_bridge.server.rest`
 already implements the recovery path — a 401 on a non-auth endpoint
@@ -47,8 +68,9 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -77,6 +99,24 @@ ENROLMENT_JITTER_MAX_S = 0.1
 #: NOT_CONFIGURED (a key entered at runtime via Settings applies
 #: without a bridge restart).
 NOT_CONFIGURED_POLL_S = 5.0
+#: Consecutive transient failures after which enrolment is TERMINAL
+#: for the fast-retry cycle (state FAILED). N = 10: with the §5.4
+#: backoff that is ~2.5 minutes of fast retries (0.5 + 1 + 2 + 4 + 8
+#: + 16 + 30 × 4 s of backoff between attempts) before the dashboard
+#: stops saying "retrying" and says "failed" with the exact server
+#: reason. The supervisor keeps retrying afterwards, but only on the
+#: slow schedule (FAILED_SLOW_RETRY_S) — see the module docstring.
+MAX_TRANSIENT_ATTEMPTS = 10
+#: Slow retry schedule once FAILED (seconds between attempts). The
+#: device keeps trying to enrol on this schedule until it succeeds,
+#: a new key arrives (reset_for_new_key), or the bridge stops.
+FAILED_SLOW_RETRY_S = 60.0
+#: A parked VALIDATING older than this is stale and the supervisor
+#: drives an enrolment attempt itself (see the module docstring).
+#: Above the worst case for one register-device attempt through the
+#: REST client (~4 × 30 s request timeout + backoff ≈ 125 s), so a
+#: genuinely slow re-enrolment is never interrupted.
+VALIDATING_STALE_S = 180.0
 
 
 class EnrolmentState(str):
@@ -87,6 +127,16 @@ class EnrolmentState(str):
     REGISTERED = "registered"
     FAILED_AUTH = "failed_auth"
     FAILED_TRANSIENT = "failed_transient"
+    #: Terminal for the fast-retry cycle: MAX_TRANSIENT_ATTEMPTS
+    #: consecutive transient failures. Slow-schedule retries continue
+    #: (FAILED_SLOW_RETRY_S); only a new key or a success leaves it.
+    FAILED = "failed"
+
+
+#: Terminal enrolment states: no fast retry happens in them.
+#: FAILED_AUTH never retries with the same key (§3.1); FAILED retries
+#: only on the slow schedule.
+TERMINAL_ENROLMENT_STATES = frozenset({EnrolmentState.FAILED_AUTH, EnrolmentState.FAILED})
 
 
 def enrolment_backoff_delay(
@@ -112,6 +162,20 @@ class EnrolmentStatus:
     last_error: str | None = None  # contract §3.6 error code, e.g. "key_invalid"
     last_error_message: str | None = None  # server message, truncated; never key material
     attempts: int = 0  # validate-key → register-device attempts so far
+    #: True in the terminal states (FAILED_AUTH, FAILED): fast retries
+    #: have stopped. FAILED still retries on the slow schedule.
+    terminal: bool = False
+    #: Consecutive transient failures in the current retry cycle
+    #: (resets on success or on the slow-schedule retry after FAILED).
+    transient_failures: int = 0
+    #: ISO-8601 UTC time of the next scheduled retry attempt, or None
+    #: when no retry is scheduled (terminal FAILED_AUTH, REGISTERED,
+    #: NOT_CONFIGURED). The dashboard shows this instead of a bare
+    #: "retrying" so a stuck-looking state always names its next step.
+    next_retry_at: str | None = None
+    #: ISO-8601 UTC time of the last enrolment attempt / last success.
+    last_attempt_at: str | None = None
+    last_success_at: str | None = None
 
 
 class EnrolmentManager:
@@ -132,12 +196,16 @@ class EnrolmentManager:
         jitter: bool = True,
         telemetry: Any | None = None,
         manifest_tracker: ManifestTracker | None = None,
+        slow_retry_s: float = FAILED_SLOW_RETRY_S,
+        validating_stale_s: float = VALIDATING_STALE_S,
     ) -> None:
         self._ctx = ctx
         self._rest = rest_client
         self._retry_base_s = retry_base_s
         self._retry_cap_s = retry_cap_s
         self._jitter = jitter
+        self._slow_retry_s = slow_retry_s
+        self._validating_stale_s = validating_stale_s
         # TelemetryEmitter (ARCHITECTURE-CONTRACT §8), optional.
         self.telemetry = telemetry if telemetry is not None else getattr(ctx, "telemetry", None)
         # Manifest tracker (§4.1): shared with the WS channel so the
@@ -147,6 +215,16 @@ class EnrolmentManager:
         self._status = EnrolmentStatus(configured=self.is_configured)
         self._transient_failures = 0
         self.backoff_delays: list[float] = []
+        # Monotonic timestamp of the current VALIDATING entry (None
+        # otherwise) — the supervisor's stale-VALIDATING watchdog.
+        self._validating_since: float | None = None
+        # Set by request_revalidation(): the WS channel saw repeated
+        # WS-auth failures (HTTP 401/403 on the handshake) while REST
+        # validation still succeeds, which points at a stale device
+        # session — the supervisor re-runs enrol_once to re-register.
+        # The supervisor owns every enrol_once call, so this event is
+        # the only way to ask for a revalidation from outside.
+        self._revalidate_event = asyncio.Event()
         # Per-waiter state events: every state transition wakes all
         # current waiters (the WS channel gate, the supervisor's park
         # loop). The old 100 ms state polls burned ~40k wakeups/hour
@@ -188,6 +266,11 @@ class EnrolmentManager:
             "last_error": status.last_error,
             "last_error_message": status.last_error_message,
             "attempts": status.attempts,
+            "terminal": status.state in TERMINAL_ENROLMENT_STATES,
+            "transient_failures": self._transient_failures,
+            "next_retry_at": status.next_retry_at,
+            "last_attempt_at": status.last_attempt_at,
+            "last_success_at": status.last_success_at,
             "session_expires_at": self.session_expires_at,
             "user_id": getattr(self._rest, "user_id", None),
         }
@@ -203,6 +286,27 @@ class EnrolmentManager:
         previous = self._status.state
         self._status.state = state
         self._status.configured = self.is_configured
+        self._status.terminal = state in TERMINAL_ENROLMENT_STATES
+        self._status.transient_failures = self._transient_failures
+        if state == EnrolmentState.VALIDATING:
+            # (Re)entering VALIDATING (re)starts the stale watchdog.
+            if self._validating_since is None:
+                self._validating_since = time.monotonic()
+        else:
+            self._validating_since = None
+        if state == EnrolmentState.REGISTERED:
+            self._status.last_success_at = datetime.now(UTC).isoformat()
+            self._status.next_retry_at = None
+        elif state in (
+            EnrolmentState.FAILED_AUTH,
+            EnrolmentState.NOT_CONFIGURED,
+            EnrolmentState.VALIDATING,
+        ):
+            # No retry is scheduled in these states (FAILED_AUTH needs
+            # a new key; NOT_CONFIGURED needs configuration; VALIDATING
+            # means the attempt the old next_retry_at pointed at is
+            # now running).
+            self._status.next_retry_at = None
         for waiter in list(self._state_waiters):
             waiter.set()
         if last_error is not None or state in (
@@ -236,6 +340,17 @@ class EnrolmentManager:
                     error_code=last_error,
                     details={"attempts": self._status.attempts},
                 )
+            elif state == EnrolmentState.FAILED:
+                self.telemetry.error(
+                    "enrolment.failed",
+                    component="server.enrolment",
+                    error_code=last_error,
+                    details={
+                        "terminal": True,
+                        "retry": "slow_schedule",
+                        "transient_failures": self._transient_failures,
+                    },
+                )
 
     async def _wait_or_stop(self, stop: asyncio.Event, delay: float) -> None:
         """Wait ``delay`` seconds or until ``stop`` is set."""
@@ -255,12 +370,53 @@ class EnrolmentManager:
         return delay
 
     # ------------------------------------------------------------------
+    def _set_transient_failure(self, code: str, message: str) -> None:
+        """Record one transient failure.
+
+        Below ``MAX_TRANSIENT_ATTEMPTS`` consecutive failures the state
+        is FAILED_TRANSIENT (fast backoff continues). At the Nth
+        failure the state becomes FAILED — terminal for the fast-retry
+        cycle: the exact server reason is kept verbatim, ``next_retry_at``
+        names the slow-schedule retry, and the supervisor only retries
+        every ``FAILED_SLOW_RETRY_S`` from then on.
+        """
+        self._transient_failures += 1
+        if self._transient_failures >= MAX_TRANSIENT_ATTEMPTS:
+            self._set_state(
+                EnrolmentState.FAILED,
+                last_error=code,
+                last_error_message=message[:200],
+            )
+            self._status.next_retry_at = (datetime.now(UTC) + timedelta(seconds=self._slow_retry_s)).isoformat()
+            logger.error(
+                "[ENROL] {} consecutive transient failures — terminal for "
+                "this retry cycle ({}: {}); slow retry every {:.0f}s",
+                self._transient_failures,
+                code,
+                message[:120],
+                self._slow_retry_s,
+            )
+            return
+        self._set_state(
+            EnrolmentState.FAILED_TRANSIENT,
+            last_error=code,
+            last_error_message=message[:200],
+        )
+        logger.warning(
+            "[ENROL] enrolment failed ({}: {}) — retrying with backoff ({}/{})",
+            code,
+            message[:120],
+            self._transient_failures,
+            MAX_TRANSIENT_ATTEMPTS,
+        )
+
     def _classify_failure(self, exc: BaseException, step: str) -> bool:
         """Record a failed enrolment step. Returns False (never enrolled).
 
         Fatal auth (401/403, including a malformed 401/403 response —
         fail closed, §3.6) → FAILED_AUTH, terminal for this key.
-        Anything else retryable → FAILED_TRANSIENT.
+        Anything else retryable → FAILED_TRANSIENT, or FAILED once
+        MAX_TRANSIENT_ATTEMPTS consecutive transient failures accrue.
         """
         if isinstance(exc, ServerError):
             code = exc.code
@@ -276,26 +432,9 @@ class EnrolmentManager:
                     code.value,
                 )
                 return False
-            self._transient_failures += 1
-            self._set_state(
-                EnrolmentState.FAILED_TRANSIENT,
-                last_error=code.value,
-                last_error_message=(exc.message or "")[:200],
-            )
-            logger.warning(
-                "[ENROL] {} failed ({}: {}) — retrying with backoff",
-                step,
-                code.value,
-                (exc.message or "")[:120],
-            )
+            self._set_transient_failure(code.value, exc.message or "")
             return False
-        self._transient_failures += 1
-        self._set_state(
-            EnrolmentState.FAILED_TRANSIENT,
-            last_error="unexpected_error",
-            last_error_message=type(exc).__name__[:200],
-        )
-        logger.warning("[ENROL] {} failed unexpectedly: {} — retrying with backoff", step, type(exc).__name__)
+        self._set_transient_failure("unexpected_error", type(exc).__name__)
         return False
 
     def _store_validate_result(self, result: ValidateKeyResult) -> None:
@@ -323,6 +462,7 @@ class EnrolmentManager:
             self._set_state(EnrolmentState.NOT_CONFIGURED)
             return False
         self._status.attempts += 1
+        self._status.last_attempt_at = datetime.now(UTC).isoformat()
         self._set_state(EnrolmentState.VALIDATING)
         try:
             result = await self._rest.validate_key()
@@ -352,6 +492,25 @@ class EnrolmentManager:
         # already set above, so nothing downstream waits on the POST.
         if self._manifest_task is None or self._manifest_task.done():
             self._manifest_task = asyncio.create_task(self._publish_manifest())
+        return True
+
+    def request_revalidation(self) -> bool:
+        """Ask the supervisor to re-run enrolment (validate-key →
+        register-device) from scratch.
+
+        Called by the WS channel after repeated WS-handshake auth
+        failures (HTTP 401/403) while REST validation still succeeds:
+        the key is good, but the device session the WS expects is
+        stale — re-registering is the recovery. Only honoured while
+        REGISTERED (a revalidation of a failed/unconfigured device is
+        the supervisor's own job); returns True when the supervisor
+        was woken. The supervisor owns every enrol_once call, so this
+        can never run concurrently with another attempt.
+        """
+        if self._status.state != EnrolmentState.REGISTERED:
+            return False
+        self._revalidate_event.set()
+        logger.warning("[ENROL] revalidation requested (repeated WS auth failures) — re-enrolling")
         return True
 
     async def _publish_manifest(self) -> None:
@@ -457,6 +616,7 @@ class EnrolmentManager:
             self._rest.api_key = self._ctx.settings.server_token
         self._status.attempts = 0
         self._transient_failures = 0
+        self._revalidate_event.clear()
         self._ctx.validate_key_result = None
         self._set_state(EnrolmentState.NOT_CONFIGURED)
         logger.info("[ENROL] new API key configured — re-enrolling from scratch")
@@ -467,32 +627,57 @@ class EnrolmentManager:
         self._state_waiters.add(waiter)
         return waiter
 
-    async def _wait_state_change(self, stop: asyncio.Event) -> None:
-        """Sleep until the state changes or ``stop`` is set (no polling)."""
+    async def _wait_state_change(
+        self,
+        stop: asyncio.Event,
+        *,
+        timeout: float | None = None,
+        extra_event: asyncio.Event | None = None,
+    ) -> str:
+        """Sleep until the state changes, ``stop`` is set, the optional
+        ``extra_event`` fires, or ``timeout`` elapses (no polling).
+
+        Returns what woke the wait: ``"state"``, ``"stop"``,
+        ``"extra"``, or ``"timeout"``.
+        """
         waiter = self._register_state_waiter()
         wait_task = asyncio.create_task(waiter.wait())
         stop_task = asyncio.create_task(stop.wait())
+        tasks = {wait_task, stop_task}
+        extra_task = None
+        if extra_event is not None:
+            extra_task = asyncio.create_task(extra_event.wait())
+            tasks.add(extra_task)
         try:
-            await asyncio.wait({wait_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+            done, _pending = await asyncio.wait(tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            for task in (wait_task, stop_task):
-                task.cancel()
-            await asyncio.gather(wait_task, stop_task, return_exceptions=True)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             self._state_waiters.discard(waiter)
+        if stop_task in done:
+            return "stop"
+        if extra_task is not None and extra_task in done:
+            return "extra"
+        if wait_task in done:
+            return "state"
+        return "timeout"
 
     async def wait_until_registered(self, stop: asyncio.Event) -> bool:
-        """Block until REGISTERED (True) or FAILED_AUTH / stop (False).
+        """Block until REGISTERED (True) or terminal / stop (False).
 
         Used by the WS channel gate (§5.1): the channel must not open
         until enrolment succeeded; while enrolment is still retrying
         this waits (woken by state events, not a 100 ms poll); on
-        FAILED_AUTH the channel stays down.
+        FAILED_AUTH or FAILED (terminal for the fast-retry cycle) the
+        channel stays down with the reason exposed.
         """
         while True:
             state = self._status.state
             if state == EnrolmentState.REGISTERED:
                 return True
-            if state == EnrolmentState.FAILED_AUTH:
+            if state in TERMINAL_ENROLMENT_STATES:
                 return False
             if stop.is_set():
                 return False
@@ -502,9 +687,18 @@ class EnrolmentManager:
         """Supervise enrolment until FAILED_AUTH or ``stop``.
 
         - Unconfigured → NOT_CONFIGURED, re-check every few seconds.
-        - REGISTERED / VALIDATING → park until the state moves (a
-          re-auth notification, a new key, or stop).
+        - REGISTERED → park until the state moves (a re-auth
+          notification, a new key, stop) or a revalidation is
+          requested (``request_revalidation`` — repeated WS-auth
+          failures); a revalidation re-runs enrol_once.
+        - VALIDATING → park, but never forever: if VALIDATING lasts
+          longer than VALIDATING_STALE_S the supervisor drives an
+          enrolment attempt itself, so a re-auth whose completion
+          callback never fired cannot wedge the machine (the 2026-11-26
+          "Validating forever" incident).
         - FAILED_TRANSIENT → back off (§5.4 schedule), then retry.
+        - FAILED → wait the slow schedule (FAILED_SLOW_RETRY_S),
+          reset the transient counter, then retry.
         - FAILED_AUTH → return (terminal for this key).
         """
         while not stop.is_set():
@@ -514,21 +708,51 @@ class EnrolmentManager:
                 await self._wait_or_stop(stop, NOT_CONFIGURED_POLL_S)
                 continue
             state = self._status.state
-            if state in (EnrolmentState.REGISTERED, EnrolmentState.VALIDATING):
-                # Park until the state moves (re-auth, new key, stop) —
-                # woken by state events, no polling.
-                while (
-                    self._status.state in (EnrolmentState.REGISTERED, EnrolmentState.VALIDATING) and not stop.is_set()
-                ):
-                    await self._wait_state_change(stop)
+            if state == EnrolmentState.REGISTERED:
+                # Park until the state moves or a revalidation is
+                # requested — woken by state events, no polling.
+                woke = await self._wait_state_change(stop, extra_event=self._revalidate_event)
+                if woke == "extra":
+                    self._revalidate_event.clear()
+                    if not stop.is_set():
+                        await self.enrol_once()
+                continue
+            if state == EnrolmentState.VALIDATING:
+                # Park with a watchdog deadline: a VALIDATING that
+                # outlives VALIDATING_STALE_S means the in-flight
+                # attempt's completion never landed — drive one.
+                since = self._validating_since
+                if since is None:
+                    self._validating_since = time.monotonic()
+                    since = self._validating_since
+                remaining = self._validating_stale_s - (time.monotonic() - since)
+                if remaining <= 0:
+                    logger.warning(
+                        "[ENROL] VALIDATING for over {:.0f}s with no completion — "
+                        "driving an enrolment attempt (stale-VALIDATING watchdog)",
+                        self._validating_stale_s,
+                    )
+                    await self.enrol_once()
+                    continue
+                await self._wait_state_change(stop, timeout=remaining)
                 continue
             if state == EnrolmentState.FAILED_AUTH:
                 # Terminal for this key — fall through to the manifest
                 # cleanup below instead of returning directly.
                 break
+            if state == EnrolmentState.FAILED:
+                # Terminal for the fast-retry cycle, but the slow
+                # schedule keeps trying: wait it out, reset the
+                # transient counter, then fall through to enrol_once.
+                self._status.next_retry_at = (datetime.now(UTC) + timedelta(seconds=self._slow_retry_s)).isoformat()
+                await self._wait_or_stop(stop, self._slow_retry_s)
+                if stop.is_set() or not self.is_configured:
+                    continue
+                self._transient_failures = 0
             if state == EnrolmentState.FAILED_TRANSIENT:
                 delay = self._next_backoff_delay()
                 self.backoff_delays.append(delay)
+                self._status.next_retry_at = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()
                 await self._wait_or_stop(stop, delay)
                 if stop.is_set() or not self.is_configured:
                     continue

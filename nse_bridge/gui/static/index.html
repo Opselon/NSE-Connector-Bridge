@@ -450,6 +450,8 @@ pre.report{
             <div class="kv"><span class="k">Channel reconnects</span><span class="v" id="ovChannelReconn">—</span></div>
             <div class="kv"><span class="k">Last heartbeat sent</span><span class="v" id="ovHbOut">—</span></div>
             <div class="kv"><span class="k">Last heartbeat received</span><span class="v" id="ovHbIn">—</span></div>
+            <div class="kv"><span class="k">Next WS attempt</span><span class="v" id="ovWsNext">—</span></div>
+            <div class="kv"><span class="k">Channel error</span><span class="v" id="ovWsErr">—</span></div>
             <div class="kv"><span class="k">Platform user</span><span class="v" id="ovUser">—</span></div>
             <div class="kv"><span class="k">API key</span><span class="v" id="ovKey">—</span></div>
             <div class="kv"><span class="k">Enrolment</span><span class="v" id="ovEnrol">—</span></div>
@@ -496,6 +498,8 @@ pre.report{
             <div class="kv"><span class="k">Account identity</span><span class="v" id="pUser">—</span></div>
             <div class="kv"><span class="k">Device registration</span><span class="v" id="pRegState">—</span></div>
             <div class="kv"><span class="k">Registration attempts</span><span class="v" id="pRegAttempts">—</span></div>
+            <div class="kv"><span class="k">Registration error</span><span class="v" id="pRegErr">—</span></div>
+            <div class="kv"><span class="k">Next enrolment retry</span><span class="v" id="pRegNext">—</span></div>
             <div class="kv"><span class="k">Session expires</span><span class="v" id="pSession">—</span></div>
             <div class="kv"><span class="k">Device ID</span><span class="v" id="pDevice">—</span></div>
           </div>
@@ -505,6 +509,7 @@ pre.report{
             <div class="kv"><span class="k">Last connected</span><span class="v" id="pLastConn">—</span></div>
             <div class="kv"><span class="k">Heartbeat sent</span><span class="v" id="pHbOut">—</span></div>
             <div class="kv"><span class="k">Heartbeat received</span><span class="v" id="pHbIn">—</span></div>
+            <div class="kv"><span class="k">Next WS attempt</span><span class="v" id="pWsNext">—</span></div>
             <div class="kv"><span class="k">Reconnects</span><span class="v" id="pReconn">—</span></div>
             <div class="kv"><span class="k">Last error</span><span class="v" id="pWsErr">—</span></div>
             <div class="kv"><span class="k">UI live feed</span><span class="v" id="pUiFeed">—</span></div>
@@ -1323,12 +1328,37 @@ function paintLive(){
     $('ovLastEvent').textContent = live.lastEventAt ? ago(live.lastEventAt) : '—';
   }
 }
+/* B2: the WS state machine label — a WS-auth failure (HTTP 401 on
+   the handshake) is a different failure from an enrolment failure
+   and must never read as a generic RETRY. */
+function wsChip(ch){
+  if (ch.connected) return {label: 'LIVE', cls: 'up'};
+  switch (ch.ws_state) {
+    case 'auth_failed': return {label: 'AUTH FAILED', cls: 'down'};
+    case 'blocked_enrolment': return {label: 'ENROL BLOCKED', cls: 'down'};
+    case 'retrying': return {label: 'RETRY', cls: 'warn'};
+    case 'connecting': return {label: 'CONNECTING', cls: 'warn'};
+    case 'stopped': return {label: 'OFF', cls: 'down'};
+    case 'disconnected': return {label: 'OFF', cls: 'down'};
+    default: return {label: ch.enabled ? 'RETRY' : (ch.enabled === false ? 'OFF' : '—'), cls: ch.enabled ? 'warn' : 'down'};
+  }
+}
+/* B2: exact heartbeat timestamps (UTC + local) as a hover title — the
+   relative "12s ago" label never hides when the heartbeat happened. */
+function hbExact(ch, sent){
+  const utc = sent ? ch.last_heartbeat_sent_at : ch.last_heartbeat_received_at;
+  const local = sent ? ch.last_heartbeat_sent_at_local : ch.last_heartbeat_received_at_local;
+  if (!utc && !local) return '';
+  const via = ch.heartbeat_via ? ' via ' + ch.heartbeat_via : '';
+  return 'UTC ' + (utc || '—') + ' / local ' + (local || '—') + via;
+}
 function paintCommon(){
   const st = model.mt5.state;
   setKv('chipMt5', st || '—');
   $('dotMt5').className = 'dot ' + (model.mt5.connected === true ? 'on' : (model.mt5.connected === false ? 'off' : 'warn'));
   const ch = model.channel || {};
-  setKv('chipSrv', ch.connected ? 'LIVE' : (ch.enabled ? 'RETRY' : (ch.enabled === false ? 'OFF' : '—')));
+  const ws = wsChip(ch);
+  setKv('chipSrv', ws.label);
   $('dotSrv').className = 'dot ' + (ch.connected ? 'on' : (ch.enabled ? 'warn' : 'off'));
   if (model.bridge.version) $('sfVer').textContent = 'v' + model.bridge.version;
   if (model.bridge.deviceId) $('sfDevice').textContent = model.bridge.deviceId;
@@ -1424,18 +1454,25 @@ function renderOverview(){
   setKv('ovMt5Server', acct.server || '—');
   setKv('ovMt5Currency', acct.currency || '—');
   const ch = model.channel || {};
-  setKv('ovChannelState', ch.connected ? 'LIVE' : (ch.enabled ? 'RECONNECTING' : (ch.enabled === false ? 'OFF' : '—')),
-    ch.connected ? 'up' : (ch.enabled ? 'warn' : 'down'));
+  const ws = wsChip(ch);
+  setKv('ovChannelState', ws.label, ws.cls);
   $('ovChannelReconn').textContent = ch.reconnects != null ? String(ch.reconnects) : '—';
   $('ovHbOut').textContent = ch.last_heartbeat_at ? ago(ch.last_heartbeat_at) : '—';
+  $('ovHbOut').title = hbExact(ch, true);
   $('ovHbIn').textContent = ch.last_server_heartbeat_at ? ago(ch.last_server_heartbeat_at) : '—';
+  $('ovHbIn').title = hbExact(ch, false);
+  $('ovWsNext').textContent = ch.next_attempt_at ? fmtTime(ch.next_attempt_at) : '—';
+  $('ovWsErr').textContent = ch.last_error_detail || ch.last_error || '—';
   const sub = model.sub || {};
   $('ovUser').textContent = sub.user_id || '—';
   setKv('ovKey', sub.api_key_set ? ('stored: ' + (sub.api_key_masked || '••••')) : 'not set',
     sub.api_key_set ? '' : 'warn');
   const en = model.enrolment;
   setKv('ovEnrol', en ? human(en.state || 'unknown') : '—',
-    en && en.state === 'registered' ? 'up' : (en && en.state === 'not_configured' ? 'warn' : ''));
+    en && en.state === 'registered' ? 'up' : (en && en.state === 'not_configured' ? 'warn'
+      : (en && (en.state === 'failed_auth' || en.state === 'failed' || en.state === 'failed_transient') ? 'down' : '')));
+  $('ovEnrol').title = en && en.last_error_message
+    ? ((en.last_error ? en.last_error + ' — ' : '') + en.last_error_message) : '';
   paintLive();
   const sync = model.sync;
   if (sync && sync.available) {
@@ -1502,7 +1539,7 @@ function renderNextSteps(){
     items.push({tone: 'warn', text: 'Server channel is off (no server URL configured). Set the platform URL + key, or keep using the bridge standalone.',
       goto: 'platform', label: 'Configure Platform'});
   } else if (!ch.connected) {
-    items.push({tone: 'warn', text: 'Server channel is reconnecting — last error: ' + (ch.last_error || 'none reported yet') + '.',
+    items.push({tone: 'warn', text: 'Server channel is ' + wsChip(ch).label.toLowerCase() + ' — last error: ' + (ch.last_error_detail || ch.last_error || 'none reported yet') + '.',
       goto: 'platform', label: 'Check Platform'});
   }
   if (!items.length) {
@@ -1615,18 +1652,24 @@ function renderPlatform(){
   $('pUser').textContent = sub.user_id || '—';
   const en = model.enrolment || {};
   setKv('pRegState', human(en.state || 'unknown'),
-    en.state === 'registered' ? 'up' : (en.state === 'failed_auth' || en.state === 'failed_transient' ? 'down' : 'warn'));
+    en.state === 'registered' ? 'up' : (en.state === 'failed_auth' || en.state === 'failed' || en.state === 'failed_transient' ? 'down' : 'warn'));
   $('pRegAttempts').textContent = en.attempts != null ? String(en.attempts) : '—';
+  $('pRegErr').textContent = en.last_error_message
+    ? ((en.last_error ? en.last_error + ' — ' : '') + en.last_error_message) : (en.last_error || '—');
+  $('pRegNext').textContent = en.next_retry_at ? fmtTime(en.next_retry_at) : '—';
   $('pSession').textContent = fmtTime(en.session_expires_at || sub.session_expires_at);
   $('pDevice').textContent = model.bridge.deviceId || (sub.device_id || '—');
   const ch = model.channel || {};
-  setKv('pWsState', ch.connected ? 'LIVE' : (ch.enabled ? 'RECONNECTING' : (ch.enabled === false ? 'OFF' : '—')),
-    ch.connected ? 'up' : (ch.enabled ? 'warn' : 'down'));
+  const ws = wsChip(ch);
+  setKv('pWsState', ws.label, ws.cls);
   $('pLastConn').textContent = ch.last_connected_at ? ago(ch.last_connected_at) : '—';
   $('pHbOut').textContent = ch.last_heartbeat_at ? ago(ch.last_heartbeat_at) : '—';
+  $('pHbOut').title = hbExact(ch, true);
   $('pHbIn').textContent = ch.last_server_heartbeat_at ? ago(ch.last_server_heartbeat_at) : '—';
+  $('pHbIn').title = hbExact(ch, false);
+  $('pWsNext').textContent = ch.next_attempt_at ? fmtTime(ch.next_attempt_at) : '—';
   $('pReconn').textContent = ch.reconnects != null ? String(ch.reconnects) : '—';
-  $('pWsErr').textContent = ch.last_error || '—';
+  $('pWsErr').textContent = ch.last_error_detail || ch.last_error || '—';
   paintLive();
 }
 function fillConnectionForm(){
