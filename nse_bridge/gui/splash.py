@@ -21,6 +21,18 @@ This module is the in-process half of that fix; the spec change is
 S3's. It is written so it also works under onefile once extraction
 is done (the splash then covers the remaining import + server boot).
 
+v1.4.0 B1 — non-blocking startup: the splash NEVER blocks the
+Bridge. Bridge startup runs on a background thread
+(:mod:`nse_bridge.main`) and reports named steps through
+:class:`StartupProgress`; the main thread paints them here. Every
+splash wait is bounded: status updates use a timeout
+(:func:`_win32.set_text_timeout` — a hung pump can never freeze the
+caller), and a watchdog hides the splash after
+``SPLASH_MAX_LIFETIME_S`` even if startup is still going, so a
+stuck boot can never leave a permanent dead "please wait" window.
+The API server starts independently of the splash: a splash that
+cannot be shown (or is auto-hidden) changes nothing about boot.
+
 Implementation: stdlib-only, no third-party imports, so
 ``run_bridge.py`` can show it before importing the (heavy) bridge
 package. Windows uses a raw Win32 window via ctypes (no tkinter —
@@ -36,6 +48,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from typing import Any
 
 from loguru import logger
@@ -49,6 +62,106 @@ _SPLASH_HEIGHT = 180
 DEFAULT_TITLE = "NSE MT5 Bridge"
 DEFAULT_STATUS = "Starting…"
 
+#: The named startup steps, in order. ``main`` advances through them
+#: on the boot thread; the splash renders "Step i/N — name" plus a
+#: progress bar. Keep the names short — they are shown verbatim.
+STARTUP_STEPS: tuple[str, ...] = (
+    "Validating settings",
+    "Preparing credentials",
+    "Checking single instance",
+    "Checking port",
+    "Preparing bridge",
+    "Starting server",
+    "Waiting for dashboard",
+    "Opening dashboard",
+)
+
+#: Bound on how long the splash may stay up on its own. The boot
+#: deadline is 90 s on a frozen start (see ``main``) plus a bounded
+#: dashboard probe, so 180 s outlives any healthy boot with margin —
+#: and a stuck boot still detaches the splash instead of leaving a
+#: dead window up forever. The tray icon remains the visible surface
+#: after the splash detaches.
+SPLASH_MAX_LIFETIME_S = 180.0
+
+
+class StartupProgress:
+    """Thread-safe named-step progress for bridge startup.
+
+    The boot thread calls :meth:`advance` (and :meth:`complete` /
+    :meth:`fail` for terminal states); the main (UI) thread reads
+    :meth:`text` and :meth:`fraction` and paints the splash. This
+    class makes no Win32/tkinter calls at all, so advancing it can
+    never block on — or be blocked by — the splash window.
+    """
+
+    def __init__(self, steps: tuple[str, ...] = STARTUP_STEPS) -> None:
+        self._steps = tuple(steps)
+        self._lock = threading.Lock()
+        self._position = 0  # 1-based index of the current step; 0 = not started
+        self._current = ""
+        self._done = False
+        self._failed: str | None = None
+
+    def advance(self, step: str) -> None:
+        """Move to ``step`` (a name from ``STARTUP_STEPS``)."""
+        with self._lock:
+            if self._done or self._failed is not None:
+                return
+            self._current = step
+            if step in self._steps:
+                self._position = self._steps.index(step) + 1
+
+    def complete(self) -> None:
+        """Terminal state: startup finished."""
+        with self._lock:
+            self._done = True
+            self._position = len(self._steps)
+
+    def fail(self, message: str) -> None:
+        """Terminal state: startup failed with ``message``."""
+        with self._lock:
+            self._failed = message
+
+    @property
+    def current_step(self) -> str:
+        """Name of the step in progress ("" when done/failed)."""
+        with self._lock:
+            return "" if (self._done or self._failed is not None) else self._current
+
+    @property
+    def failed_message(self) -> str | None:
+        with self._lock:
+            return self._failed
+
+    @property
+    def done(self) -> bool:
+        with self._lock:
+            return self._done
+
+    @property
+    def fraction(self) -> float:
+        """0.0–1.0: completed steps / total steps."""
+        with self._lock:
+            if self._done:
+                return 1.0
+            if not self._steps:
+                return 0.0
+            return max(0, self._position - 1) / len(self._steps)
+
+    def text(self) -> str:
+        """One-line status for the splash, e.g.
+        ``"Step 3/8 — Checking port…"``. Never raises."""
+        with self._lock:
+            if self._failed is not None:
+                return f"Failed: {self._failed}"
+            if self._done:
+                return "Ready"
+            total = len(self._steps)
+            if not self._current:
+                return DEFAULT_STATUS
+            return f"Step {self._position}/{total} — {self._current}…"
+
 
 class Splash:
     """A shown (or unavailable) splash window."""
@@ -56,10 +169,18 @@ class Splash:
     def __init__(self, visible: bool = False) -> None:
         self.visible = visible
         self._status = DEFAULT_STATUS
+        self._progress = 0.0
 
     def update(self, text: str) -> None:
         """Change the status line (no-op when unavailable)."""
         self._status = text
+
+    def set_progress(self, fraction: float) -> None:
+        """Move the progress bar (no-op when unavailable)."""
+        try:
+            self._progress = max(0.0, min(1.0, float(fraction)))
+        except (TypeError, ValueError):
+            self._progress = 0.0
 
     def hide(self) -> None:
         """Close the window (no-op when unavailable)."""
@@ -73,6 +194,7 @@ class _Win32Splash(Splash):
         self._user32: Any = None
         self._hwnd = 0
         self._status_hwnd = 0
+        self._progress_hwnd = 0
         self._pump_thread: threading.Thread | None = None
         self._wndproc = None
         self._fonts: list[int] = []
@@ -113,13 +235,21 @@ class _Win32Splash(Splash):
         self._status_hwnd = _win32.create_child(
             user32, "STATIC", status, self._hwnd, 20, 52, 420, 24, hinstance, label_style
         )
+        # Real progress bar under the status line: the v1.3.x splash
+        # showed only a text line, so a stuck boot looked identical
+        # to a healthy slow one. The bar moves with StartupProgress.
+        self._progress_hwnd = _win32.create_child(
+            user32, "msctls_progress32", "", self._hwnd, 20, 82, 420, 14, hinstance, label_style
+        )
+        if self._progress_hwnd:
+            _win32.set_progress_range(user32, self._progress_hwnd, 100)
         note1 = _win32.create_child(
             user32,
             "STATIC",
             "First launch can take up to a minute — Windows scans the app.",
             self._hwnd,
             20,
-            90,
+            106,
             420,
             20,
             hinstance,
@@ -131,7 +261,7 @@ class _Win32Splash(Splash):
             "The dashboard opens automatically when the bridge is ready.",
             self._hwnd,
             20,
-            112,
+            128,
             420,
             20,
             hinstance,
@@ -171,7 +301,15 @@ class _Win32Splash(Splash):
     def update(self, text: str) -> None:
         self._status = text
         if self.visible and self._status_hwnd and self._user32 is not None:
-            _win32.set_text(self._user32, self._status_hwnd, text)
+            # Bounded send (500 ms): a plain SetWindowTextW blocks
+            # forever when the pump thread stops pumping — that is
+            # how a status update could freeze the whole startup.
+            _win32.set_text_timeout(self._user32, self._status_hwnd, text)
+
+    def set_progress(self, fraction: float) -> None:
+        super().set_progress(fraction)
+        if self.visible and self._progress_hwnd and self._user32 is not None:
+            _win32.set_progress_pos(self._user32, self._progress_hwnd, int(self._progress * 100))
 
     def hide(self) -> None:
         if self._closed:
@@ -193,9 +331,11 @@ class _TkSplash(Splash):
     def __init__(self, title: str, status: str) -> None:
         super().__init__(visible=False)
         self._updates: queue.Queue[str] = queue.Queue()
+        self._progress_updates: queue.Queue[float] = queue.Queue()
         self._close = threading.Event()
         self._root: Any = None
         self._status_var: Any = None
+        self._progress_bar: Any = None
         self._thread = threading.Thread(target=self._run, args=(title, status), daemon=True, name="nse-splash-tk")
         self._thread.start()
         # The thread sets visible once the window exists; give it a
@@ -219,6 +359,15 @@ class _TkSplash(Splash):
             tkinter.Label(root, text=title, font=("TkDefaultFont", 16, "bold")).pack(pady=(18, 4))
             self._status_var = tkinter.StringVar(value=status)
             tkinter.Label(root, textvariable=self._status_var, font=("TkDefaultFont", 11)).pack(pady=4)
+            try:
+                from tkinter import ttk
+
+                self._progress_bar = ttk.Progressbar(
+                    root, orient="horizontal", length=400, mode="determinate", maximum=100
+                )
+                self._progress_bar.pack(pady=4)
+            except Exception:  # noqa: BLE001 — no ttk: text status still shows the step
+                self._progress_bar = None
             tkinter.Label(root, text="First launch can take a while — the dashboard opens automatically.").pack(pady=4)
             root.protocol("WM_DELETE_WINDOW", self._close.set)
             self._poll(root)
@@ -235,12 +384,24 @@ class _TkSplash(Splash):
                 self._status_var.set(self._updates.get_nowait())
         except queue.Empty:
             pass
+        try:
+            while True:
+                value = self._progress_updates.get_nowait()
+                if self._progress_bar is not None:
+                    self._progress_bar["value"] = value
+        except queue.Empty:
+            pass
         root.after(100, self._poll, root)
 
     def update(self, text: str) -> None:
         self._status = text
         if self.visible:
             self._updates.put(text)
+
+    def set_progress(self, fraction: float) -> None:
+        super().set_progress(fraction)
+        if self.visible:
+            self._progress_updates.put(self._progress * 100)
 
     def hide(self) -> None:
         if self._closed_flag():
@@ -258,9 +419,28 @@ class _TkSplash(Splash):
 _CURRENT: Splash | None = None
 
 
-def show_splash(title: str = DEFAULT_TITLE, status: str = DEFAULT_STATUS) -> Splash:
+def _start_splash_watchdog(splash: Splash, max_lifetime_s: float) -> None:
+    """Hide ``splash`` after ``max_lifetime_s`` even if startup is
+    still going — the bounded wait that guarantees the splash can
+    never become a permanent dead window. Only fires while this exact
+    splash is still the current one; a normal hide/close (dashboard
+    up) cancels it implicitly. Daemon thread: never blocks exit."""
+
+    def _watch() -> None:
+        time.sleep(max_lifetime_s)
+        if _CURRENT is splash and splash.visible:
+            logger.warning("[GUI] splash auto-hidden after {:.0f} s bounded wait", max_lifetime_s)
+            hide_splash()
+
+    threading.Thread(target=_watch, daemon=True, name="nse-splash-watchdog").start()
+
+
+def show_splash(
+    title: str = DEFAULT_TITLE, status: str = DEFAULT_STATUS, max_lifetime_s: float = SPLASH_MAX_LIFETIME_S
+) -> Splash:
     """Show the splash window; idempotent — a second call returns the
-    existing splash. Never raises."""
+    existing splash. Never raises. The splash auto-hides after
+    ``max_lifetime_s`` (bounded wait) if the caller never hides it."""
     global _CURRENT
     if _CURRENT is not None and _CURRENT.visible:
         return _CURRENT
@@ -274,6 +454,7 @@ def show_splash(title: str = DEFAULT_TITLE, status: str = DEFAULT_STATUS) -> Spl
     _CURRENT = splash
     if splash.visible:
         logger.debug("[GUI] splash shown")
+        _start_splash_watchdog(splash, max_lifetime_s)
     return splash
 
 
@@ -282,6 +463,15 @@ def update_splash(text: str) -> None:
     if _CURRENT is not None:
         try:
             _CURRENT.update(text)
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+
+def set_splash_progress(fraction: float) -> None:
+    """Move the splash progress bar; no-op when no splash is shown."""
+    if _CURRENT is not None:
+        try:
+            _CURRENT.set_progress(fraction)
         except Exception:  # noqa: BLE001, S110
             pass
 
@@ -301,4 +491,16 @@ def splash_visible() -> bool:
     return _CURRENT is not None and _CURRENT.visible
 
 
-__all__ = ["DEFAULT_STATUS", "DEFAULT_TITLE", "Splash", "hide_splash", "show_splash", "splash_visible", "update_splash"]
+__all__ = [
+    "DEFAULT_STATUS",
+    "DEFAULT_TITLE",
+    "SPLASH_MAX_LIFETIME_S",
+    "STARTUP_STEPS",
+    "Splash",
+    "StartupProgress",
+    "hide_splash",
+    "set_splash_progress",
+    "show_splash",
+    "splash_visible",
+    "update_splash",
+]

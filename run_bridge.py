@@ -7,7 +7,11 @@ heavy imports: fastapi, uvicorn, numpy, MT5 driver) is even imported
 nothing; ``main()`` takes over the same splash (idempotent) once it
 runs. No splash for query subcommands (``status``/``health``/…),
 ``--help``, console/diagnostic runs, or ``--gui none`` — those have
-their own visible surface (a console, or none by design).
+their own visible surface (a console, or none by design). v1.4.0 B1:
+the splash auto-hides after a bounded lifetime and bridge startup
+runs on a background thread, so a stuck boot can never leave a dead
+"please wait" window — the splash is a progress display, never a
+gate on the server.
 """
 
 import sys

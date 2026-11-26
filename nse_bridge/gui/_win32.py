@@ -30,8 +30,17 @@ WM_CLOSE = 0x0010
 WM_DESTROY = 0x0002
 WM_COMMAND = 0x0111
 WM_SETFONT = 0x0030
+WM_SETTEXT = 0x000C
 WM_RBUTTONUP = 0x0205
 WM_LBUTTONDBLCLK = 0x0203
+
+#: ``SendMessageTimeoutW`` flag: return at once when the target
+#: thread is hung instead of blocking the caller.
+SMTO_ABORTIFHUNG = 0x0002
+
+#: Progress-bar (``msctls_progress32``) messages.
+PBM_SETRANGE = 0x0401
+PBM_SETPOS = 0x0402
 
 WS_OVERLAPPED = 0x00000000
 WS_CAPTION = 0x00C00000
@@ -243,6 +252,56 @@ def set_text(user32: Any, hwnd: int, text: str) -> bool:
         return bool(user32.SetWindowTextW(hwnd, text))
     except Exception:  # noqa: BLE001
         return False
+
+
+def set_text_timeout(user32: Any, hwnd: int, text: str, timeout_ms: int = 500) -> bool:
+    """Set a window/control's text, but never block the caller.
+
+    ``SetWindowTextW`` sends ``WM_SETTEXT`` synchronously to the
+    window's thread — if that thread ever stops pumping (a hung
+    splash pump), the caller blocks forever and the bridge looks
+    "(Not Responding)" for a status-line update. ``SendMessageTimeoutW``
+    with ``SMTO_ABORTIFHUNG`` bounds the wait instead: a hung target
+    costs at most ``timeout_ms`` and the startup continues.
+    """
+    _configure(user32)
+    try:
+        user32.SendMessageTimeoutW.argtypes = [
+            wintypes.HWND,
+            ctypes.c_uint,
+            wintypes.WPARAM,
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_ssize_t),
+        ]
+        user32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
+    except Exception:  # noqa: BLE001, S110 — a fake/test user32 may not accept prototypes
+        pass
+    try:
+        result = ctypes.c_ssize_t(0)
+        ret = user32.SendMessageTimeoutW(
+            hwnd, WM_SETTEXT, 0, ctypes.c_wchar_p(text), SMTO_ABORTIFHUNG, timeout_ms, ctypes.byref(result)
+        )
+        return bool(ret)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def set_progress_range(user32: Any, hwnd: int, maximum: int = 100) -> None:
+    """Set a progress bar's range to ``0..maximum`` (best-effort)."""
+    try:
+        user32.SendMessageW(hwnd, PBM_SETRANGE, 0, (maximum << 16) | 0)
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
+def set_progress_pos(user32: Any, hwnd: int, pos: int) -> None:
+    """Move a progress bar to ``pos`` (best-effort, never raises)."""
+    try:
+        user32.SendMessageW(hwnd, PBM_SETPOS, pos, 0)
+    except Exception:  # noqa: BLE001, S110
+        pass
 
 
 def close_window(user32: Any, hwnd: int) -> None:
