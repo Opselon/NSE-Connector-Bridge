@@ -81,12 +81,17 @@ def test_console_mode_forces_gui_off(monkeypatch):
     class _Sentinel(Exception):
         pass
 
-    def fake_ensure(settings: BridgeSettings) -> str:
+    # Probe at the _run boundary: v1.4.0 B1 boots the server on a
+    # background thread, and a crash inside boot is converted to a
+    # visible failure (dialog + exit) instead of propagating — so a
+    # sentinel raised inside boot no longer escapes main(). Probing
+    # _run still proves the property: --console forces gui off
+    # before any boot work happens.
+    def fake_run(args, settings, gui_visible):
         captured["settings"] = settings
         raise _Sentinel()
 
-    monkeypatch.setattr(bridge_main, "ensure_local_api_key", fake_ensure)
-    monkeypatch.setattr(bridge_main, "validate_bind_host", lambda *_a, **_k: None)
+    monkeypatch.setattr(bridge_main, "_run", fake_run)
     with pytest.raises(_Sentinel):
         bridge_main.main(["--console"])  # boots no server: sentinel fires first
     assert captured["settings"].gui_mode == "none", "--console must disable the GUI"

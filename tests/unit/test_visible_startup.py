@@ -294,10 +294,23 @@ def test_splash_windows_path_shows_updates_and_hides(fake_windll):
     # Idempotent: the second call returns the same splash.
     assert splash.show_splash() is shown
     splash.update_splash("Starting server…")
-    # The status label is the second STATIC child created; the update
-    # must reach SetWindowTextW with the new text (any handle).
-    texts = [call.args[1] for call in fake_windll.user32.SetWindowTextW.call_args_list]
+    # B1: the status update goes through SendMessageTimeoutW
+    # (WM_SETTEXT) — a plain SetWindowTextW blocks forever when the
+    # pump thread stops pumping, which froze startup. The update must
+    # reach the status label (the second STATIC child created) via
+    # the bounded call, with the new text.
+    timeout_calls = fake_windll.user32.SendMessageTimeoutW.call_args_list
+    assert timeout_calls, "expected a bounded WM_SETTEXT update"
+    texts = [call.args[3].value for call in timeout_calls]
     assert "Starting server…" in texts
+    # B1: the progress bar moves with StartupProgress (PBM_SETPOS).
+    splash.set_splash_progress(0.5)
+    pos_calls = [
+        call
+        for call in fake_windll.user32.SendMessageW.call_args_list
+        if call.args[1] == 0x0402  # PBM_SETPOS
+    ]
+    assert pos_calls and pos_calls[-1].args[2] == 50
     splash.hide_splash()
     assert shown.visible is False
     fake_windll.user32.PostMessageW.assert_called()
