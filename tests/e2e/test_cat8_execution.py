@@ -200,3 +200,136 @@ def test_72_trade_calculate_order_result(client):
     assert data["source"] == "BROKER_NATIVE"
     assert data["profit"] == pytest.approx(1.0, abs=0.2)  # 0.01 lot gold: $1 per $1 move
     assert data["currency"]
+
+
+# ----------------------------------------------------------------------
+# B3 — P3 v2 open_order (mock MT5 driver, no live terminal).
+#
+# These tests do NOT use the session `client` fixture (real MT5):
+# they drive the server command path against the fake terminal
+# shared with the unit v2 tests, so they verify the v2 open path
+# end-to-end without placing live orders.
+# ----------------------------------------------------------------------
+def _mock_v2_ctx(tmp_path):
+    """BridgeContext on the fake MT5 terminal, v2 flag on."""
+    from nse_bridge.config import BridgeSettings
+    from nse_bridge.engine.common import BridgeContext
+    from nse_bridge.mt5.driver import Mt5Driver
+    from tests.unit.test_execution_v2_hooks import _FakeMt5
+
+    settings = BridgeSettings(
+        _env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"), enable_v2_open_order=True
+    )
+    driver = Mt5Driver(settings)
+    fake = _FakeMt5()
+    driver._mt5 = fake
+    driver._connected = True
+    return BridgeContext(settings=settings, driver=driver), fake
+
+
+def _v2_executor(ctx):
+    from nse_bridge.server.commands import CommandExecutor, CommandValidator
+    from nse_bridge.server.rest import Entitlements
+
+    validator = CommandValidator(
+        "dev-1",
+        get_account_id=lambda: "123456",
+        entitlements=Entitlements(position_manager=True, auto_trade=True),
+        open_order_authorized=True,
+    )
+    return CommandExecutor(ctx, validator)
+
+
+def _v2_open_frame(operation, command_id="01900000-0000-7000-8000-0000000000b1"):
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    return {
+        "type": "command",
+        "command_id": command_id,
+        "account_id": "123456",
+        "device_id": "dev-1",
+        "operation": operation,
+        "issued_at": now.isoformat().replace("+00:00", "Z"),
+        "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+        "idempotency_key": command_id,
+        "protocol_version": "2",
+    }
+
+
+@pytest.mark.unit
+def test_v2_open_order_market_creates_position(tmp_path):
+    """P3 v2 §14.2: a market open over the v2 wire creates a live
+    position through the proven market primitive — the cat8 market
+    path, driven by a server command instead of the local REST."""
+    ctx, fake = _mock_v2_ctx(tmp_path)
+    try:
+        executor = _v2_executor(ctx)
+        execution, result = executor.execute(
+            _v2_open_frame(
+                {"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1},
+                command_id="01900000-0000-7000-8000-0000000000b1",
+            )
+        )
+        assert execution.state.value == "COMPLETED"
+        assert result["status"] == "executed"
+        assert result["source_tool"] == "trade_send_market_order"
+        assert result["command_protocol_version"] == "2"
+        assert len(fake.positions) == 1
+        assert len(fake.orders) == 0
+    finally:
+        ctx.driver.disconnect()
+
+
+@pytest.mark.unit
+def test_v2_open_order_pending_creates_order_not_position(tmp_path):
+    """P3 v2 §14.2 (PR #20 lesson): a limit open sent under the
+    Platform wire names dispatches as PENDING — never silently as
+    a market deal."""
+    ctx, fake = _mock_v2_ctx(tmp_path)
+    try:
+        executor = _v2_executor(ctx)
+        execution, result = executor.execute(
+            _v2_open_frame(
+                {
+                    "type": "open_order",
+                    "symbol": "EURUSD",
+                    "side": "sell",
+                    "order_type": "limit",
+                    "volume": 0.1,
+                    "price": 1.1050,
+                },
+                command_id="01900000-0000-7000-8000-0000000000b2",
+            )
+        )
+        assert execution.state.value == "COMPLETED"
+        assert result["status"] == "executed"
+        assert result["source_tool"] == "trade_send_pending_order"
+        assert len(fake.orders) == 1
+        assert len(fake.positions) == 0  # no market deal was opened
+    finally:
+        ctx.driver.disconnect()
+
+
+@pytest.mark.unit
+def test_v2_open_order_unknown_kind_never_executes(tmp_path):
+    """Fail-closed: an unknown order kind is a loud VALIDATION
+    failure and nothing reaches MT5 — a malformed open is never
+    guessed, and never silently executed as market."""
+    ctx, fake = _mock_v2_ctx(tmp_path)
+    try:
+        executor = _v2_executor(ctx)
+        execution, result = executor.execute(
+            _v2_open_frame(
+                {"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_type": "banana", "volume": 0.1},
+                command_id="01900000-0000-7000-8000-0000000000b3",
+            )
+        )
+        assert execution.state.value == "FAILED"
+        assert result["status"] == "mcp_failed"
+        assert result["error"]["code"] == "VALIDATION_ERROR"
+        assert fake.send_calls == 0
+        assert len(fake.positions) == 0
+        assert len(fake.orders) == 0
+    finally:
+        ctx.driver.disconnect()

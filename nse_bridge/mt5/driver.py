@@ -35,6 +35,14 @@ from pathlib import Path
 #: are themselves bounded); a full queue means the worker is stalled —
 #: callers must fail fast instead of queuing unbounded work.
 MT5_JOB_QUEUE_MAX = 256
+
+#: Order-placement timeout (P3 v2): a single ``order_send`` must
+#: answer within this long. The generic ``run`` default is 60 s;
+#: placement is the one call whose outcome is UNKNOWN on timeout,
+#: so it gets its own bound — and :meth:`Mt5Driver.run_order_send`
+#: maps a breach onto ``TRADE_UNVERIFIED`` (reconcile, never
+#: blind-retry) instead of a bare timeout error.
+ORDER_SEND_TIMEOUT_S = 30.0
 from typing import Any
 
 #: Whether THIS process can load the official MetaTrader5 IPC driver.
@@ -690,6 +698,44 @@ class Mt5Driver:
         duration_ms = (time.perf_counter() - t0) * 1000.0
         self._record(name, True, duration_ms, context=context)
         return result
+
+    def run_order_send(
+        self,
+        job: Callable[[Any], Any],
+        op: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> Any:
+        """Order-placement path (P3 v2): ``run`` with the placement
+        timeout, mapping a timeout / queue-full failure onto
+        ``TRADE_UNVERIFIED``.
+
+        A placement that times out or never reaches the worker has
+        an UNKNOWN outcome — the order may exist. Callers must
+        reconcile the live book before any retry, never re-send
+        blindly. A plain ``TimeoutError`` here would surface as an
+        internal error and invite exactly that blind retry.
+        """
+        from ..errors import BridgeError, ErrorCode
+
+        name = op or str(getattr(job, "__name__", "unnamed_job"))
+        try:
+            return self.run(job, op=name, context=context, timeout=ORDER_SEND_TIMEOUT_S)
+        except TimeoutError as exc:
+            raise BridgeError(
+                ErrorCode.TRADE_UNVERIFIED,
+                f"Order placement {name} timed out after {ORDER_SEND_TIMEOUT_S}s — "
+                "outcome unverified; reconcile the live order book before retrying (never blind-retry).",
+                details={"op": name, "timeout_s": ORDER_SEND_TIMEOUT_S, **(context or {})},
+            ) from exc
+        except BridgeError as exc:
+            if exc.code is ErrorCode.MT5_CALL_FAILED and "job queue full" in exc.message:
+                raise BridgeError(
+                    ErrorCode.TRADE_UNVERIFIED,
+                    f"Order placement {name} never reached MT5 (job queue full) — "
+                    "outcome unverified; reconcile the live order book before retrying (never blind-retry).",
+                    details={"op": name, **(context or {})},
+                ) from exc
+            raise
 
     def _record(
         self,
