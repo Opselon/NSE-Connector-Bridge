@@ -386,15 +386,38 @@ def test_splash_hide_recovers_when_close_is_never_dispatched(monkeypatch):
 def test_open_window_timeout_when_window_never_shows(monkeypatch):
     """webview.start() stuck before the window appears: the watchdog
     closes the stuck window after the bound and open_window returns
-    "timeout" instead of hanging forever."""
+    "timeout" instead of hanging forever.
+
+    The fake models real pywebview 6.2.1's ``@_shown_call`` gate
+    (hang audit §3): ``destroy()`` waits for ``events.shown`` and
+    RAISES without destroying anything while the window never
+    shows, so only the backend bypass (``gui.destroy_window(uid)``)
+    can release the stuck ``start()``. A plain-lambda destroy
+    would mask the gate — this test must fail if the bypass
+    regresses to calling ``destroy()`` first.
+    """
     import nse_bridge.gui.window as window_mod
 
     released = threading.Event()
     destroyed: list[str] = []
     shown_event = threading.Event()  # never set: the window never appears
+
+    def _gated_destroy():
+        # @_shown_call: no shown event -> raise, destroy nothing.
+        if not shown_event.is_set():
+            raise RuntimeError("Main window failed to start")
+        destroyed.append("gated")
+        released.set()
+
+    def _backend_destroy(uid):
+        destroyed.append(uid)
+        released.set()
+
     fake_window = SimpleNamespace(
         events=SimpleNamespace(shown=shown_event),
-        destroy=lambda: (destroyed.append("x"), released.set()),
+        uid="master",
+        gui=SimpleNamespace(destroy_window=_backend_destroy),
+        destroy=_gated_destroy,
     )
     fake_webview = SimpleNamespace(
         create_window=lambda *a, **k: fake_window,
@@ -405,7 +428,67 @@ def test_open_window_timeout_when_window_never_shows(monkeypatch):
     started = time.monotonic()
     assert window_mod.open_window("http://127.0.0.1:8788/ui", open_timeout_s=0.5) == "timeout"
     assert time.monotonic() - started < 5.0
-    assert destroyed == ["x"]
+    # The backend bypass — not the gated destroy() — released start().
+    assert destroyed == ["master"]
+
+
+def test_open_window_timeout_without_backend_degrades_to_destroy(monkeypatch):
+    """No usable backend (``gui`` is None, e.g. an older pywebview):
+    the watchdog degrades to plain ``window.destroy()`` and
+    ``open_window`` still returns "timeout" instead of hanging."""
+    import nse_bridge.gui.window as window_mod
+
+    released = threading.Event()
+    destroyed: list[str] = []
+    shown_event = threading.Event()  # never set: the window never appears
+    fake_window = SimpleNamespace(
+        events=SimpleNamespace(shown=shown_event),
+        uid="master",
+        gui=None,
+        destroy=lambda: (destroyed.append("destroy"), released.set()),
+    )
+    fake_webview = SimpleNamespace(
+        create_window=lambda *a, **k: fake_window,
+        start=lambda *a, **k: released.wait(timeout=10),
+        windows=[fake_window],
+    )
+    monkeypatch.setitem(sys.modules, "webview", fake_webview)
+    started = time.monotonic()
+    assert window_mod.open_window("http://127.0.0.1:8788/ui", open_timeout_s=0.5) == "timeout"
+    assert time.monotonic() - started < 5.0
+    assert destroyed == ["destroy"]
+
+
+def test_open_window_timeout_when_backend_destroy_raises(monkeypatch):
+    """The backend destroy call itself fails: the watchdog degrades
+    to plain ``window.destroy()`` (which here works) and
+    ``open_window`` still returns "timeout"; the backend exception
+    never escapes the watchdog path."""
+    import nse_bridge.gui.window as window_mod
+
+    released = threading.Event()
+    destroyed: list[str] = []
+    shown_event = threading.Event()  # never set: the window never appears
+
+    def _failing_backend(uid):
+        raise RuntimeError("backend gone")
+
+    fake_window = SimpleNamespace(
+        events=SimpleNamespace(shown=shown_event),
+        uid="master",
+        gui=SimpleNamespace(destroy_window=_failing_backend),
+        destroy=lambda: (destroyed.append("destroy"), released.set()),
+    )
+    fake_webview = SimpleNamespace(
+        create_window=lambda *a, **k: fake_window,
+        start=lambda *a, **k: released.wait(timeout=10),
+        windows=[fake_window],
+    )
+    monkeypatch.setitem(sys.modules, "webview", fake_webview)
+    started = time.monotonic()
+    assert window_mod.open_window("http://127.0.0.1:8788/ui", open_timeout_s=0.5) == "timeout"
+    assert time.monotonic() - started < 5.0
+    assert destroyed == ["destroy"]
 
 
 def test_open_window_webview_when_window_shows(monkeypatch):
