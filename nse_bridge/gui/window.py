@@ -35,6 +35,26 @@ resource (``ExtractIconW(sys.executable, 0)``) — so on Windows the
 bundled ``assets/icon.ico`` is passed explicitly (it is the same
 asset ``bridge.spec`` embeds in the exe); other platforms leave
 the default.
+
+Destroy gate (2026-11-27 hang audit, §3): ``Window.destroy()``
+is decorated with ``@_shown_call`` (``webview/window.py:343``),
+which waits up to 20 s for ``events.shown`` and RAISES
+``WebViewException('Main window failed to start')`` without
+destroying anything when the window never shows — so the
+watchdog's unstick step was a no-op in exactly the case it
+guards. :func:`destroy_native_window` therefore bypasses the
+gate: it calls the backend directly
+(``window.gui.destroy_window(window.uid)`` — the same call
+``destroy()`` makes once the gate passes, ``webview/window.py:349``,
+and the WinForms/GTK/Qt backends expose it as a module-level
+function that does not wait for ``shown``), degrading to
+``window.destroy()`` when the backend is unavailable. Residual
+limit, stated honestly: the WinForms backend registers the form
+in ``BrowserView.instances`` only AFTER its constructor returns,
+so a stall inside the constructor itself still has no instance
+to destroy — no Python-side call can unstick that corner; the
+bypass covers every case where the form was constructed but
+``shown`` never fired.
 """
 
 from __future__ import annotations
@@ -174,16 +194,56 @@ def open_window(
     return WINDOW_FAILED
 
 
+def _destroy_window_via_backend(window: Any) -> bool:
+    """Destroy one window via the pywebview backend, bypassing the
+    ``@_shown_call`` gate on ``Window.destroy()``.
+
+    Real pywebview 6.2.1 waits up to 20 s for ``events.shown`` in
+    ``destroy()`` and raises without destroying anything when the
+    window never shows. The backend's own ``destroy_window(uid)``
+    is the same call ``destroy()`` makes once the gate passes, and
+    it does not wait for ``shown`` (WinForms/GTK/Qt all expose it
+    as a module-level function on the ``window.gui`` backend).
+    ``True`` when the backend call was attempted; ``False`` when
+    the backend is unavailable (no ``gui`` attribute, no
+    ``destroy_window``, no ``uid``) or the backend call raised —
+    the caller then degrades to ``window.destroy()``. Never raises.
+    """
+    try:
+        gui = getattr(window, "gui", None)
+        destroy_window = getattr(gui, "destroy_window", None)
+        uid = getattr(window, "uid", None)
+        if destroy_window is None or uid is None:
+            return False
+        destroy_window(uid)
+        return True
+    except Exception:  # noqa: BLE001 — backend failure degrades to window.destroy()
+        return False
+
+
 def destroy_native_window() -> bool:
     """Best-effort close of any open pywebview window (used by the
     tray's Quit action so the process can exit while the native
-    window is up). Never raises; ``False`` when no window was open."""
+    window is up, and by the open watchdog to unstick a hung
+    ``webview.start()``). Never raises; ``False`` when no window
+    was open.
+
+    Tries the backend destroy first so a window that never showed
+    is still destroyed (see the module docstring — plain
+    ``window.destroy()`` refuses that case); degrades to
+    ``window.destroy()`` per window when the backend is
+    unavailable or its call failed.
+    """
     try:
         import webview  # pywebview
 
         windows = list(getattr(webview, "windows", []) or [])
         for window in windows:
-            window.destroy()
+            if not _destroy_window_via_backend(window):
+                try:
+                    window.destroy()
+                except Exception:  # noqa: BLE001, S110 — one stuck window must not block the rest
+                    pass
         return bool(windows)
     except Exception:  # noqa: BLE001
         return False

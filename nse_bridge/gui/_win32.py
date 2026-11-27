@@ -458,22 +458,6 @@ def start_owner_thread(
     return thread, started
 
 
-def start_pump_thread(user32: Any, name: str) -> threading.Thread:
-    """Run :func:`pump_messages` on a daemon thread.
-
-    .. deprecated::
-        Kept only for callers whose window already lives on the
-        calling thread is a WRONG pattern — see
-        :func:`start_owner_thread`. A window created on thread A and
-        pumped on thread B is never pumped at all (Win32 thread
-        affinity); new code must create the window on the pump
-        thread via :func:`start_owner_thread`.
-    """
-    thread = threading.Thread(target=pump_messages, args=(user32,), daemon=True, name=name)
-    thread.start()
-    return thread
-
-
 def quit_pump_thread(user32: Any, thread: threading.Thread) -> bool:
     """Post ``WM_QUIT`` to a pump thread's message queue so its
     ``GetMessageW`` returns 0 and the thread exits. Asynchronous and
