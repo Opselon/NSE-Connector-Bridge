@@ -53,9 +53,10 @@ compute (§7) — but no engine is implemented now.
 │                  polling; re-enrolment is the recovery path     │
 │                  after 401                                     │
 │    commands.py   §6.2 envelope, §6.3 validation order, §6.1     │
-│                  allowlist (3 sendable ops + closed §17.5       │
-│                  open_order gate), replay cache (10,000),       │
-│                  lifecycle, action.result (§6.5), reconcile    │
+│                  allowlist (3 sendable ops in v1 + §17.5        │
+│                  open_order gate, flag default ON), replay      │
+│                  cache (10,000), lifecycle, action.result       │
+│                  (§6.5), reconcile                             │
 │    chart.py      §17.1 chart request/subscribe, rate limit      │
 │                  60 frames/min, max 20 subscriptions           │
 │    sync.py       §3.3 batches (page 500, 250 ms), checkpoint    │
@@ -253,9 +254,9 @@ it does not own the server-side lifecycle.
 
 ```
 malformed → expired → wrong-device → wrong-account → allowlist
-(→ modify_pending capability gate §17.4 → open_order activation
-gate §17.5, both CLOSED by default) → entitlement
-(position_manager + auto_trade) → replay
+(→ modify_pending capability gate §17.4, CLOSED by default →
+open_order activation gate §17.5: flag default ON, v2 negotiation
+fail-closed) → entitlement (position_manager + auto_trade) → replay
 ```
 
 Only a SUCCESSFUL validation consumes the replay id. Rejections

@@ -206,7 +206,7 @@ envelope when the manifest changes mid-session. No `ping`, no
 
 ## 3. Commands (§6)
 
-### 3.1 Server allowlist (§6.1) — three sendable operations in v1, `open_order` behind the closed §17.5 gate
+### 3.1 Server allowlist (§6.1) — three sendable operations in v1, `open_order` behind the §17.5 gate (flag default ON)
 
 | Operation | Maps to (Python driver, NOT the MCP transport) | Notes |
 |---|---|---|
@@ -215,36 +215,38 @@ envelope when the manifest changes mid-session. No `ping`, no
 | `modify_pending` | `trade_modify_sl_tp` on a pending order (SL/TP only) | **Capability-gated (§17.4): the gate stays CLOSED.** The code path, tests, and the 2026-11-19 live-verification pass (docs/upgrade/PHASE-2B-VERIFICATION.md) are done — conditions (a)–(c) — but the Platform-published minimum `connector_version` (condition d) is still owed, so the default `modify_pending_proven=False` rejects the op as `UnsupportedOperation`. |
 
 `cancel_order` is explicitly NOT sendable in v1. `open_order` is
-implemented behind the **closed** §17.5 activation gate
-(`open_order_authorized=False` by default, with no config knob to open
-it): the market + pending execution path exists (with mandatory
-`order_check` + W4 reconciliation) but accepts no commands until all
-four §17.5 activation conditions are met — user approval, allowlist +
-tests, risk-engine/consent proof, and a `schema_version` bump. Until
-then the wire behavior stays `UnsupportedOperation`.
+implemented behind the §17.5 activation gate: the market + pending
+execution path exists (with mandatory `order_check` + W4
+reconciliation) and accepts commands when BOTH gates are open — the
+flag `enable_v2_open_order` (default `True`; opt-out via
+`NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0`) AND a negotiated v2 envelope.
+The flag alone never opens it, and negotiation alone never opens it
+either. Under a v1 envelope `open_order` stays `UnsupportedOperation`.
 The full 91-command registry stays available **locally**; only the
 server channel enforces this allowlist, at this boundary.
 
-#### 3.1a v2 `open_order` hooks — client-side, behind a flag, NOT live (v1.3.0)
+#### 3.1a v2 `open_order` hooks — client-side, flag default ON, live via the command path (v1.4.0 B3)
 
 The Bridge alone does **not** enable new-position trading. A
 client-side v2 hook exists (`nse_bridge/engine/v2_open_order.py`)
-so the P3 work has a tested entry point, but it is dormant:
+and is wired into the live command path (`server/commands.py`
+dispatches through it; `realtime/channel.py` passes the flag into
+the validator):
 
-- **Two independent gates, both default CLOSED.** (1) The operator
-  flag `enable_v2_open_order` (`NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=1`,
-  default `False`; deliberately not persisted to `config.json`).
+- **Two independent gates; the flag defaults OPEN.** (1) The flag
+  `enable_v2_open_order` (`NSE_BRIDGE_ENABLE_V2_OPEN_ORDER`,
+  default `True`, opt-out `=0`; deliberately not persisted to
+  `config.json` — the env var is the durable override).
   (2) A v2 negotiation with the Platform (`V2Negotiation`,
-  `negotiated=True` plus the negotiated `schema_version`) — there is
-  no v2 handshake in CONTRACT v1, so no production code can construct
-  a negotiated instance today.
+  `negotiated=True` plus the negotiated `schema_version`).
 - **Refusal is loud:** a call with either gate closed raises
   `FEATURE_DISABLED` naming exactly which gate is closed, and never
   touches the driver (zero `order_send` calls).
-- **Not wired into the live command path:** `server/commands.py`
-  and `realtime/channel.py` never import the hook; the §17.5 gate
-  above still rejects server-sent `open_order` frames. The P3 work
-  owns the negotiation wire shape and the call site.
+- **Wired into the live command path:** `server/commands.py`
+  imports the hook and `realtime/channel.py` passes
+  `enable_v2_open_order` as `open_order_authorized`; a server-sent
+  `open_order` frame is accepted only when both gates are open.
+  The P3 work owns the negotiation wire shape.
 - When both gates open, the hook dispatches through the proven local
   primitives (`market_order` / `trade_send_pending_order`) with the
   mandatory pre-send `order_check` + W4 reconciliation — it invents

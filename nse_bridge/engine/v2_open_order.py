@@ -8,11 +8,13 @@ only, no execution enablement beyond what the Platform authorizes
 per command (the Platform's §6.4 gate refuses v2 commands while
 its switch is engaged; the Bridge enforces its own gates here).
 
-Two independent gates, both default CLOSED:
+Two independent gates; the flag defaults OPEN, negotiation stays
+fail-closed:
 
-1. ``flag_enabled`` — the operator opt-in
+1. ``flag_enabled`` — the operator flag
    (``BridgeSettings.enable_v2_open_order``,
-   env ``NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=1``; default False).
+   env ``NSE_BRIDGE_ENABLE_V2_OPEN_ORDER``; default True, opt-out
+   with ``=0`` / ``=false``).
 2. ``negotiation`` — a :class:`V2Negotiation` built from the
    command envelope's ``protocol_version`` by
    :func:`negotiate_protocol_version`: ``"2"`` is honoured only
@@ -271,10 +273,11 @@ def check_v2_open_order_available(
     caller must go through it, never re-implement it.
     """
     if not flag_enabled:
-        logger.warning("[V2_OPEN_ORDER] refused — v2 flag is off (NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=1 required)")
+        logger.warning("[V2_OPEN_ORDER] refused — v2 flag is off (opted out via NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0)")
         raise BridgeError(
             ErrorCode.DISABLED,
-            "v2 open_order is DISABLED: the NSE_BRIDGE_ENABLE_V2_OPEN_ORDER flag is off. "
+            "v2 open_order is DISABLED: the NSE_BRIDGE_ENABLE_V2_OPEN_ORDER flag is off "
+            "(opted out via NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0). "
             "New-position trading requires the Platform P3 protocol — the Bridge alone does not enable it.",
             details={"gate": "flag", "flag": "enable_v2_open_order"},
         )

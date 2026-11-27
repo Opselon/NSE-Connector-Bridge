@@ -4,11 +4,14 @@ Label: unit. No MT5 — a fake MT5 module is injected into the driver.
 Covers: the hook refuses loudly when the flag is off, refuses loudly
 when protocol v2 has not been negotiated, never touches the driver
 on refusal, dispatches through the proven primitives only when BOTH
-gates are open, and is NOT wired into the live server command path
-(the §17.5 gate still rejects server-sent ``open_order`` frames).
+gates are open, and IS wired into the live server command path
+(B3, v1.4.0: ``realtime/channel.py`` passes
+``settings.enable_v2_open_order`` into the validator). The flag
+defaults ON (opt-out via ``NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0``);
+the v2-negotiation gate stays fail-closed.
 
 The Bridge alone does NOT enable new-position trading — these tests
-pin the refusal behavior, not a live trading surface.
+pin the gate behavior, not a live trading surface.
 """
 
 from __future__ import annotations
@@ -251,17 +254,31 @@ MARKET = V2OpenOrderRequest(symbol="EURUSD", side="buy", volume=0.1)
 
 
 # ----------------------------------------------------------------------
-# refusal: flag off
+# flag default: ON (fresh install accepts v2 open_order, no manual step)
 # ----------------------------------------------------------------------
-def test_v2_flag_defaults_off_in_settings(tmp_path):
+def test_v2_flag_defaults_on_in_settings(tmp_path):
     settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
-    assert settings.enable_v2_open_order is False
+    assert settings.enable_v2_open_order is True
 
 
 def test_v2_flag_opt_in_via_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("NSE_BRIDGE_ENABLE_V2_OPEN_ORDER", "1")
     settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
     assert settings.enable_v2_open_order is True
+
+
+def test_v2_flag_opt_out_via_environment_zero(monkeypatch, tmp_path):
+    """Env =0 disables: the override works both ways ("0" parses as
+    False, it is not truthy)."""
+    monkeypatch.setenv("NSE_BRIDGE_ENABLE_V2_OPEN_ORDER", "0")
+    settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
+    assert settings.enable_v2_open_order is False
+
+
+def test_v2_flag_opt_out_via_environment_false(monkeypatch, tmp_path):
+    monkeypatch.setenv("NSE_BRIDGE_ENABLE_V2_OPEN_ORDER", "false")
+    settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
+    assert settings.enable_v2_open_order is False
 
 
 def test_v2_refuses_when_flag_off_even_if_negotiated(ctx):
@@ -376,15 +393,17 @@ def test_v2_pending_without_price_is_validation_error(ctx):
 
 
 # ----------------------------------------------------------------------
-# wired into the live command path — but both gates still default closed
+# wired into the live command path — flag default ON, v2 negotiation
+# still required
 # ----------------------------------------------------------------------
-def test_v2_hook_is_wired_into_command_path_but_gates_default_closed():
+def test_v2_hook_is_wired_into_command_path_flag_default_on():
     """B3 wiring: the server command path DOES import the v2 hook
-    now (the dormant-hook pin is retired), and the channel passes
-    the operator flag into the validator — but a server-sent
-    open_order is still refused unless BOTH gates are open (flag +
-    negotiated v2 envelope). The hook's existence changes nothing
-    on the live path while the gates are closed."""
+    (the dormant-hook pin is retired), and the channel passes the
+    flag into the validator — and the flag now defaults ON, so a
+    server-sent open_order is accepted when BOTH gates are open
+    (flag + negotiated v2 envelope). The hook's existence is live
+    on the command path; only the v2-negotiation gate still refuses
+    v1 frames."""
     repo = Path(__file__).resolve().parents[2]
     commands_src = (repo / "nse_bridge" / "server" / "commands.py").read_text(encoding="utf-8")
     channel_src = (repo / "nse_bridge" / "realtime" / "channel.py").read_text(encoding="utf-8")
@@ -394,23 +413,12 @@ def test_v2_hook_is_wired_into_command_path_but_gates_default_closed():
     assert "open_order_authorized" in channel_src
 
 
-def test_server_open_order_still_rejected_by_default_gate(ctx):
-    """End-to-end guard at the validator level: with the default
-    (closed) §17.5 gate, a server-sent open_order frame is
-    UnsupportedOperation — the v2 hook's existence changes nothing
-    on the live path."""
+def _server_open_order_frame(*, protocol_version="2"):
+    """A well-formed server-sent open_order frame + the fixed clock
+    time its expiry is judged against."""
     from datetime import UTC, datetime, timedelta
 
-    from nse_bridge.server.commands import CommandValidator, RejectionReason
-    from nse_bridge.server.rest import Entitlements
-
     now = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
-    validator = CommandValidator(
-        "dev-1",
-        get_account_id=lambda: "123456",
-        entitlements=Entitlements(position_manager=True, auto_trade=True),
-        clock=lambda: now,
-    )
     issued = now - timedelta(minutes=1)
     frame = {
         "type": "command",
@@ -422,9 +430,65 @@ def test_server_open_order_still_rejected_by_default_gate(ctx):
         "expires_at": (issued + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
         "idempotency_key": "01900000-0000-7000-8000-000000000001",
     }
-    outcome = validator.validate(frame)
+    if protocol_version is not None:
+        frame["protocol_version"] = protocol_version
+    return frame, now
+
+
+def _validator_wired_from_settings(settings, now):
+    """The validator exactly as the live path wires it:
+    ``realtime/channel.py`` passes
+    ``settings.enable_v2_open_order`` as ``open_order_authorized``."""
+    from nse_bridge.server.commands import CommandValidator
+    from nse_bridge.server.rest import Entitlements
+
+    return CommandValidator(
+        "dev-1",
+        get_account_id=lambda: "123456",
+        entitlements=Entitlements(position_manager=True, auto_trade=True),
+        open_order_authorized=settings.enable_v2_open_order,
+        clock=lambda: now,
+    )
+
+
+def test_server_open_order_accepted_by_default_flag(monkeypatch, tmp_path):
+    """(a) Fresh install, no env var: the default flag is ON and a
+    well-formed v2 open_order frame is ACCEPTED by the validator
+    wired from those settings — no manual step."""
+    monkeypatch.delenv("NSE_BRIDGE_ENABLE_V2_OPEN_ORDER", raising=False)
+    settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
+    assert settings.enable_v2_open_order is True
+    frame, now = _server_open_order_frame(protocol_version="2")
+    outcome = _validator_wired_from_settings(settings, now).validate(frame)
+    assert outcome.ok is True
+    assert outcome.rejection is None
+
+
+def test_server_open_order_refused_when_flag_opted_out_via_env(monkeypatch, tmp_path, ctx):
+    """(b) Env =0 opts out: the same well-formed v2 frame is refused
+    as UnsupportedOperation and nothing reaches MT5."""
+    from nse_bridge.server.commands import RejectionReason
+
+    monkeypatch.setenv("NSE_BRIDGE_ENABLE_V2_OPEN_ORDER", "0")
+    settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
+    assert settings.enable_v2_open_order is False
+    frame, now = _server_open_order_frame(protocol_version="2")
+    outcome = _validator_wired_from_settings(settings, now).validate(frame)
     assert outcome.rejection is RejectionReason.UNSUPPORTED_OPERATION
     assert ctx.driver._mt5.send_calls == 0
+
+
+def test_server_open_order_refused_under_v1_envelope_even_with_flag_on(monkeypatch, tmp_path):
+    """(c) v1 envelope + flag on: the v2-only op is still refused —
+    the negotiation gate stays fail-closed."""
+    from nse_bridge.server.commands import RejectionReason
+
+    monkeypatch.delenv("NSE_BRIDGE_ENABLE_V2_OPEN_ORDER", raising=False)
+    settings = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
+    assert settings.enable_v2_open_order is True
+    frame, now = _server_open_order_frame(protocol_version="1")
+    outcome = _validator_wired_from_settings(settings, now).validate(frame)
+    assert outcome.rejection is RejectionReason.UNSUPPORTED_OPERATION
 
 
 # ----------------------------------------------------------------------

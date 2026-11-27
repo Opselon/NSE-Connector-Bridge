@@ -215,15 +215,20 @@ class BridgeSettings(BaseSettings):
     # None). With no magic configured there is nothing to guard
     # against, so the guard passes (see engine/trading._position_owns).
     # --- v2 open_order hook (S4, v1.3.0) ------------------------------
-    # Client-side v2 open_order hook flag. DEFAULT DISABLED. Enabling
-    # it alone does NOT enable new-position trading: the Platform must
-    # also ship the P3 protocol and negotiate protocol v2 with this
-    # Bridge (see nse_bridge/engine/v2_open_order.py). The hook is not
-    # wired into the server command path, and the §17.5 activation
-    # gate still rejects server-sent open_order frames. Env:
-    # NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=1. Deliberately NOT persisted
-    # by persist_settings — an operator enables it explicitly, per run.
-    enable_v2_open_order: bool = False
+    # Client-side v2 open_order hook flag. DEFAULT ENABLED: a fresh
+    # Bridge install accepts server-sent open_order frames with a
+    # negotiated v2 envelope — no manual step, no env var, no per-run
+    # flag. The flag is now an explicit opt-OUT: set
+    # NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0 (or =false) to refuse
+    # server-sent opens again. Enabling it alone does NOT enable
+    # new-position trading: the Platform must also negotiate protocol
+    # v2 with this Bridge (see nse_bridge/engine/v2_open_order.py),
+    # and the §17.5 activation gate still requires BOTH the flag AND
+    # a negotiated v2 envelope. Env: NSE_BRIDGE_ENABLE_V2_OPEN_ORDER
+    # (=1 enable / =0 disable; "0"/"false" parse as False).
+    # Deliberately NOT persisted by persist_settings — the env var is
+    # the durable override; the default is on.
+    enable_v2_open_order: bool = True
 
     # --- streaming ------------------------------------------------------
     stream_account_interval_ms: int = 1000

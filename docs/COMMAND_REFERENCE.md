@@ -44,13 +44,18 @@ object (`code`, `category`, `cause`, `recovery`, `retry_safe`).
 
 Explicitly NOT sendable in v1: `open_order`, `cancel_order`
 (§6.1, §17.5). Any other `operation.type` → `UnsupportedOperation`
-at validation step 5, before anything reaches MT5. Entitlement:
+at validation step 5, before anything reaches MT5. Under a
+negotiated v2 envelope (`protocol_version: "2"`), `open_order`,
+`cancel_order`, and `partial_close` are sendable subject to the
+§17.5 gate (flag default ON, opt-out
+`NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0`); a v1 envelope still refuses
+all v2-only ops. Entitlement:
 `position_manager` AND `auto_trade` (from `validate-key`) must both
 be enabled, else `AutoTradeNotEnabled` (step 6).
 
 Validation order (§6.3, exact): malformed → expired → wrong-device →
-wrong-account → allowlist (→ `modify_pending` gate) → entitlement →
-replay. Lifecycle (spec §7): `RECEIVED → VALIDATED → AUTHORIZED →
+wrong-account → allowlist (→ `modify_pending` gate → `open_order`
+§17.5 gate) → entitlement → replay. Lifecycle (spec §7): `RECEIVED → VALIDATED → AUTHORIZED →
 DISPATCHED → EXECUTING → COMPLETED | PARTIALLY_COMPLETED | FAILED |
 UNKNOWN | EXPIRED`. `PARTIALLY_COMPLETED` is a LOCAL terminal state:
 a partial close (requested partial volume, or broker retcode 10010
