@@ -30,8 +30,11 @@ WSS session itself.
 
 Server allowlist (§6.1) — EXACTLY three operations in v1:
 ``close_position``, ``modify_sl_tp``, ``modify_pending``. ``open_order``
-and ``cancel_order`` are explicitly NOT sendable (§6.1, §17.5 open
-decision). The full local 91-command registry stays intact — only the
+and ``cancel_order`` are explicitly NOT sendable under a v1 envelope
+(§6.1, §17.5 open decision); under a negotiated v2 envelope they are
+sendable subject to the §17.5 activation gate (step 5b), whose flag
+now defaults ON (opt-out: ``NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0``).
+The full local 91-command registry stays intact — only the
 SERVER channel enforces this allowlist, at this boundary.
 
 ``modify_pending`` capability gate (§17.4, step 5a of §6.3): the op is
@@ -60,7 +63,9 @@ validation consumes the replay id):
 3. ``device_id`` == this device → ``WrongDevice``
 4. ``account_id`` ∈ authorized accounts for this device → ``WrongAccount``
 5. ``operation.type`` ∈ allowlist → ``UnsupportedOperation``
-   (5a: ``modify_pending`` additionally requires the §17.4 gate)
+   (5a: ``modify_pending`` additionally requires the §17.4 gate;
+   5b: ``open_order`` additionally requires the §17.5 gate — the
+   flag, default ON, plus a negotiated v2 envelope)
 6. Feature enabled locally (``position_manager`` / ``auto_trade``
    entitlements from ``validate-key``) → ``AutoTradeNotEnabled``
 7. ``command_id`` not in the bounded replay cache (10,000 ids) → ``Replayed``
@@ -144,8 +149,9 @@ P3 v2 protocol (Bridge v1.4.0 B3 — Platform MASTER §14,
   unchanged. ``trailing_stop`` / ``break_even`` stay refused: their
   MT5 primitives live in the (dormant) policy service, not on this
   path — a v2 op with no verified primitive is never guessed.
-- ``open_order`` additionally requires BOTH v2 gates: the operator
-  flag (``enable_v2_open_order``) AND a negotiated v2 envelope.
+- ``open_order`` additionally requires BOTH v2 gates: the flag
+  (``enable_v2_open_order``, default ON — opt-out via
+  ``NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0``) AND a negotiated v2 envelope.
   The execution path runs through
   :mod:`nse_bridge.engine.v2_open_order`, which pre-validates
   against live MT5 state and dispatches through the proven market /
@@ -357,9 +363,9 @@ class CommandEnvelope:
     volume: float | None = None
     #: W5 fields (PROPOSED §17.5 wire shapes — the market form follows
     #: CONTRACTS.md §7; the pending form is proposed in the PR body).
-    #: Parsed only when ``operation.type == "open_order"``; the default
-    #: gate keeps the operation REJECTED, so these never reach MT5
-    #: until all four §17.5 activation conditions are met.
+    #: Parsed only when ``operation.type == "open_order"``; the §17.5
+    #: gate (step 5b — flag, default on, plus a negotiated v2
+    #: envelope) still stands between these fields and MT5.
     symbol: str | None = None
     side: str | None = None
     order_kind: str | None = None  # market | limit | stop | stop_limit
@@ -746,11 +752,17 @@ class CommandValidator:
         self._entitlements_source = entitlements
         self.replay_cache = replay_cache or ReplayCache()
         self.modify_pending_proven = modify_pending_proven
-        #: P3 v2 / §17.5 activation gate, first half. DEFAULT CLOSED:
-        #: ``open_order`` additionally requires a negotiated v2
-        #: envelope (``protocol_version: "2"`` — see step 5); the flag
-        #: alone never opens it, and negotiation alone never opens it
-        #: either. Both gates must be open before any open reaches MT5.
+        #: P3 v2 / §17.5 activation gate, first half. The flag
+        #: defaults ON at the settings layer
+        #: (``BridgeSettings.enable_v2_open_order``; opt-out via
+        #: ``NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0``) — this constructor
+        #: parameter itself defaults False (fail-closed unless the
+        #: caller passes the setting, as ``realtime/channel.py``
+        #: does): ``open_order`` additionally requires a negotiated
+        #: v2 envelope (``protocol_version: "2"`` — see step 5); the
+        #: flag alone never opens it, and negotiation alone never
+        #: opens it either. Both gates must be open before any open
+        #: reaches MT5.
         self.open_order_authorized = open_order_authorized
         self._clock = clock or (lambda: datetime.now(UTC))
 
@@ -792,7 +804,9 @@ class CommandValidator:
         # the contract — "2" is honoured only when this Bridge speaks
         # v2, anything else is v1, fail-closed. v2-only ops on a v1
         # negotiation are refused, and open_order additionally
-        # requires the operator flag (both gates, both default CLOSED).
+        # requires the flag (default ON via settings; opt-out
+        # ``NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0``) — the v2-negotiation
+        # half stays fail-closed.
         negotiation = negotiate_protocol_version(envelope.protocol_version)
         allowed = SERVER_ALLOWLIST_V2 if negotiation.negotiated else SERVER_ALLOWLIST
         if envelope.operation_type not in allowed:

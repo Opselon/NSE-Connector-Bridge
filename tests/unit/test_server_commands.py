@@ -585,26 +585,49 @@ def test_volume_oversize_is_mcp_failed_never_retried(monkeypatch):
 
 
 # ----------------------------------------------------------------------
-# W5 — open_order technical path behind the INACTIVE §17.5 gate.
+# W5 — open_order technical path behind the §17.5 gate (flag default
+# ON; opt-out refuses, v1 envelope refuses).
 # ----------------------------------------------------------------------
 @pytest.mark.unit
-def test_open_order_rejected_by_default_gate_closed(monkeypatch):
+def test_open_order_rejected_when_flag_opted_out(monkeypatch):
+    """(b) at executor level: flag opted out + negotiated v2 envelope
+    → rejected as UnsupportedOperation, never executed."""
     ctx = _ctx()
     calls: list[str] = []
     monkeypatch.setattr(
         "nse_bridge.engine.trading.market_order",
         lambda ctx_, **kw: calls.append("sent") or {"status": "done"},
     )
-    executor = CommandExecutor(ctx, _validator(), clock=lambda: NOW)
+    executor = CommandExecutor(ctx, _validator(open_order_authorized=False), clock=lambda: NOW)
     execution, result = executor.execute(
-        _frame(operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.01})
+        _frame(
+            protocol_version="2",
+            operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.01},
+        )
     )
-    # §17.5 mandatory default: rejected as UnsupportedOperation until
-    # ALL FOUR activation conditions are met — never executed.
     assert execution.state is CommandState.FAILED
     assert result["status"] == "rejected"
     assert result["error"]["code"] == "UnsupportedOperation"
     assert calls == []
+
+
+@pytest.mark.unit
+def test_open_order_accepted_with_default_flag_and_v2_envelope(monkeypatch):
+    """(a) at validator level: a fresh install's default settings
+    carry the flag ON, and the validator wired from them (exactly as
+    realtime/channel.py wires it) ACCEPTS a well-formed v2
+    open_order frame — no env var, no manual step."""
+    settings = BridgeSettings(_env_file=None, server_token="x", device_id=DEVICE)
+    assert settings.enable_v2_open_order is True
+    validator = _validator(open_order_authorized=settings.enable_v2_open_order)
+    outcome = validator.validate(
+        _frame(
+            protocol_version="2",
+            operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.01},
+        )
+    )
+    assert outcome.ok is True
+    assert outcome.rejection is None
 
 
 @pytest.mark.unit

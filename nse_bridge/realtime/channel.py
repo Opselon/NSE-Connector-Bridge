@@ -654,10 +654,12 @@ class ServerChannel:
             )
         if self._executor is None:
             rest = self._rest
-            # B3 (P3 v2): the v2 flag is the operator half of the
+            # B3 (P3 v2): the v2 flag is the flag half of the
             # open_order gate — the other half is the negotiated v2
             # envelope, checked per command in the validator. The
-            # flag alone never opens an open; without it, v2 opens
+            # flag defaults ON (``BridgeSettings.enable_v2_open_order``;
+            # opt-out via ``NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0``).
+            # The flag alone never opens an open; without it, v2 opens
             # stay UnsupportedOperation.
             validator = CommandValidator(
                 device_id,
