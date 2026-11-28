@@ -834,8 +834,8 @@ class CommandValidator:
         get_account_id: Callable[[], str | None],
         entitlements: Entitlements | Callable[[], Entitlements] | None = None,
         replay_cache: ReplayCache | None = None,
-        modify_pending_proven: bool = False,
-        open_order_authorized: bool = False,
+        modify_pending_proven: bool | Callable[[], bool] = False,
+        open_order_authorized: bool | Callable[[], bool] = False,
         allowed_symbols: Collection[str] | str | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -845,23 +845,29 @@ class CommandValidator:
         self.replay_cache = replay_cache or ReplayCache()
         #: §17.4 modify_pending gate, resolved value. Defaults False
         #: (fail-closed); the production caller
-        #: (``realtime/channel.py``) passes
-        #: ``modify_pending_gate_open(enabled=settings.enable_modify_pending,
-        #: bridge_version=BRIDGE_VERSION)`` — explicit operator opt-in
-        #: AND a qualifying local version. Tests pass True directly.
-        self.modify_pending_proven = modify_pending_proven
+        #: (``realtime/channel.py``) passes a live-reading callable
+        #: (``modify_pending_gate_open(enabled=settings.enable_modify_pending,
+        #: bridge_version=BRIDGE_VERSION)`` re-evaluated per read) —
+        #: explicit operator opt-in AND a qualifying local version.
+        #: Tests pass a plain bool (or True) directly. A plain bool
+        #: is kept as-is; a callable is re-read on every access so a
+        #: flag toggle takes effect on the NEXT command with no
+        #: channel rebuild and no process restart (P2-1).
+        self._modify_pending_proven_source = modify_pending_proven
         #: P3 v2 / §17.5 activation gate, first half. The flag
         #: defaults ON at the settings layer
         #: (``BridgeSettings.enable_v2_open_order``; opt-out via
         #: ``NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0``) — this constructor
         #: parameter itself defaults False (fail-closed unless the
         #: caller passes the setting, as ``realtime/channel.py``
-        #: does): ``open_order`` additionally requires a negotiated
-        #: v2 envelope (``protocol_version: "2"`` — see step 5); the
-        #: flag alone never opens it, and negotiation alone never
-        #: opens it either. Both gates must be open before any open
-        #: reaches MT5.
-        self.open_order_authorized = open_order_authorized
+        #: does, as a live-reading callable): ``open_order``
+        #: additionally requires a negotiated v2 envelope
+        #: (``protocol_version: "2"`` — see step 5); the flag alone
+        #: never opens it, and negotiation alone never opens it
+        #: either. Both gates must be open before any open reaches
+        #: MT5. A callable source is re-read on every access (P2-1);
+        #: a plain bool is kept as-is.
+        self._open_order_authorized_source = open_order_authorized
         #: P1-5 symbol allowlist, resolved value. None = unconfigured
         #: (no restriction — today's behaviour). A non-empty set is the
         #: configured allowlist, normalized with
@@ -886,6 +892,18 @@ class CommandValidator:
             parsed = frozenset(key for key in (normalize_broker_name(str(entry).strip()) for entry in entries) if key)
             self._allowed_symbols = parsed or None
         self._clock = clock or (lambda: datetime.now(UTC))
+
+    @property
+    def modify_pending_proven(self) -> bool:
+        """§17.4 gate, resolved live (callable sources re-read per access)."""
+        source = self._modify_pending_proven_source
+        return bool(source() if callable(source) else source)
+
+    @property
+    def open_order_authorized(self) -> bool:
+        """§17.5 flag half, resolved live (callable sources re-read per access)."""
+        source = self._open_order_authorized_source
+        return bool(source() if callable(source) else source)
 
     @property
     def entitlements(self) -> Entitlements:

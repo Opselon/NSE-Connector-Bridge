@@ -251,10 +251,10 @@ class BridgeSettings(BaseSettings):
     # new-position trading: the Platform must also negotiate protocol
     # v2 with this Bridge (see nse_bridge/engine/v2_open_order.py),
     # and the §17.5 activation gate still requires BOTH the flag AND
-    # a negotiated v2 envelope. Env: NSE_BRIDGE_ENABLE_V2_OPEN_ORDER
-    # (=1 enable / =0 disable; "0"/"false" parse as False).
-    # Deliberately NOT persisted by persist_settings — the env var is
-    # the durable override; the default is on.
+    # a negotiated v2 envelope. Persisted by persist_settings and
+    # toggleable at runtime via PUT /settings (P2-1) — the validator
+    # re-reads it on every command, so no restart is needed. An env
+    # var, when set, still wins over config.json at load time.
     enable_v2_open_order: bool = True
 
     # --- modify_pending gate (§17.4, P0-1) ---------------------------
@@ -272,12 +272,11 @@ class BridgeSettings(BaseSettings):
     # the Platform at validate-key / register-device, and the Platform
     # enforces its own `MODIFY_PENDING_MIN_VERSION` before sending).
     # The flag is the operator's explicit opt-in on this device; the
-    # version floor is the release train's. Deliberately NOT persisted
-    # by persist_settings — the env var is the durable override.
-    # NOTE: like `enable_v2_open_order`, the validator is built once
-    # in `realtime/channel.py::_ensure_components`, so toggling the
-    # flag takes effect on the next channel (re)build / Bridge
-    # restart, not mid-session (P2-1 staleness, same as the v2 flag).
+    # version floor is the release train's. Persisted by
+    # persist_settings and toggleable at runtime via PUT /settings
+    # (P2-1) — the validator re-reads it on every command, so no
+    # restart is needed. An env var, when set, still wins over
+    # config.json at load time.
     enable_modify_pending: bool = False
 
     # --- symbol allowlist (audit P1-5) --------------------------------
@@ -424,6 +423,14 @@ def persist_settings(settings: BridgeSettings) -> None:
         "diagnostic_mode",
         "gui_mode",
         "broker_utc_offset_minutes",
+        # P2-1: the §17.4/§17.5 gate flags are persisted so a PUT
+        # /settings toggle survives a Bridge restart. An env var,
+        # when set, still wins over config.json at load time
+        # (_apply_json_overrides), so a toggle made while an env var
+        # is set takes effect live but reverts on the next restart —
+        # the env var is the durable override in that case.
+        "enable_v2_open_order",
+        "enable_modify_pending",
     ):
         payload[key] = getattr(settings, key)
     settings.config_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

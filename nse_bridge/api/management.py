@@ -73,6 +73,21 @@ class SettingsUpdate(BaseModel):
     default_timeframe: str | None = Field(None, min_length=0, max_length=4)
     broker_utc_offset_minutes: int | None = Field(None, ge=-720, le=720)
     strict_magic_guard: bool | None = None
+    # P2-1: the §17.5 (§17.4) gate flags. Persisted to config.json
+    # and applied to the LIVE validator immediately — the validator
+    # re-reads them on every command, so toggling takes effect on the
+    # next command with no channel restart and no Bridge restart.
+    # (If the matching env var is set, it wins over config.json at
+    # load time, so a toggle made while an env var is set reverts on
+    # the next restart — the env var is the durable override then.)
+    enable_v2_open_order: bool | None = Field(
+        None,
+        description="§17.5 v2 open gate flag (default True; False refuses server-sent open_order as UnsupportedOperation)",
+    )
+    enable_modify_pending: bool | None = Field(
+        None,
+        description="§17.4 modify_pending gate opt-in (default False; True opens the gate only on a Bridge >= 1.4.1)",
+    )
     stream_account_interval_ms: int | None = Field(None, ge=200, le=60000)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] | None = None
     gui_mode: Literal["auto", "webview", "browser", "none"] | None = None
@@ -110,6 +125,8 @@ async def get_settings(request: Request) -> dict[str, Any]:
             "default_timeframe": s.default_timeframe,
             "broker_utc_offset_minutes": s.broker_utc_offset_minutes,
             "strict_magic_guard": s.strict_magic_guard,
+            "enable_v2_open_order": s.enable_v2_open_order,
+            "enable_modify_pending": s.enable_modify_pending,
             "stream_account_interval_ms": s.stream_account_interval_ms,
             "log_level": s.log_level,
             "gui_mode": s.gui_mode,
@@ -129,7 +146,9 @@ async def get_settings(request: Request) -> dict[str, Any]:
     description="Partial update. Non-secret fields are persisted to config.json. "
     "Secrets (server_token, local_api_key) are routed through the secret store and "
     "never written to config.json. Server-channel fields apply immediately "
-    "(the outbound channel restarts when URL/token change). Terminal fields "
+    "(the outbound channel restarts when URL/token change). The §17.4/§17.5 "
+    "gate flags (enable_v2_open_order, enable_modify_pending) apply to the live "
+    "validator immediately — no channel or bridge restart is needed. Terminal fields "
     "(mt5_terminal_path, mt5_custom_terminal_dirs) re-run discovery immediately "
     "(fresh list returned in this response); changing the terminal path while the "
     "driver is connected disconnects it from the old terminal instead of keeping "
