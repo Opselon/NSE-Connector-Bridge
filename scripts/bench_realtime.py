@@ -10,6 +10,16 @@ single-worker-thread shape the production ``Mt5Driver`` uses:
   (b) MT5 tick -> Bridge processing -> platform ingest (``chart.tick``)
   (c) chart warm-up: ``chart.request`` count=500 per symbol/timeframe
   (d) contention: busy local dashboard / blocked MT5 worker vs idle
+      (d1 dashboard hammer, d2 one in-flight 300 ms fetch, d3 a
+      queued flood of chart fetches — the P1-3 acceptance phase:
+      with the priority lane a close jumps queued chart work)
+
+The MT5 worker is a serialized single thread with priority lanes
+(P1-3): server commands (closes in the URGENT lane) jump chart /
+sync / poll jobs still queued on the worker; a job already running
+is never pre-empted. The FakeDriver below mirrors that queue shape
+exactly, so the contention phases measure the production lane
+assignment, not a bench-only approximation.
 
 Method: the REAL ``ServerChannel``, ``CommandExecutor``,
 ``CommandValidator`` and ``ChartService`` run; only the terminal and
@@ -35,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import itertools
 import json
 import os
 import platform
@@ -64,6 +75,11 @@ from mock_server import MockServer
 
 from nse_bridge.config import BridgeSettings
 from nse_bridge.engine.common import BridgeContext
+from nse_bridge.mt5.driver import (
+    MT5_PRIORITY_BACKGROUND,
+    MT5_PRIORITY_COMMAND,
+    current_mt5_priority,
+)
 from nse_bridge.realtime.channel import ServerChannel
 from nse_bridge.server.chart import ChartService
 from nse_bridge.server.commands import CommandExecutor, CommandValidator
@@ -300,13 +316,22 @@ class FakeMt5:
 # Fake driver: same serialized single-worker-thread shape as Mt5Driver
 # ---------------------------------------------------------------------------
 class FakeDriver:
-    """Serialized worker thread + bounded queue, mirroring
+    """Serialized worker thread + bounded priority queue, mirroring
     ``Mt5Driver.run`` (queue-wait included in the recorded duration,
-    per-op metrics, fast failure when the queue is full)."""
+    per-op metrics, fast failure when the queue is full).
+
+    The queue shape mirrors the production driver exactly (P1-3):
+    entries are (priority, seq, job, future) — lower priority runs
+    first, FIFO within a lane — and the ambient lane is read from the
+    same :func:`current_mt5_priority` the production scopes set, so
+    the command/chart/poll lane assignment in ``nse_bridge/`` is what
+    this bench measures. The worker stays strictly serial: one job
+    at a time, never parallel."""
 
     def __init__(self, mt5: FakeMt5) -> None:
         self._mt5 = mt5
-        self._jobs: queue.Queue[tuple[Any, Future]] = queue.Queue(maxsize=256)
+        self._jobs: queue.PriorityQueue[tuple[int, int, Any, Future]] = queue.PriorityQueue(maxsize=256)
+        self._seq = itertools.count()
         self._thread = threading.Thread(name="fake-mt5-worker", target=self._work, daemon=True)
         self._metrics: dict[str, dict[str, float]] = {}
         self._lock = threading.Lock()
@@ -316,17 +341,25 @@ class FakeDriver:
 
     def _work(self) -> None:
         while True:
-            job, fut = self._jobs.get()
+            _priority, _seq, job, fut = self._jobs.get()
             try:
                 fut.set_result(job(self._mt5))
             except BaseException as exc:  # noqa: BLE001 — isolate the worker
                 fut.set_exception(exc)
 
-    def run(self, job: Any, op: str | None = None, context: dict[str, Any] | None = None, timeout: float = 60.0) -> Any:
+    def run(
+        self,
+        job: Any,
+        op: str | None = None,
+        context: dict[str, Any] | None = None,
+        timeout: float = 60.0,
+        priority: int | None = None,
+    ) -> Any:
         name = op or str(getattr(job, "__name__", "unnamed_job"))
+        lane = current_mt5_priority() if priority is None else priority
         fut: Future = Future()
         try:
-            self._jobs.put_nowait((job, fut))
+            self._jobs.put_nowait((lane, next(self._seq), job, fut))
         except queue.Full as exc:
             raise RuntimeError("MT5 job queue full (256) — worker stalled") from exc
         with self._lock:
@@ -339,6 +372,24 @@ class FakeDriver:
             raise
         self._record(name, True, (time.perf_counter() - t0) * 1000.0)
         return result
+
+    def run_order_send(
+        self,
+        job: Any,
+        op: str | None = None,
+        context: dict[str, Any] | None = None,
+        priority: int | None = None,
+    ) -> Any:
+        """Placement path: mirrors ``Mt5Driver.run_order_send`` —
+        COMMAND lane unless an explicit priority is given."""
+        lane = MT5_PRIORITY_COMMAND if priority is None else priority
+        return self.run(job, op=op, context=context, timeout=30.0, priority=lane)
+
+    @property
+    def queued_jobs(self) -> int:
+        """Jobs currently waiting in the queue (excludes the one
+        running on the worker, if any)."""
+        return self._jobs.qsize()
 
     def _record(self, op: str, ok: bool, duration_ms: float) -> None:
         with self._lock:
@@ -486,7 +537,11 @@ class BenchHarness:
                 time.sleep(self.fetch_latency_s)
             return gen_candles(symbol, timeframe, count)
 
-        out = self.driver.run(job, op="copy_rates_from_pos", context={"symbol": symbol, "count": count})
+        # P1-3: chart fetches run in the BACKGROUND lane (same lane
+        # the production bind_mt5_fetchers assigns).
+        out = self.driver.run(
+            job, op="copy_rates_from_pos", context={"symbol": symbol, "count": count}, priority=MT5_PRIORITY_BACKGROUND
+        )
         t1 = time.monotonic()
         self.fetch_spans.append({"op": "fetch_candles", "count": count, "t0": t0, "t1": t1, "ms": (t1 - t0) * 1000.0})
         return out
@@ -499,13 +554,22 @@ class BenchHarness:
                 time.sleep(self.fetch_latency_s)
             return gen_ticks(symbol, count)
 
-        out = self.driver.run(job, op="copy_ticks_range", context={"symbol": symbol, "count": count})
+        # P1-3: BACKGROUND lane, as _fetch_candles above.
+        out = self.driver.run(
+            job, op="copy_ticks_range", context={"symbol": symbol, "count": count}, priority=MT5_PRIORITY_BACKGROUND
+        )
         t1 = time.monotonic()
         self.fetch_spans.append({"op": "fetch_ticks", "count": count, "t0": t0, "t1": t1, "ms": (t1 - t0) * 1000.0})
         return out
 
     def _ensure_market_watch(self, symbol: str) -> None:
-        self.driver.run(lambda mt5: mt5.symbol_select(symbol, True), op="symbol_select", context={"symbol": symbol})
+        # P1-3: BACKGROUND lane, as _fetch_candles above.
+        self.driver.run(
+            lambda mt5: mt5.symbol_select(symbol, True),
+            op="symbol_select",
+            context={"symbol": symbol},
+            priority=MT5_PRIORITY_BACKGROUND,
+        )
 
     async def start(self) -> None:
         self.mock.start()
@@ -1019,6 +1083,87 @@ async def phase_contention_blocked_worker(harness: BenchHarness, n: int = 10) ->
     }
 
 
+async def phase_contention_queued_chart_flood(
+    harness: BenchHarness, n: int = 10, *, floods: int = 6, fetch_ms: float = 100.0
+) -> dict[str, Any]:
+    """(d3) the P1-3 acceptance phase: ``floods`` chart fetches are
+    sent back-to-back so they occupy the serialized worker AND queue
+    behind it; each close_position is sent while fetches are still
+    queued. On a plain FIFO the close waits behind every queued
+    fetch (~``(floods-1) * fetch_ms``); with the priority lane it
+    jumps the queued fetches and waits only for the one fetch
+    already running on the worker. The queued depth at close-send is
+    recorded, so a run that never actually queued work cannot claim
+    a win. Chart frames are drained after each close so floods never
+    pile up across iterations."""
+    saved = harness.fetch_latency_s
+    harness.fetch_latency_s = fetch_ms / 1000.0
+    steps: dict[str, list[float]] = {
+        "ws_in": [],
+        "dispatch": [],
+        "mt5_execute": [],
+        "enqueue_wait": [],
+        "ws_send_ingest": [],
+        "total": [],
+    }
+    queued_depths: list[int] = []
+    failures: list[dict[str, Any]] = []
+    try:
+        for _ in range(n):
+            harness.mt5.reset_position()
+            rids = [new_uuid7_str() for _ in range(floods)]
+            for rid in rids:
+                harness.mock.send_json(
+                    {"type": "chart.request", "request_id": rid, "symbol": SYMBOL, "timeframe": "M1", "count": 1000}
+                )
+            # Wait until the flood is actually queued on the worker
+            # (one fetch in flight, the rest waiting) — or proceed
+            # after 2 s and record the smaller depth honestly.
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and harness.driver.queued_jobs < floods - 1:
+                await asyncio.sleep(0.005)
+            queued_depths.append(harness.driver.queued_jobs)
+            frame = harness.command_frame()
+            cid = frame["command_id"]
+            t_send = harness.mock.send_json(frame)
+            result = await asyncio.to_thread(harness.mock.wait_for_result, cid, 10.0)
+            # Drain the flood's chart frames before the next round.
+            for rid in rids:
+                await asyncio.to_thread(harness.mock.wait_for_chart, rid, 10.0)
+            if result is None:
+                failures.append({"command_id": cid, "error": "no action.result in 10s"})
+                continue
+            arrival = harness.mock.state.result_arrivals.get(cid)
+            marks = harness.marks.get(cid, {})
+            if arrival is None or "recv" not in marks or "exec_start" not in marks or "exec_end" not in marks:
+                failures.append({"command_id": cid, "error": "missing step marks"})
+                continue
+            if result.get("status") != "executed":
+                failures.append({"command_id": cid, "error": f"status={result.get('status')}"})
+                continue
+            enqueued = marks.get("enqueued", marks["exec_end"])
+            steps["ws_in"].append((marks["recv"] - t_send) * 1000.0)
+            steps["dispatch"].append((marks["exec_start"] - marks["recv"]) * 1000.0)
+            steps["mt5_execute"].append((marks["exec_end"] - marks["exec_start"]) * 1000.0)
+            steps["enqueue_wait"].append((enqueued - marks["exec_end"]) * 1000.0)
+            steps["ws_send_ingest"].append((arrival - enqueued) * 1000.0)
+            steps["total"].append((arrival - t_send) * 1000.0)
+    finally:
+        harness.fetch_latency_s = saved
+    return {
+        "label": (
+            f"close_position sent while {floods} x {fetch_ms:.0f}ms chart fetches are queued "
+            "(same MT5 worker; P1-3 acceptance phase)"
+        ),
+        "chart_fetches_per_round": floods,
+        "chart_fetch_ms": fetch_ms,
+        "queued_chart_jobs_at_close_send": stats_ms([float(d) for d in queued_depths]) if queued_depths else {"n": 0},
+        "steps_ms": {k: stats_ms(v) for k, v in steps.items()},
+        "failures": failures,
+        "max_worker_queue_depth": harness.driver.max_queue_depth,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
@@ -1101,6 +1246,17 @@ def print_summary(report: dict[str, Any]) -> None:
         print(f"\n{d2['label']}:")
         for step, s in d2["steps_ms"].items():
             print(row(step, s))
+    d3 = report.get("contention_queued_chart_flood")
+    if d3 is not None:
+        q = d3["queued_chart_jobs_at_close_send"]
+        print(
+            f"\n{d3['label']}: queued_jobs_at_send p50={q['p50_ms']:.0f} "
+            f"(n={q['n']}, max queue depth {d3['max_worker_queue_depth']})"
+        )
+        for step, s in d3["steps_ms"].items():
+            print(row(step, s))
+        if d3["failures"]:
+            print(f"  FAILURES: {len(d3['failures'])}")
     print("\nVerdict vs <100ms target: see docs/PERFORMANCE-v14-baseline.md (WAN leg UNMEASURED).")
 
 
@@ -1149,6 +1305,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
                 label="close_position under realistic dashboard load (1 worker, ~1 req/s)",
             )
             report["contention_blocked_worker"] = await phase_contention_blocked_worker(harness, n=10)
+            report["contention_queued_chart_flood"] = await phase_contention_queued_chart_flood(harness, n=10)
     finally:
         await harness.stop()
     return report

@@ -172,11 +172,21 @@ P3 v2 protocol (Bridge v1.4.0 B3 — Platform MASTER §14,
   stored result with ``deduplicated: true`` and never touches MT5
   twice.
 - Fencing: a single active command per (device, fence token), where
-  the token is the envelope's ``policy_revision`` when present
-  (``"default"`` otherwise). A second command waits for the fence
+  the token is per-ticket (``ticket:<n>``) when the envelope carries
+  a ticket (P1-3: independent tickets no longer serialize behind
+  each other), else the envelope's ``policy_revision`` when present
+  (``"default"`` otherwise — e.g. ``open_order``, which has no ticket
+  yet). A second command on the SAME ticket waits for the fence
   (bounded); a command whose ``policy_revision`` differs from the
   executor's expected revision (when configured — the server is
-  the authority by default) is rejected as ``Fenced``.
+  the authority by default) is rejected as ``Fenced`` by the
+  explicit revision check, independent of the token.
+- Worker priority (P1-3): dispatch runs in the command lane of the
+  serialized MT5 worker queue — closes (envelope priority 9) in the
+  URGENT lane, other commands in the COMMAND lane — so a command's
+  driver jobs jump chart/sync work still queued on the worker. The
+  driver itself stays strictly serial; ``order_check`` +
+  reconciliation + idempotent 10036 handling are untouched.
 - Server lifecycle (Platform §14.4 mapping): every command records
   ``pending → delivered → acknowledged → confirmed | failed`` with
   timestamps (``ServerLifecycle``), carried on the result envelope.
@@ -201,6 +211,7 @@ from loguru import logger
 
 from ..engine.v2_open_order import negotiate_protocol_version
 from ..errors import BridgeError, ErrorCode
+from ..mt5.driver import MT5_PRIORITY_COMMAND, MT5_PRIORITY_URGENT, mt5_priority_scope
 from ..timeutil import normalize_utc
 from .queue import BoundedPendingQueue
 from .rest import Entitlements
@@ -697,16 +708,20 @@ class IdempotencyStore:
 class CommandFence:
     """Single active command per (device, fence token) (P3 v2 §8.6).
 
-    The token is the envelope's ``policy_revision`` when present
-    (``"default"`` otherwise): a policy change fences the old
-    revision's commands out — they wait for the fence only if they
-    share the token, and a superseded revision is rejected by the
-    executor's policy check instead of executing under stale
-    authorization. ``acquire`` blocks up to ``timeout_s``; on
-    timeout it returns False and the caller rejects as ``Fenced``
-    (the server re-issues with a new ``command_id``). The fence is
-    always released, even when dispatch crashes — a stuck fence
-    would wedge the device's whole command path.
+    The token is per-ticket (P1-3): ``ticket:<n>`` when the envelope
+    carries a ticket, else the envelope's ``policy_revision`` when
+    present (``"default"`` otherwise — e.g. ``open_order``, which has
+    no broker ticket yet). Commands on independent tickets no longer
+    serialize behind each other; commands on the SAME ticket still do
+    — a close and a modify of one position must never race. The
+    policy-revision gate is NOT lost by the ticket-first token: the
+    executor rejects a superseded revision outright via its explicit
+    ``expected_policy_revision`` check before the fence is even
+    acquired. ``acquire`` blocks up to ``timeout_s``; on timeout it
+    returns False and the caller rejects as ``Fenced`` (the server
+    re-issues with a new ``command_id``). The fence is always
+    released, even when dispatch crashes — a stuck fence would wedge
+    the device's whole command path.
     """
 
     def __init__(self) -> None:
@@ -715,6 +730,11 @@ class CommandFence:
 
     @staticmethod
     def token_for(envelope: CommandEnvelope) -> str:
+        # An open has no broker ticket yet — a stray ticket field on
+        # an open_order frame must not fence opens together, so only
+        # ops that act on an existing ticket take the ticket token.
+        if envelope.operation_type != "open_order" and envelope.ticket:
+            return f"ticket:{envelope.ticket}"
         return str(envelope.policy_revision) if envelope.policy_revision is not None else "default"
 
     def acquire(self, device_id: str, token: str, command_id: str, timeout_s: float) -> bool:
@@ -1404,14 +1424,23 @@ class CommandExecutor:
                 fence_token,
             )
             return self._finish_rejection(execution, envelope, RejectionReason.FENCED, started, lifecycle)
+        # P1-3 worker priority lane: the whole dispatch runs in the
+        # command lane of the serialized MT5 worker queue, so a
+        # command's driver jobs jump chart/sync work still queued
+        # there. Closes (envelope priority 9, the §14 default for
+        # close_position/partial_close) run in the URGENT lane;
+        # every other command runs in the COMMAND lane. The lane is
+        # queueing order only — the driver stays strictly serial.
+        lane = MT5_PRIORITY_URGENT if envelope.priority >= PRIORITY_CLOSE else MT5_PRIORITY_COMMAND
         try:
             dispatch_started = time.monotonic()
             try:
                 if envelope.operation_type in ("modify_sl_tp", "modify_pending"):
-                    with self._modify_lock:
+                    with self._modify_lock, mt5_priority_scope(lane):
                         payload = self._dispatch(envelope)
                 else:
-                    payload = self._dispatch(envelope)
+                    with mt5_priority_scope(lane):
+                        payload = self._dispatch(envelope)
             except BridgeError as exc:
                 return self._finish_error(execution, envelope, source_tool, exc, started, lifecycle)
             except Exception:  # noqa: BLE001 — driver surprises are mcp_failed, never a crash

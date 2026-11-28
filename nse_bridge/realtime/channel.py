@@ -101,6 +101,7 @@ from starlette.concurrency import run_in_threadpool
 from .. import BRIDGE_VERSION
 from ..config import validate_server_url
 from ..engine.common import BridgeContext
+from ..mt5.driver import MT5_PRIORITY_BACKGROUND, mt5_priority_scope
 from ..reliability import DurableResultQueue, DurableResultStore
 from ..reliability.self_healing import HealingContext, Scenario
 from ..server.chart import (
@@ -1208,7 +1209,11 @@ class ServerChannel:
             from ..engine.trading import fetch_positions
 
             try:
-                positions = await run_in_threadpool(fetch_positions, self.ctx)
+                # P1-3: the policy poll's position read runs in the
+                # BACKGROUND lane (the move itself runs in the
+                # COMMAND lane — see PolicyMoveExecutor._attempt_move).
+                with mt5_priority_scope(MT5_PRIORITY_BACKGROUND):
+                    positions = await run_in_threadpool(fetch_positions, self.ctx)
             except Exception as exc:  # noqa: BLE001 — a poll failure must not kill the session
                 logger.debug("[POLICY] position read for policy evaluation failed: {}", type(exc).__name__)
                 continue

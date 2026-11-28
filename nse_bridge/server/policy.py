@@ -436,7 +436,13 @@ class PolicyMoveExecutor:
         record.envelope_version = envelope.version
         self._in_flight.add(ticket)
         try:
-            result = await run_in_threadpool(self._execute_move_sync, record, params)
+            # P1-3: an authorized trailing/break-even move is a
+            # trading action — its driver jobs run in the COMMAND
+            # lane and jump queued chart/sync work.
+            from ..mt5.driver import MT5_PRIORITY_COMMAND, mt5_priority_scope
+
+            with mt5_priority_scope(MT5_PRIORITY_COMMAND):
+                result = await run_in_threadpool(self._execute_move_sync, record, params)
         finally:
             self._in_flight.discard(ticket)
         self._history.append(result.to_dict())

@@ -13,7 +13,8 @@ Covers, against the Platform v2 contract
   primitive on this path).
 - idempotency: a redelivery returns the stored terminal result
   and never touches MT5 twice — same command_id or same key.
-- per-device fencing: one active command per (device, token);
+- per-device fencing: one active command per (device, token), the
+  token per-ticket (P1-3) so independent tickets run concurrently;
   a superseded policy_revision is Fenced, never executed.
 - server lifecycle: pending → delivered → acknowledged →
   confirmed/failed, with timestamps, on the result envelope.
@@ -164,11 +165,34 @@ def test_fence_release_is_scoped_to_holder():
     assert fence.active_command("dev-1", "default") is None
 
 
-def test_fence_token_for_uses_policy_revision():
+def test_fence_token_for_is_per_ticket():
+    # P1-3: the token is per-ticket when the op acts on an existing
+    # ticket — a policy_revision on the same frame does NOT widen
+    # the token (the revision gate is the executor's explicit check).
     env = parse_envelope(_frame(operation={"type": "close_position", "ticket": "1", "policy_revision": 7}))
-    assert CommandFence.token_for(env) == "7"
+    assert CommandFence.token_for(env) == "ticket:1"
     env2 = parse_envelope(_frame(operation={"type": "close_position", "ticket": "1"}))
-    assert CommandFence.token_for(env2) == "default"
+    assert CommandFence.token_for(env2) == "ticket:1"
+    env3 = parse_envelope(_frame(operation={"type": "close_position", "ticket": "2"}))
+    assert CommandFence.token_for(env3) == "ticket:2"
+    # An open has no broker ticket yet: it falls back to the policy
+    # revision (or "default") — a stray ticket field must not fence
+    # opens together.
+    env4 = parse_envelope(
+        _frame(
+            operation={
+                "type": "open_order",
+                "ticket": "0",
+                "symbol": "EURUSD",
+                "side": "buy",
+                "volume": 0.1,
+                "policy_revision": 7,
+            }
+        )
+    )
+    assert CommandFence.token_for(env4) == "7"
+    env5 = parse_envelope(_frame(operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1}))
+    assert CommandFence.token_for(env5) == "default"
 
 
 # ----------------------------------------------------------------------
@@ -365,19 +389,25 @@ def test_executor_fenced_when_another_command_holds_the_fence(monkeypatch):
         lambda ctx_, ticket, volume=None: calls.append(ticket) or {"status": "done", "ticket": ticket},
     )
     executor = CommandExecutor(ctx, _validator(), clock=lambda: NOW, fence_timeout_s=0.0)
-    assert executor.fence.acquire(DEVICE, "default", "other-command", timeout_s=1.0) is True
+    # P1-3: the fence token is per-ticket — the held token is the
+    # close's own ticket (9000001), not "default".
+    assert executor.fence.acquire(DEVICE, "ticket:9000001", "other-command", timeout_s=1.0) is True
     try:
         execution, result = executor.execute(_frame())
         assert execution.state is CommandState.FAILED
         assert result["status"] == "rejected"
         assert result["error"]["code"] == "Fenced"
         assert calls == []  # nothing reached MT5
+        # A command on a DIFFERENT ticket is not fenced by this token.
+        execution, result = executor.execute(_frame(operation={"type": "close_position", "ticket": "9000002"}))
+        assert execution.state is CommandState.COMPLETED
+        assert len(calls) == 1
     finally:
-        executor.fence.release(DEVICE, "default", "other-command")
+        executor.fence.release(DEVICE, "ticket:9000001", "other-command")
     # Fence free: the same command shape executes.
     execution, result = executor.execute(_frame())
     assert execution.state is CommandState.COMPLETED
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_executor_superseded_policy_revision_is_fenced(monkeypatch):

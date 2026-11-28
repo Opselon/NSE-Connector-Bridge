@@ -28,6 +28,7 @@ from loguru import logger
 from starlette.concurrency import run_in_threadpool
 
 from ..engine.common import BridgeContext
+from ..mt5.driver import MT5_PRIORITY_BACKGROUND, mt5_priority_scope
 
 
 class EventBus:
@@ -99,7 +100,13 @@ async def tick_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) ->
                             continue
                     return out
 
-                ticks = await run_in_threadpool(ctx.driver.run, job, "tick_poll")
+                # P1-3: periodic tick reads run in the BACKGROUND
+                # lane — a command's driver jobs jump them while they
+                # are still queued. The scope is set in this async
+                # task, so run_in_threadpool carries it into the
+                # thread that calls driver.run.
+                with mt5_priority_scope(MT5_PRIORITY_BACKGROUND):
+                    ticks = await run_in_threadpool(ctx.driver.run, job, "tick_poll")
                 for symbol, payload in ticks.items():
                     last_sent[symbol] = time.monotonic()
                     ctx.subscriptions.record_tick(symbol, payload)
@@ -170,7 +177,9 @@ async def positions_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Even
                     raw_orders = mt5.orders_get()
                     return (list(raw_positions) if raw_positions else [], list(raw_orders) if raw_orders else [])
 
-                raw_positions, raw_orders = await run_in_threadpool(ctx.driver.run, job, "positions_poll")
+                # P1-3: BACKGROUND lane, as tick_poll above.
+                with mt5_priority_scope(MT5_PRIORITY_BACKGROUND):
+                    raw_positions, raw_orders = await run_in_threadpool(ctx.driver.run, job, "positions_poll")
                 offset = ctx.settings.broker_utc_offset_minutes
                 positions = [build_position_model(r, offset).model_dump() for r in raw_positions]
                 orders = [build_order_model(r, offset).model_dump() for r in raw_orders]
@@ -212,7 +221,9 @@ async def orders_poller(ctx: BridgeContext, bus: EventBus, stop: asyncio.Event) 
                     raw = mt5.orders_get()
                     return list(raw) if raw else []
 
-                rows = await run_in_threadpool(ctx.driver.run, job, "orders_poll")
+                # P1-3: BACKGROUND lane, as tick_poll above.
+                with mt5_priority_scope(MT5_PRIORITY_BACKGROUND):
+                    rows = await run_in_threadpool(ctx.driver.run, job, "orders_poll")
                 orders = [build_order_model(r, ctx.settings.broker_utc_offset_minutes).model_dump() for r in rows]
                 bus.publish("orders_update", {"count": len(orders), "orders": orders})
         except BridgeError:

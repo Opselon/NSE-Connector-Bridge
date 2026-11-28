@@ -552,6 +552,7 @@ def bind_mt5_fetchers(ctx: Any) -> tuple[Callable, Callable, Callable]:
       (distinct from a data-path error, §17.1.4).
     """
     from ..engine.charts import ChartHistoryRequest, TicksHistoryRequest, get_chart_history, get_chart_ticks_history
+    from ..mt5.driver import MT5_PRIORITY_BACKGROUND, mt5_priority_scope
 
     offset = ctx.settings.broker_utc_offset_minutes
 
@@ -566,7 +567,10 @@ def bind_mt5_fetchers(ctx: Any) -> tuple[Callable, Callable, Callable]:
                 return "ok"
             return "selected" if mt5.symbol_select(symbol, True) else "add_failed"
 
-        outcome = ctx.driver.run(job, op="symbol_select", context={"symbol": symbol})
+        # P1-3: chart prerequisite work runs in the BACKGROUND lane —
+        # a command's driver jobs jump it while it is still queued.
+        with mt5_priority_scope(MT5_PRIORITY_BACKGROUND):
+            outcome = ctx.driver.run(job, op="symbol_select", context={"symbol": symbol})
         if outcome == "not_found":
             raise ChartError(
                 ChartErrorCode.SYMBOL_NOT_FOUND,
@@ -580,16 +584,22 @@ def bind_mt5_fetchers(ctx: Any) -> tuple[Callable, Callable, Callable]:
             )
 
     def fetch_candles(symbol: str, timeframe: str, count: int, from_: Any, to: Any) -> list[dict[str, Any]]:
+        # P1-3: chart fetches run in the BACKGROUND lane — a
+        # command's driver jobs jump them while they are still queued.
+        # The scope covers get_chart_history's driver.run calls (the
+        # fetcher runs on a threadpool thread, so the ContextVar set
+        # here is what those calls read).
         try:
-            result = get_chart_history(
-                ctx,
-                ChartHistoryRequest(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    count=count,
-                    from_utc=str(from_) if from_ is not None else None,
-                ),
-            )
+            with mt5_priority_scope(MT5_PRIORITY_BACKGROUND):
+                result = get_chart_history(
+                    ctx,
+                    ChartHistoryRequest(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        count=count,
+                        from_utc=str(from_) if from_ is not None else None,
+                    ),
+                )
         except BridgeError as exc:
             raise ChartError(
                 ChartErrorCode.MARKET_CLOSED,
@@ -612,16 +622,18 @@ def bind_mt5_fetchers(ctx: Any) -> tuple[Callable, Callable, Callable]:
         return candles
 
     def fetch_ticks(symbol: str, count: int, from_: Any, to: Any) -> list[dict[str, Any]]:
+        # P1-3: BACKGROUND lane, as fetch_candles above.
         try:
-            result = get_chart_ticks_history(
-                ctx,
-                TicksHistoryRequest(
-                    symbol=symbol,
-                    count=count,
-                    from_utc=str(from_) if from_ is not None else None,
-                    to_utc=str(to) if to is not None else None,
-                ),
-            )
+            with mt5_priority_scope(MT5_PRIORITY_BACKGROUND):
+                result = get_chart_ticks_history(
+                    ctx,
+                    TicksHistoryRequest(
+                        symbol=symbol,
+                        count=count,
+                        from_utc=str(from_) if from_ is not None else None,
+                        to_utc=str(to) if to is not None else None,
+                    ),
+                )
         except BridgeError as exc:
             raise ChartError(
                 ChartErrorCode.MARKET_CLOSED,
