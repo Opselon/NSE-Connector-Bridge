@@ -404,6 +404,7 @@ def trade_send_pending_order(ctx: BridgeContext, params: PendingOrderRequest) ->
             f"Pending order for {symbol} returned "
             + ("no result" if result is None else "retcode 10031 (no connection)")
             + " — outcome unverified; reconcile the live order book before retrying (never blind-retry).",
+            retcode=retcode,
             details={
                 "symbol": symbol,
                 "order_type": params.order_type,

@@ -34,7 +34,9 @@ must wait for reconciliation — never blind-retry. Error codes: the
 `WrongAccount`, `UnsupportedOperation`, `SymbolNotAllowed`,
 `AutoTradeNotEnabled`, `Replayed`) returned as `action.result` with `status: "rejected"`;
 execution failures return `status: "mcp_failed"` with an `error`
-object (`code`, `category`, `cause`, `recovery`, `retry_safe`).
+object (`code`, `category`, `cause`, `recovery`, `retry_safe` —
+plus `retcode` + `retcode_label` when the failure carries a broker
+retcode, audit P2-5; the keys are absent otherwise).
 
 | Operation | Request (`operation`) | Response (`action.result`) | Notes |
 |---|---|---|---|
