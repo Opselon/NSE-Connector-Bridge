@@ -497,7 +497,9 @@ def test_executor_recent_records_completed_and_rejected(tmp_path, monkeypatch):
         "COMPLETED",
     ]
     # A rejected command (unsupported op) is recorded as FAILED, never executed.
-    execution, _result = executor.execute(_frame(operation={"type": "open_order", "ticket": "1"}))
+    execution, _result = executor.execute(
+        _frame(operation={"type": "open_order", "ticket": "1", "order_kind": "market"})
+    )
     assert execution.state is CommandState.FAILED
     recent = executor.recent_executions()
     assert len(recent) == 2

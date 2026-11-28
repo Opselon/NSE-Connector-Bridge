@@ -80,7 +80,7 @@ def _open_order_frame(**overrides):
     kwargs = {"protocol_version": "2"}
     kwargs.update(overrides)
     return _frame(
-        {"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1},
+        {"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_kind": "market", "volume": 0.1},
         **kwargs,
     )
 

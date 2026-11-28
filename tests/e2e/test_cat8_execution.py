@@ -267,7 +267,7 @@ def test_v2_open_order_market_creates_position(tmp_path):
         executor = _v2_executor(ctx)
         execution, result = executor.execute(
             _v2_open_frame(
-                {"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1},
+                {"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_kind": "market", "volume": 0.1},
                 command_id="01900000-0000-7000-8000-0000000000b1",
             )
         )

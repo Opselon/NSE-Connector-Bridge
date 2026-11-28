@@ -220,7 +220,7 @@ def _v2_frame(**overrides):
         "command_id": new_uuid7_str(),
         "account_id": "10011755849",
         "device_id": "device-1",
-        "operation": {"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1},
+        "operation": {"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_kind": "market", "volume": 0.1},
         "issued_at": "2026-11-21T10:00:00.000Z",
         "expires_at": "2099-01-01T00:00:00.000Z",
         "idempotency_key": "ignored-by-validator",

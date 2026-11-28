@@ -78,7 +78,7 @@ def _frame(**overrides):
 
 
 def _open_frame(**op_fields):
-    op = {"type": "open_order", "ticket": "0", "symbol": "EURUSD", "side": "buy", "volume": 0.1}
+    op = {"type": "open_order", "ticket": "0", "symbol": "EURUSD", "side": "buy", "order_kind": "market", "volume": 0.1}
     op.update(op_fields)
     return _frame(protocol_version="2", operation=op)
 
@@ -185,13 +185,18 @@ def test_fence_token_for_is_per_ticket():
                 "ticket": "0",
                 "symbol": "EURUSD",
                 "side": "buy",
+                "order_kind": "market",
                 "volume": 0.1,
                 "policy_revision": 7,
             }
         )
     )
     assert CommandFence.token_for(env4) == "7"
-    env5 = parse_envelope(_frame(operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1}))
+    env5 = parse_envelope(
+        _frame(
+            operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_kind": "market", "volume": 0.1}
+        )
+    )
     assert CommandFence.token_for(env5) == "default"
 
 
@@ -225,7 +230,9 @@ def test_v2_open_order_needs_flag_and_negotiation():
     assert v_flag_on.validate(_open_frame()).ok is True
     # Same open, v1 envelope (no protocol_version): refused even
     # with the flag on — the flag alone never opens an open.
-    v1_open = _frame(operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1})
+    v1_open = _frame(
+        operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_kind": "market", "volume": 0.1}
+    )
     assert v_flag_on.validate(v1_open).rejection is RejectionReason.UNSUPPORTED_OPERATION
 
 

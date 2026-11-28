@@ -29,12 +29,17 @@ native names are ``order_kind`` / ``stoplimit``. Both are accepted
 (Bridge name wins when both are present). A pending kind sent under
 either name is preserved — it must never silently fall back to
 ``"market"``. A kind that IS present but unknown fails loudly
-here, never at dispatch. No kind at all keeps the documented
-CONTRACTS §7 market default — exactly what the Platform's own
-``validate_v2_operation`` does (``unwrap_or("market")``) — and the
-Platform always sends ``order_type`` explicitly (see
-``agent_trade::exe``), so the default is a documented fallback,
-never a dropped pending kind.
+here, never at dispatch. A kind that is ABSENT fails loudly too:
+``V2OpenOrderRequest.order_kind`` is a required keyword-only
+``Literal`` (no default — a direct construction without kind is a
+``TypeError`` at runtime and a mypy error at type-check time), and
+:func:`from_operation` raises ``ValueError`` on a wire operation
+without ``order_kind``/``order_type``. The old CONTRACTS §7 market
+default is gone (audit P2-3): a dropped kind field must never turn
+a pending order into a market order, and a market open without an
+explicit kind is indistinguishable from one — so both are rejected.
+The Platform always sends ``order_type`` explicitly (see
+``agent_trade::exe``).
 
 Pre-send validation: :func:`execute_v2_open_order` validates the
 request against live MT5 state (symbol resolvable, volume within
@@ -47,7 +52,7 @@ the primitives run (W2). A structurally invalid open is a
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
@@ -141,14 +146,22 @@ def negotiate_protocol_version(
 
 @dataclass(frozen=True)
 class V2OpenOrderRequest:
-    """A v2 open request (market or pending entry)."""
+    """A v2 open request (market or pending entry).
+
+    ``order_kind`` is required and keyword-only (audit P2-3): it
+    has no default, so a construction without kind fails at
+    type-check time (mypy: missing argument) and at runtime
+    (``TypeError``) instead of silently becoming a market order.
+    It must come after the defaulted ``sl``/``tp`` fields, so
+    keyword-only is the only shape that can be required.
+    """
 
     symbol: str
     side: Literal["buy", "sell"]
     volume: float
     sl: float = 0.0
     tp: float = 0.0
-    order_kind: Literal["market", "limit", "stop", "stop_limit"] = "market"
+    order_kind: Literal["market", "limit", "stop", "stop_limit"] = field(kw_only=True)
     price: float | None = None
     stoplimit: float | None = None
     #: Allowed deviation in MT5 points (0 = no deviation tolerated).
@@ -166,11 +179,14 @@ class V2OpenOrderRequest:
         as aliases of the Bridge-native ``order_kind`` / ``stoplimit``
         (Bridge name wins when both are present). A pending kind sent
         under either name is preserved — it must never silently fall
-        back to ``"market"``. Unknown kinds, unknown sides, missing
-        required fields, a pending kind without a price, a
-        ``stop_limit`` kind without a ``stop_limit`` price, a negative
-        deviation, an out-of-range expiry, and non-positive SL/TP
-        fail loudly here, never at dispatch.
+        back to ``"market"``. A missing kind fails loudly (audit
+        P2-3: no market default — a dropped kind field must never
+        turn a pending order into a market order). Unknown kinds,
+        unknown sides, missing required fields, a pending kind
+        without a price, a ``stop_limit`` kind without a
+        ``stop_limit`` price, a negative deviation, an out-of-range
+        expiry, and non-positive SL/TP fail loudly here, never at
+        dispatch.
         """
         if not isinstance(operation, Mapping):
             raise TypeError("v2 open_order operation is not a JSON object")
@@ -180,7 +196,12 @@ class V2OpenOrderRequest:
         kind_raw = operation.get("order_kind")
         if kind_raw in (None, ""):
             kind_raw = operation.get("order_type")
-        order_kind = str(kind_raw).strip().lower() if kind_raw not in (None, "") else "market"
+        if kind_raw in (None, ""):
+            raise ValueError(
+                "v2 open_order operation is missing 'order_kind' (or 'order_type'); "
+                "an explicit order kind (market | limit | stop | stop_limit) is required"
+            )
+        order_kind = str(kind_raw).strip().lower()
         if order_kind not in ORDER_KINDS:
             raise ValueError(f"v2 open_order has unknown order kind {order_kind!r}")
         stoplimit_raw = operation.get("stoplimit")
