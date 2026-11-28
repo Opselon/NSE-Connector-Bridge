@@ -7,7 +7,7 @@ and the NSE Platform server.
 - Official MetaTrader5 C++ IPC driver, serialized on a dedicated worker thread
 """
 
-BRIDGE_VERSION = "1.4.0"
+BRIDGE_VERSION = "1.4.1"
 PROTOCOL_VERSION = 1
 
 __all__ = ["BRIDGE_VERSION", "PROTOCOL_VERSION"]
