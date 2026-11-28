@@ -72,7 +72,12 @@ validation consumes the replay id):
 5. ``operation.type`` ∈ allowlist → ``UnsupportedOperation``
    (5a: ``modify_pending`` additionally requires the §17.4 gate;
    5b: ``open_order`` additionally requires the §17.5 gate — the
-   flag, default ON, plus a negotiated v2 envelope)
+   flag, default ON, plus a negotiated v2 envelope; 5c: a command
+   that names a symbol in the frame (``open_order``) must name one
+   inside the configured ``allowed_symbols`` allowlist, when one is
+   configured — otherwise ``SymbolNotAllowed``; unconfigured = no
+   restriction. Ticket-based ops carry no symbol in the frame, so
+   step 5c does not apply to them.)
 6. Feature enabled locally (``position_manager`` / ``auto_trade``
    entitlements from ``validate-key``) → ``AutoTradeNotEnabled``
 7. ``command_id`` not in the bounded replay cache (10,000 ids) → ``Replayed``
@@ -200,7 +205,7 @@ from __future__ import annotations
 
 import time
 from collections import OrderedDict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -376,6 +381,10 @@ class RejectionReason(str, Enum):
     WRONG_DEVICE = "WrongDevice"
     WRONG_ACCOUNT = "WrongAccount"
     UNSUPPORTED_OPERATION = "UnsupportedOperation"
+    #: P1-5 symbol allowlist: the command names a symbol outside the
+    #: configured allowlist (step 5c). Returned as the ``action.result``
+    #: error code, like every other §6.3 reason.
+    SYMBOL_NOT_ALLOWED = "SymbolNotAllowed"
     AUTO_TRADE_NOT_ENABLED = "AutoTradeNotEnabled"
     REPLAYED = "Replayed"
     #: P3 v2 fencing: another command holds the per-device fence,
@@ -827,6 +836,7 @@ class CommandValidator:
         replay_cache: ReplayCache | None = None,
         modify_pending_proven: bool = False,
         open_order_authorized: bool = False,
+        allowed_symbols: Collection[str] | str | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.device_id = device_id
@@ -852,6 +862,29 @@ class CommandValidator:
         #: opens it either. Both gates must be open before any open
         #: reaches MT5.
         self.open_order_authorized = open_order_authorized
+        #: P1-5 symbol allowlist, resolved value. None = unconfigured
+        #: (no restriction — today's behaviour). A non-empty set is the
+        #: configured allowlist, normalized with
+        #: ``normalize_broker_name`` (``EUR/USD`` ≡ ``EURUSD``); the
+        #: production caller (``realtime/channel.py``) passes
+        #: ``settings.allowed_symbols_set``. Broker suffixes are NOT
+        #: folded — ``EURUSDm`` is a different entry from ``EURUSD``,
+        #: the same exact-match rule as the policy-envelope
+        #: ``bounds.allowed_symbols`` bound. A comma-separated string
+        #: is accepted too (tests / direct construction); an empty
+        #: value of any shape means unconfigured, never "allow nothing".
+        #: (Local import below: the symbols package chains back through
+        #: ``mt5.driver`` to ``config``, so it cannot be imported at
+        #: this module's top level — same reason ``engine/common.py``
+        #: imports the resolver lazily.)
+        from ..symbols.canonical import normalize_broker_name
+
+        if allowed_symbols is None:
+            self._allowed_symbols: frozenset[str] | None = None
+        else:
+            entries = allowed_symbols.split(",") if isinstance(allowed_symbols, str) else allowed_symbols
+            parsed = frozenset(key for key in (normalize_broker_name(str(entry).strip()) for entry in entries) if key)
+            self._allowed_symbols = parsed or None
         self._clock = clock or (lambda: datetime.now(UTC))
 
     @property
@@ -887,7 +920,8 @@ class CommandValidator:
         if bound is None or envelope.account_id != bound:
             return ValidationOutcome(rejection=RejectionReason.WRONG_ACCOUNT)
         # 5 — allowlist (5a: modify_pending capability gate, §17.4;
-        #     5b: v2 negotiation + open_order §17.5 activation gate).
+        #     5b: v2 negotiation + open_order §17.5 activation gate;
+        #     5c: symbol allowlist, P1-5).
         # P3 v2 (§14.1): the envelope's protocol_version negotiates
         # the contract — "2" is honoured only when this Bridge speaks
         # v2, anything else is v1, fail-closed. v2-only ops on a v1
@@ -911,6 +945,24 @@ class CommandValidator:
         if envelope.operation_type == "modify_pending" and not self.modify_pending_proven:
             logger.warning("[COMMAND] modify_pending rejected — capability gate closed (§17.4)")
             return ValidationOutcome(rejection=RejectionReason.UNSUPPORTED_OPERATION)
+        # 5c — symbol allowlist (P1-5). Only commands that name a
+        # symbol in the frame are gated (open_order); ticket-based ops
+        # carry no symbol — their symbol was fixed at open time. The
+        # check runs on the frame symbol BEFORE any MT5 call and before
+        # the replay id is consumed, so a rejected id stays reusable.
+        # Unconfigured (no allowlist) = no restriction. The resolver
+        # is untouched: a canonical symbol that passes here still goes
+        # through canonical resolution at dispatch, with ambiguity
+        # rejected there as before — never substituted.
+        if envelope.symbol is not None and self._allowed_symbols is not None:
+            from ..symbols.canonical import normalize_broker_name
+
+            if normalize_broker_name(envelope.symbol) not in self._allowed_symbols:
+                logger.warning(
+                    "[COMMAND] symbol {} is outside the configured allowlist — rejecting (P1-5)",
+                    envelope.symbol,
+                )
+                return ValidationOutcome(rejection=RejectionReason.SYMBOL_NOT_ALLOWED)
         # 6 — entitlement (position_manager AND auto_trade, §6.4 step 2)
         if not (self.entitlements.position_manager and self.entitlements.auto_trade):
             return ValidationOutcome(rejection=RejectionReason.AUTO_TRADE_NOT_ENABLED)
