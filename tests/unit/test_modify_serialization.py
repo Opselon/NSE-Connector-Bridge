@@ -104,7 +104,10 @@ class _FakeMt5:
         )
 
     def symbol_info_tick(self, symbol):
-        return None
+        # P2-4: modify_position_sltp pre-flights SL/TP geometry
+        # against the live tick (bid 1.1000 / ask 1.1002 for the long
+        # at 1.1000) — a None tick would fail the modify closed.
+        return SimpleNamespace(time=0, bid=1.1000, ask=1.1002, last=1.1001, volume=10, flags=0)
 
     def account_info(self):
         return SimpleNamespace(login=123456, trade_mode=0, margin_mode=1)
@@ -189,7 +192,10 @@ def test_concurrent_partial_sltp_updates_both_land(tmp_path: Path):
         results.append(executor.execute(frame))
 
     t1 = threading.Thread(target=run, args=(_frame(command_id=new_uuid7_str(), sl=1.08, tp=None),))
-    t2 = threading.Thread(target=run, args=(_frame(command_id=new_uuid7_str(), sl=None, tp=1.09),))
+    # TP 1.11: the position is a long at bid 1.1000, so the TP must sit
+    # above the current price (P2-4 geometry pre-flight rejects a
+    # below-market TP before any send).
+    t2 = threading.Thread(target=run, args=(_frame(command_id=new_uuid7_str(), sl=None, tp=1.11),))
     t1.start()
     t2.start()
     t1.join(timeout=10)
@@ -202,4 +208,4 @@ def test_concurrent_partial_sltp_updates_both_land(tmp_path: Path):
     # Both partial updates landed: the second thread's read saw the
     # first send's SL instead of the stale 0.0.
     assert fake.position.sl == 1.08
-    assert fake.position.tp == 1.09
+    assert fake.position.tp == 1.11

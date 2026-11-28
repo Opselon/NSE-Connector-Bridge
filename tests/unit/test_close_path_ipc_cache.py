@@ -273,7 +273,14 @@ def test_modify_caches_constants_and_filling_across_calls(ctx):
     out2 = modify_position_sltp(ctx, TICKET, sl=1.09, tp=1.11)
     assert out2["status"] == "done"
     assert _op_calls(ctx, "mt5_constants") == 1
-    assert _op_calls(ctx, "symbol_info") == 1
+    # symbol_info is 3, not 1: the filling-mode fetch is still cached
+    # (1 call across both modifies), but the P2-4 geometry pre-flight
+    # reads the symbol spec fresh per modify (2 calls) — stops level
+    # is broker state and must not be cached, same as the position
+    # fetch + order_check below. The tick read is likewise fresh per
+    # modify: the geometry is checked against the CURRENT market.
+    assert _op_calls(ctx, "symbol_info") == 3
+    assert _op_calls(ctx, "symbol_info_tick") == 2
     # Position fetch + order_check still fresh per modify (untouched).
     assert _op_calls(ctx, "positions_get") == 2
     assert _op_calls(ctx, "order_check") == 2

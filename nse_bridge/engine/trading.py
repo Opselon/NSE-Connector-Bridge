@@ -38,7 +38,7 @@ from ..retcodes import (
     TRADE_RETCODE_POSITION_CLOSED,
     translate_retcode,
 )
-from .common import BridgeContext, account_info_model, resolve_filling_mode, resolve_order_symbol
+from .common import BridgeContext, account_info_model, require_symbol_info, resolve_filling_mode, resolve_order_symbol
 from .retry import ExecutionRetryPolicy, retcode_class_label, retryable_retcode
 from .symbols import _fresh_tick
 
@@ -428,6 +428,72 @@ def _recover_ambiguous(ctx: BridgeContext, symbol: str, side: str, magic: int) -
     return None
 
 
+def validate_modify_sltp_geometry(
+    ctx: BridgeContext,
+    *,
+    symbol: str,
+    is_long: bool,
+    sl: float,
+    tp: float,
+) -> list[str]:
+    """Pre-send SL/TP geometry for a position modify, against the CURRENT market (audit P2-4).
+
+    The requested stops must sit on the correct side of the live
+    price for the position's direction — SL below / TP above the
+    closing-side tick on a long (bid), the mirror on a short (ask) —
+    each at least the stops-level distance away. A leg of ``0.0``
+    means "no stop / no take-profit" and is not checked; a negative
+    leg is never valid (it passes ``parse_envelope`` unchecked).
+
+    Mirrors :func:`nse_bridge.engine.execution.validate_market_open_params`'s
+    min-distance math (broker stops level, 10-point safety floor),
+    but the reference price is the CLOSE price (bid closes a long,
+    ask closes a short), not the entry price — the old
+    entry-only view is exactly what let a wrong-side modify through
+    to a broker 10030 refusal. Returns a list of reason codes;
+    empty means the request is structurally sound. The official
+    ``order_check`` inside :func:`modify_position_sltp` remains the
+    broker acceptance check — this pre-flight only fails fast on
+    requests the broker cannot accept.
+
+    Fail-closed: a missing symbol or an unavailable tick raises
+    (``SYMBOL_NOT_FOUND`` / ``MT5_CALL_FAILED``) instead of
+    returning an empty list — no unchecked modify is ever sent.
+    """
+    spec = require_symbol_info(ctx, symbol)
+    tick = _fresh_tick(ctx, symbol)
+    reasons: list[str] = []
+    point = float(spec.point or 0.0)
+    stops_level = float(spec.trade_stops_level or 0)
+    safety_floor = 10 * point  # 10 broker points floor (ported)
+    min_stop_dist = max(stops_level * point, safety_floor)
+
+    price = float(tick.bid or 0) if is_long else float(tick.ask or 0)
+    if not price > 0:
+        reasons.append("no_live_price")
+        return reasons
+    if sl < 0:
+        reasons.append("sl_negative")
+    if tp < 0:
+        reasons.append("tp_negative")
+    if sl > 0:
+        if is_long and sl >= price - min_stop_dist + 1e-9:
+            reasons.append("sl_not_below_price")
+        if not is_long and sl <= price + min_stop_dist - 1e-9:
+            reasons.append("sl_not_above_price")
+    if tp > 0:
+        if is_long and tp <= price + min_stop_dist - 1e-9:
+            reasons.append("tp_not_above_price")
+        if not is_long and tp >= price - min_stop_dist + 1e-9:
+            reasons.append("tp_not_below_price")
+    if sl > 0 and tp > 0:
+        if is_long and sl >= tp:
+            reasons.append("sl_not_below_tp")
+        if not is_long and sl <= tp:
+            reasons.append("sl_not_above_tp")
+    return reasons
+
+
 def modify_position_sltp(
     ctx: BridgeContext,
     ticket: int,
@@ -458,6 +524,14 @@ def modify_position_sltp(
     the context via the shared helpers (TTL + reconnect invalidation)
     — no code change is needed here, and the per-attempt position
     fetch + ``order_check`` above are unchanged.
+
+    P2-4: before ``order_check``, the requested SL/TP run through
+    :func:`validate_modify_sltp_geometry` against the live tick for
+    the position's direction (SL below / TP above the bid on a long,
+    the mirror on a short). A wrong-side modify is a hard
+    ``VALIDATION`` reject on the first attempt — never retried, never
+    sent — instead of a broker 10030 refusal after fencing. A
+    missing tick/symbol fails closed the same way.
     """
     ctx.driver.ensure_connected()
     policy = retry_policy or ExecutionRetryPolicy()
@@ -474,6 +548,17 @@ def modify_position_sltp(
                 details={"ticket": ticket},
             )
         symbol = str(_f(pos, "symbol", ""))
+        reasons = validate_modify_sltp_geometry(
+            ctx, symbol=symbol, is_long=int(_f(pos, "type", -1)) == 0, sl=float(sl), tp=float(tp)
+        )
+        if reasons:
+            raise BridgeError(
+                ErrorCode.VALIDATION,
+                f"Refusing to modify #{ticket}: SL/TP geometry invalid against the current market "
+                f"({', '.join(reasons)}).",
+                http_status=422,
+                details={"ticket": ticket, "symbol": symbol, "sl": sl, "tp": tp, "reasons": reasons},
+            )
         # Validates the symbol/connection; TRADE_ACTION_SLTP carries no
         # filling mode, so the resolved value is intentionally unused.
         resolve_filling_mode(ctx, symbol)
