@@ -1347,6 +1347,41 @@ async def get_execution_recent(request: Request, limit: int = 50) -> dict[str, A
 
 
 @router.get(
+    "/policy/moves",
+    summary="Executed policy moves (audit P1-8)",
+    description="Durable record of every executed/failed autonomous "
+    "trailing/breakeven/TP move (``policy_moves.jsonl`` in the data "
+    "dir), newest first, bounded by ``limit`` (default 50, max 200). "
+    "Each record carries rule_id, decision_id, envelope version, "
+    "ticket, symbol, old/new SL and old/new TP, status, and "
+    "timestamps — the same shape the Platform consumes from the "
+    "``policy.move.executed`` / ``policy.move.failed`` diagnostics "
+    "events (CONTRACT §5.3). Refused/no-op evaluations are NOT "
+    "recorded (steady state of the 2 s poll loop). Empty when no "
+    "move has ever executed — never invented. 503 while the store "
+    "is not initialised (bridge still starting).",
+)
+async def get_policy_moves(
+    request: Request,
+    limit: int = 50,
+    ticket: int | None = None,
+    kind: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    ctx: BridgeContext = request.app.state.ctx
+    store = getattr(ctx, "policy_move_store", None)
+    if store is None:
+        raise BridgeError(
+            ErrorCode.INTERNAL,
+            "Policy-move store not initialised yet — the bridge is still starting.",
+            http_status=503,
+        )
+    limit = max(1, min(limit, 200))
+    moves = await run_in_threadpool(store.list_moves, limit=limit, ticket=ticket, kind=kind, status=status)
+    return {"ok": True, "data": {"moves": moves, "total": len(moves)}}
+
+
+@router.get(
     "/journal/events",
     summary="Recent journal events (Execution screen)",
     description="Raw journal events (spec §8), newest first, bounded by "

@@ -276,6 +276,10 @@ class BridgeContext:
     enrolment: Any = None  # EnrolmentManager (CONTRACT v1 §3.1/§3.2), wired at app startup
     telemetry: Any = None  # TelemetryEmitter (ARCHITECTURE-CONTRACT §8), wired at app startup
     self_healing: Any = None  # SelfHealingRegistry (§8), wired at app startup
+    #: Durable policy-move store (audit P1-8), wired at app startup —
+    #: executed/failed autonomous moves persist here and are served
+    #: by GET /api/v1/policy/moves. None in bare/test contexts.
+    policy_move_store: Any = None
     #: Canonical-ID resolver (spec §4 / gap C2), lazily built on the
     #: first canonical ``BASE/QUOTE`` order symbol — never built for
     #: exact broker names, so existing callers pay nothing for it.
