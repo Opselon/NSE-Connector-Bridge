@@ -34,7 +34,7 @@
           "system"
         ],
         "summary": "Update bridge settings",
-        "description": "Partial update. Non-secret fields are persisted to config.json. Secrets (server_token, local_api_key) are routed through the secret store and never written to config.json. Server-channel fields apply immediately (the outbound channel restarts when URL/token change). Terminal fields (mt5_terminal_path, mt5_custom_terminal_dirs) re-run discovery immediately (fresh list returned in this response); changing the terminal path while the driver is connected disconnects it from the old terminal instead of keeping a stale selection.",
+        "description": "Partial update. Non-secret fields are persisted to config.json. Secrets (server_token, local_api_key) are routed through the secret store and never written to config.json. Server-channel fields apply immediately (the outbound channel restarts when URL/token change). The §17.4/§17.5 gate flags (enable_v2_open_order, enable_modify_pending) apply to the live validator immediately — no channel or bridge restart is needed. Terminal fields (mt5_terminal_path, mt5_custom_terminal_dirs) re-run discovery immediately (fresh list returned in this response); changing the terminal path while the driver is connected disconnects it from the old terminal instead of keeping a stale selection.",
         "operationId": "update_settings_api_v1_settings_put",
         "requestBody": {
           "content": {
@@ -9760,6 +9760,30 @@
               }
             ],
             "title": "Strict Magic Guard"
+          },
+          "enable_v2_open_order": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enable V2 Open Order",
+            "description": "§17.5 v2 open gate flag (default True; False refuses server-sent open_order as UnsupportedOperation)"
+          },
+          "enable_modify_pending": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enable Modify Pending",
+            "description": "§17.4 modify_pending gate opt-in (default False; True opens the gate only on a Bridge >= 1.4.1)"
           },
           "stream_account_interval_ms": {
             "anyOf": [
