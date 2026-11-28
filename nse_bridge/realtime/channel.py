@@ -678,15 +678,23 @@ class ServerChannel:
             # ``NSE_BRIDGE_ALLOWED_SYMBOLS``; empty = unconfigured, no
             # restriction). The validator enforces it at step 5c,
             # before dispatch and before any MT5 call.
+            # P2-1: BOTH gates are passed as live-reading callables,
+            # not process-start snapshots — the validator re-reads the
+            # settings on every command, so toggling either flag
+            # (PUT /settings, or config.json + channel restart) takes
+            # effect on the NEXT command with no channel rebuild and
+            # no process restart. The v2 negotiation half is untouched
+            # (still per-frame, fail-closed) and the startup defaults
+            # are unchanged.
             validator = CommandValidator(
                 device_id,
                 get_account_id=self._bound_account_id,
                 entitlements=lambda: rest.entitlements,
-                modify_pending_proven=modify_pending_gate_open(
+                modify_pending_proven=lambda: modify_pending_gate_open(
                     enabled=self.ctx.settings.enable_modify_pending,
                     bridge_version=BRIDGE_VERSION,
                 ),
-                open_order_authorized=self.ctx.settings.enable_v2_open_order,
+                open_order_authorized=lambda: self.ctx.settings.enable_v2_open_order,
                 allowed_symbols=self.ctx.settings.allowed_symbols_set,
             )
             self._executor = CommandExecutor(

@@ -235,18 +235,22 @@ the validator):
 
 - **Two independent gates; the flag defaults OPEN.** (1) The flag
   `enable_v2_open_order` (`NSE_BRIDGE_ENABLE_V2_OPEN_ORDER`,
-  default `True`, opt-out `=0`; deliberately not persisted to
-  `config.json` — the env var is the durable override).
+  default `True`, opt-out `=0`; persisted to `config.json` and
+  toggleable at runtime via `PUT /settings` — the validator
+  re-reads it on every command, so no restart is needed (P2-1);
+  an env var, when set, still wins over `config.json` at load).
   (2) A v2 negotiation with the Platform (`V2Negotiation`,
   `negotiated=True` plus the negotiated `schema_version`).
 - **Refusal is loud:** a call with either gate closed raises
   `FEATURE_DISABLED` naming exactly which gate is closed, and never
   touches the driver (zero `order_send` calls).
 - **Wired into the live command path:** `server/commands.py`
-  imports the hook and `realtime/channel.py` passes
-  `enable_v2_open_order` as `open_order_authorized`; a server-sent
-  `open_order` frame is accepted only when both gates are open.
-  The P3 work owns the negotiation wire shape.
+  imports the hook and `realtime/channel.py` passes a live-reading
+  callable over `enable_v2_open_order` as `open_order_authorized`
+  (re-read on every command, so a `PUT /settings` toggle applies
+  immediately — P2-1); a server-sent `open_order` frame is accepted
+  only when both gates are open. The P3 work owns the negotiation
+  wire shape.
 - When both gates open, the hook dispatches through the proven local
   primitives (`market_order` / `trade_send_pending_order`) with the
   mandatory pre-send `order_check` + W4 reconciliation — it invents
