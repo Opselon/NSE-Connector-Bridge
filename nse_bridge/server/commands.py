@@ -47,23 +47,24 @@ contract-defined but NOT sendable until its capability gate passes —
 (b) tests, (c) live proof at market open that ``trade_modify_sl_tp``
 accepts a pending-order ticket, (d) a published minimum
 ``connector_version`` recorded in the contract. This Bridge has (a),
-(b) and (c) (2026-11-19, live on the MetaQuotes-Demo terminal,
-E-P2B-6 in docs/upgrade/PHASE-2B-VERIFICATION.md); (d) is still owed:
-the Platform has published no minimum yet (Platform
-``commands.rs::MODIFY_PENDING_MIN_VERSION`` is ``""``). ``"1.4.1"``
-below is this Bridge's own version floor — the first release carrying
-this gate mechanism — not a Platform publication. The gate opens only
-when BOTH hold: the operator explicitly opts in
-(``BridgeSettings.enable_modify_pending``, env
+(b), (c) and (d): (a)–(c) (2026-11-19, live on the MetaQuotes-Demo
+terminal, E-P2B-6 in docs/upgrade/PHASE-2B-VERIFICATION.md); (d) the
+Platform published minimum ``"1.4.1"`` in code (Platform
+``commands.rs::MODIFY_PENDING_MIN_VERSION``, ``commands.rs:86``,
+PR #228, deployed 2026-11-28, prod sha-3e1be367). ``"1.4.1"`` below
+is this Bridge's own version floor — the first release carrying this
+gate mechanism — as a local hardcoded constant, not a value read from
+any Platform frame. The gate opens only when BOTH hold: the operator
+explicitly opts in (``BridgeSettings.enable_modify_pending``, env
 ``NSE_BRIDGE_ENABLE_MODIFY_PENDING=1`` — default OFF, fail closed)
 AND this Bridge's own version is >= ``MODIFY_PENDING_MIN_VERSION``
 (see :func:`modify_pending_gate_open`, wired through
 ``realtime/channel.py`` into ``CommandValidator.modify_pending_proven``).
 There is no wire channel for the minimum version — the Platform never
-sends one; the Bridge sends its version at validate-key /
-register-device and the Platform enforces its own minimum before
-sending. The server MUST NOT send it to a Bridge below the minimum
-either (its own capability rule, §17.4).
+sends one in a command frame; the Bridge sends its version at
+validate-key / register-device and the Platform enforces its own
+minimum before sending. The server MUST NOT send it to a Bridge below
+the minimum either (its own capability rule, §17.4).
 
 Local validation order (§6.3) — EXACT, the server assumes this order
 when interpreting rejections (malformed → expired → wrong-device →
@@ -314,10 +315,12 @@ def default_priority(kind: str) -> int:
 #: pending-order ticket: DONE 2026-11-19 on the MetaQuotes-Demo
 #: terminal (retcode 10009, SL landed on the live order, order_check
 #: passed — E-P2B-6 in docs/upgrade/PHASE-2B-VERIFICATION.md); (d) the
-#: published minimum connector_version — STILL OWED (Platform
-#: ``commands.rs::MODIFY_PENDING_MIN_VERSION`` is ``""``); ``"1.4.1"``
+#: published minimum connector_version "1.4.1" — DONE (Platform
+#: ``commands.rs::MODIFY_PENDING_MIN_VERSION``, ``commands.rs:86``,
+#: PR #228, deployed 2026-11-28, prod sha-3e1be367). ``"1.4.1"`` below
 #: is this Bridge's own version floor — the first release carrying
-#: this gate mechanism. The gate opens only via
+#: this gate mechanism — as a local hardcoded constant, not a value
+#: read from any Platform frame. The gate opens only via
 #: :func:`modify_pending_gate_open` (explicit operator opt-in AND a
 #: qualifying local version); it stays CLOSED by default.
 MODIFY_PENDING_MIN_VERSION = "1.4.1"
@@ -326,9 +329,9 @@ MODIFY_PENDING_MIN_VERSION = "1.4.1"
 #: the gate's status for logs/docs.
 MODIFY_PENDING_GATE_NOTE = (
     "modify_pending is capability-gated (§17.4): conditions (a) code, "
-    "(b) tests and (c) live proof (2026-11-19, E-P2B-6) are done; (d) the "
-    "published minimum connector_version is still owed (the Platform has "
-    "published none; 1.4.1 is this Bridge's own version floor). The gate opens "
+    "(b) tests, (c) live proof (2026-11-19, E-P2B-6) and (d) the "
+    "published minimum connector_version 1.4.1 (Platform #228, "
+    "commands.rs:86, deployed) are done. The gate opens "
     "only when the operator opts in (NSE_BRIDGE_ENABLE_MODIFY_PENDING=1) "
     "on a Bridge >= 1.4.1 — otherwise modify_pending is rejected "
     "as UnsupportedOperation."
@@ -376,8 +379,8 @@ def modify_pending_gate_open(*, enabled: bool, bridge_version: str) -> bool:
     and a 1.4.1 build without the flag still refuses. There is no wire
     channel for the minimum version (the Platform never sends one),
     so the local version floor is the Bridge-side half of the
-    published minimum; the Platform enforces the same floor
-    server-side before sending.
+    published minimum (Platform ``commands.rs:86``, PR #228); the
+    Platform enforces the same floor server-side before sending.
     """
     return bool(enabled) and _version_at_least(bridge_version, MODIFY_PENDING_MIN_VERSION)
 

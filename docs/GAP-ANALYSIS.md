@@ -903,7 +903,9 @@ One entry per contract section. "Bridge implements" = code in this repo;
   Risk Engine, signal-execution setting, grants, AI-origin gates) — Platform-side.
   Per-command signatures — v1.1 (D-CMD-3).
 - **Missing:** `PARTIALLY_COMPLETED` has no wire representation (§2.7); `modify_pending`
-  close-out (live proof + published minimum version) is owed (§17.4); `open_order` /
+  §17.4 close-out (a)–(d) is done in code (live proof E-P2B-6 2026-11-19; published
+  minimum `1.4.1`, Platform #228) — live execution on a ≥1.4.1 Bridge with the gate
+  opted in still owed; `open_order` /
   `cancel_order` are not sendable (contract B rows — §4 D2/D3).
 
 ### §7 Accounts
@@ -1070,15 +1072,22 @@ One entry per contract section. "Bridge implements" = code in this repo;
 - **§17.2 AI Agent configuration API — deliberately not (server-side).** No Bridge code;
   correct. The Bridge must never compute indicators or decide.
 - **§17.3 Decision audit trail — deliberately not (server-side).** No Bridge code; correct.
-- **§17.4 `modify_pending` — contract-defined, capability-gated, NOT sendable.**
-  Bridge implements the gate (starts CLOSED, `modify_pending_proven=False`) and the
-  local execution mapping (`modify_pending_order_sltp` via the Python driver's
-  `TRADE_ACTION_MODIFY` equivalent for SL/TP). Close-out owed (§17.4 a–d): (a) allowlist
-  extension — the op is already in `SERVER_ALLOWLIST` but gated, so (a) is effectively
-  the gate flag; (b) tests — rejection tests exist, pass-tests do not (gate closed);
-  (c) live proof at market open that a pending-order ticket is accepted — **not done**;
-  (d) published minimum `connector_version` — **none published** (no version qualifies).
-  Until (c)+(d), the server must not send it, and the Bridge correctly rejects it.
+- **§17.4 `modify_pending` — contract-defined, capability-gated.**
+  Bridge implements the gate (starts CLOSED: explicit operator opt-in
+  `NSE_BRIDGE_ENABLE_MODIFY_PENDING=1` AND a local version >= `1.4.1`,
+  `server/commands.py:371–385`) and the local execution mapping
+  (`modify_pending_order_sltp` via the Python driver's
+  `TRADE_ACTION_MODIFY`, SL/TP/price/expiration since P2-8). Close-out
+  (§17.4 a–d) DONE in code: (a) allowlist entry + gate flag; (b) tests,
+  including gate-open pass-tests; (c) live proof at market open that a
+  pending-order ticket is accepted — DONE 2026-11-19 (E-P2B-6); (d)
+  published minimum `connector_version` `1.4.1` — DONE (Platform
+  `commands.rs:86`, PR #228, deployed 2026-11-28, prod sha-3e1be367).
+  Design note: the Bridge's `1.4.1` floor is a local hardcoded constant,
+  not a value read from any Platform frame; the Platform enforces the
+  same floor server-side from the stored `connector_version`. The gate
+  stays closed by default until the operator opts in, and the server
+  must not send it to a Bridge below the minimum.
 - **§17.5 `open_order` — OPEN DECISION, Bridge side correct.** The server must not send
   it; the Bridge's allowlist excludes it; local market/pending commands exist as *local*
   capability only. Unblocking requires, in order: user approval, allowlist addition +
@@ -1148,7 +1157,7 @@ section that does not define it, and the Bridge-side boundary/interface implemen
 | D1 | **Diagnostics / events upload endpoint** — ship ERROR/WARN (and meaningful INFO) diagnostic events to the Platform (spec §12; acceptance items "ERROR and WARN events reach the server reliably", "diagnostic delivery survives temporary network failures") | **CLOSED on the Bridge side by P5a (audit P2-10 refresh).** CONTRACT §4.2 amended: the endpoint is `POST /api/v1/connector/diagnostics` (Platform `connector::diagnostics`, migration 0095; wire shape `{ "events": [...] }`, 1–100 events, server answers `{ "accepted": <n>, "stored": <n> }`; durable budget `diagnostics` 30/min per device). | Local pipeline complete + sink WIRED: `HttpDiagnosticsSink` (`nse_bridge/api/app.py:203–216`), ERROR immediate drain + 60 s periodic drain, over the durable queue (`api/app.py:175–180`). **Still owed:** live ingest proof against the deployed Platform (D11); unit tests prove the sink against `httpx.MockTransport` only. |
 | D2 | **`open_order` sendable** — market BUY/SELL + all 6 pending types via the server channel (spec §6; contract §17.5/§18.8.1–18.8.8, status B) | **Not sendable in CONTRACT v1 §6.1.** `open_order` (`trade_send_market_order`, `trade_send_pending_order`) is explicitly NOT sendable; §17.5 makes it an OPEN DECISION for the user. No wire shape beyond the generic envelope is defined for it. | Local capability exists (`execution.py`, `trading.py`, `orders.py`); server channel allowlist excludes it (`commands.py:158`). **Required:** (1) user's explicit approval, (2) allowlist addition + tests, (3) Risk Engine + financial-consent gate proof on demo, (4) `schema_version` bump (§10). |
 | D3 | **`cancel_order` sendable** — cancel a pending order by ticket (spec §6; contract §18.9.6, status B) | **Not sendable in CONTRACT v1 §6.1.** `cancel_order` (`trade_delete_order`) is explicitly NOT sendable in v1. | Local capability exists (`trade_cancel_pending_order`, `orders.py:354`); server channel excludes it. **Required:** allowlist extension + demo proof + published minimum version (same close-out pattern as D4). |
-| D4 | **`modify_pending` close-out + pending price/expiration modification** (spec §6; contract §17.4, §18.9.2–18.9.4) | **§17.4 capability-gated, not sendable.** The op is contract-defined (SL/TP only) but no version qualifies (published minimum version: none). **§18.9.3/18.9.4 (price/expiration): no verified MT5 MCP action exists** in the live manifest ("possible gap", §18.16 item 2); no server op is defined for them. | SL/TP: gate starts CLOSED (`modify_pending_proven=False`); local mapping exists (`modify_pending_order_sltp`). Price/expiration: local capability exists via the Python driver (`trade_modify_pending_order`, `TRADE_ACTION_MODIFY`) but is **not** exposed remotely — the server channel maps `modify_pending` to SL/TP only. **Required:** (a) market-open live proof that a pending-order ticket is accepted, (b) published minimum `connector_version`, (c) for price/expiration, a contract op + MCP-coverage proof (or a contract statement that the Python-driver capability is the reference). |
+| D4 | **`modify_pending` close-out + pending price/expiration modification** (spec §6; contract §17.4, §18.9.2–18.9.4) | **§17.4 capability-gated.** The op is contract-defined; close-out (a)–(d) DONE — published minimum `connector_version` `"1.4.1"` (Platform `commands.rs:86`, PR #228, deployed 2026-11-28, prod sha-3e1be367); the Bridge gate opens only on operator opt-in + local version ≥1.4.1. **§18.9.3/18.9.4 (price/expiration):** price is carried in the shared §14.2 operation (`price`) and the Bridge passes it through to MT5 since P2-8 (PR #47); an absolute `expiration_utc` has no Platform-side field — only relative `expiry_secs` exists — so an absolute expiry still needs a contract field. No verified MT5 MCP action exists in the live manifest ("possible gap", §18.16 item 2). | SL/TP/price/expiration: gate starts CLOSED (explicit operator opt-in + version floor, `server/commands.py:371–385`); local mapping exists (`modify_pending_order_sltp`, `trade_modify_pending_order`). **Required:** live execution on a ≥1.4.1 Bridge with the gate opted in (owner-gated proof run, slice 11); for absolute expiration, a contract field (or a contract statement mapping `expiry_secs` to it). |
 | D5 | **Partial-close and close-by via the server channel + `PARTIALLY_COMPLETED` lifecycle state** (spec §§6–7; contract §18.8.10, §18.8.12) | **No wire shape.** The §6.2 envelope carries only `{type, ticket, sl?, tp?}` — no `volume` field for partial close, no `close_by_ticket` field for close-by. Contract §6.5 `action.result` statuses are exactly `rejected \| executed \| mcp_failed` — **no partial status exists on the wire**, so the Bridge's `PARTIALLY_COMPLETED` state (a local terminal state, `commands.py:421`) has nowhere to be reported. | Local partial close exists (`close_position(volume=…)`); close-by exists locally too (`trade_close_position_by`, `engine/positions.py:306`). Reconciliation (`_reconcile`) can prove a reduced volume on read-back. **Required:** a contract amendment adding `volume` (partial close) and `close_by_ticket` (close-by) to the envelope, and a wire representation for partial completion (new `action.result` status or a `partial` payload marker) — plus the user/Platform decision on hedging-only semantics (MQL5 `PositionClosePartial` constraints; netting = opposing deal). |
 | D6 | **Journal / execution-event upload** — discrete events (order submitted/accepted/rejected, position opened/modified/closed, deal executed, broker error) with the spec §8 field set (spec §8) | **Not in CONTRACT v1.** No journal/event endpoint or frame exists. The only sync kinds are `account \| positions \| history_orders \| history_positions` (§3.3); WS client→server frames are only `heartbeat`, `action.result`, `chart.data`, `chart.tick` (§5.3). | Journal collector exists AND is wired in production (§2.8): `JournalCollector` (`journal/collector.py:324`) with event-level dedup keys (`journal/events.py:71`), constructed in the `create_app` lifespan and assigned to `SyncEngine.journal`, pinned by `tests/unit/test_production_wiring.py`. History batches carry the raw facts (orders/deals/closed positions) from which the Platform derives journal entries server-side. **Required:** a contract amendment defining a journal/event channel (or a formal statement that journal derivation from sync batches is the intended design, in which case the Bridge builds only the local event collector for GUI/diagnostics, not an upload path). |
 | D7 | **Symbol inventory / metadata sync + symbol-resolution service** (spec §4) | **Not in CONTRACT v1.** No sync kind carries symbols; no endpoint accepts a symbol inventory, metadata snapshot, or resolution request/response. The only symbol data path is §17.1 chart frames (per-symbol, on request/subscription). | Resolver exists (§2.4): `SymbolResolver` (`symbols/resolver.py:140`, ambiguity reported, never guessed), `SymbolInventory` (`symbols/inventory.py:81`), `SymbolMetadata` (`symbols/metadata.py:82`); 29 tests in `tests/unit/test_symbol_resolution.py`. **Required:** a contract decision on how the server learns the broker's symbol inventory — e.g. a new sync kind, a chart-frame extension, or "on-demand only via chart frames" (in which case the resolver is still Bridge work, but the server never receives a full inventory). |
@@ -1204,7 +1213,7 @@ command path, the lifecycle, or the GUI are sequenced. "Area" numbers are spec �
 
 | # | Area | Work | Depends on | Parallel with |
 |---|---|---|---|---|
-| D-a | 2 REST + WS / 5 execution | `modify_pending` close-out (§17.4 a–d): (a)–(c) DONE — allowlist-gate, tests, **market-open live proof E-P2B-6 (2026-11-19)**; only (d) published minimum `connector_version` still owed. | Platform: published minimum version only (live proof done) | D-b |
+| D-a | 2 REST + WS / 5 execution | `modify_pending` close-out (§17.4 a–d): (a)–(d) DONE — allowlist-gate, tests, **market-open live proof E-P2B-6 (2026-11-19)**, published minimum `1.4.1` (Platform #228, deployed). Remaining: live execution on a ≥1.4.1 Bridge with the gate opted in (owner-gated proof run, slice 11). | Owner: proof run on a ≥1.4.1 Bridge with the gate opted in (slice 11) | D-b |
 | D-b | 5 execution | `open_order` / `cancel_order` allowlist extensions + demo proof + `schema_version` bump. | **User decision** (§17.5) + Platform Risk Engine proof (D2/D3) | D-a |
 | D-c | 7 telemetry | Switch the `DiagnosticsSink` from inert to live once D1 defines the endpoint; backfill durable queue delivery + delivery tests. | Platform: D1 endpoint definition | D-a, D-b |
 | D-d | 1 Architecture | Close out remaining §18 B rows per §18.17 (allowlist extensions with market-open proof + published minimum version per op); update §18.15 counts. | D-a, D-b, C2 | — |

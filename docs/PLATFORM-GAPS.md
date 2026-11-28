@@ -34,9 +34,11 @@ commit `9f27432` PR #144, 2026-11-21) — not from vendored snapshots:
   (d) `batch_id` must parse as a UUID (`Uuid::parse_str`); the Bridge
   sends uuidv7 (`server/uuid7.py`) — compatible.
 - **§4 update (modify_pending):** the Platform now enforces its own
-  §17.4 gate AND ships it disabled (`MODIFY_PENDING_MIN_VERSION = ""`,
-  `commands.rs:38`) — no minimum connector version is published, so
-  the Bridge gate stays closed exactly as stated below.
+  §17.4 gate AND publishes the minimum (`MODIFY_PENDING_MIN_VERSION =
+  "1.4.1"`, `commands.rs:86`, Platform PR #228, deployed 2026-11-28,
+  prod sha-3e1be367) — a Bridge below 1.4.1 is refused outright
+  (`modify_pending_not_supported`); the Bridge gate stays closed by
+  default until the operator opts in, exactly as stated below.
 - **§3 update (allowlist widening preconditions):** the §6.4
   server-side risk gate chain (kill switch, entitlement, signal,
   positions-batch sanity) is now IMPLEMENTED (`risk_gate.rs`, PR #129)
@@ -88,7 +90,8 @@ commit `9f27432` PR #144, 2026-11-21) — not from vendored snapshots:
 
 Status map (Phase E, refreshed): D1 CLOSED by P5a (2026-11-25 — endpoint
 `POST /api/v1/connector/diagnostics` + `HttpDiagnosticsSink`; live proof
-still owed under D11), D2 open, D3 open, D4 open (gated),
+still owed under D11), D2 open, D3 open, D4 closed as a close-out (a)–(d)
+done; gated by design (operator opt-in),
 D5 open (local side now implemented, wire still missing),
 D6 open (local collector now exists AND is wired in production, upload
 channel still missing),
@@ -214,28 +217,30 @@ explicitly left to the Platform side to define.
   contract version bump (`schema_version`) that registers the new ops.
   The Bridge will not widen the allowlist unilaterally.
 
-## 4. `modify_pending` capability gate (§17.4) — live proof done, published minimum version still owed
+## 4. `modify_pending` capability gate (§17.4) — close-out done, gated by design (operator opt-in)
 
 - `modify_pending` is contract-defined but starts REJECTED: the Bridge
   enforces the §17.4 capability gate (P0-1: explicit operator opt-in
   `NSE_BRIDGE_ENABLE_MODIFY_PENDING=1` AND a local version >=
   `MODIFY_PENDING_MIN_VERSION` `"1.4.1"`,
-  `server/commands.py:368–382`) and rejects the op as
+  `server/commands.py:371–385`) and rejects the op as
   `UnsupportedOperation` until the gate opens.
-- The §17.4 close-out, conditions (a)–(c): DONE. Live proof at market
+- The §17.4 close-out, conditions (a)–(d): DONE. Live proof at market
   open ran 2026-11-19 on the MetaQuotes-Demo terminal (E-P2B-6,
   `docs/upgrade/PHASE-2B-VERIFICATION.md:117–135`):
   `TRADE_ACTION_MODIFY` via `trade_modify_pending_order`, retcode
-  10009, SL landed on the live order with price untouched. Only
-  condition (d) is still owed: a published minimum
-  `connector_version`. The Platform publishes none yet
-  (`MODIFY_PENDING_MIN_VERSION = ""`, Platform `commands.rs:47`);
-  until it does, the Platform refuses the op outright
-  (`modify_pending_not_supported`) and the Bridge gate stays closed
-  by default.
-- Required from the Platform: publish the minimum connector version.
-  Until then the gate stays closed and `modify_pending` commands are
-  rejected with a structured reason.
+  10009, SL landed on the live order with price untouched. Condition
+  (d), the published minimum `connector_version`, is `"1.4.1"`
+  (Platform `commands.rs:86`, PR #228, deployed 2026-11-28, prod
+  sha-3e1be367). The Platform refuses the op outright
+  (`modify_pending_not_supported`) for a Bridge below 1.4.1, and the
+  Bridge gate stays closed by default until the operator opts in.
+- Required: nothing from the Platform for (d). Remaining: live
+  execution on a ≥1.4.1 Bridge with the gate opted in (owner-gated
+  proof run, slice 11). Design note: the Bridge reads no
+  Platform-published value from any command frame — its `"1.4.1"`
+  floor is a local hardcoded constant; the Platform enforces the same
+  floor server-side from the stored `connector_version`.
 
 ## 5. Task wire format is not in CONTRACT v1 (future server-assigned compute)
 
