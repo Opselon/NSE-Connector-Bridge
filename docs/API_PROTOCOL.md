@@ -212,7 +212,7 @@ envelope when the manifest changes mid-session. No `ping`, no
 |---|---|---|
 | `close_position` | `trade_close_single_position` (close-by-ticket; idempotent ambiguous-close handling) | |
 | `modify_sl_tp` | `trade_modify_sl_tp` (SL/TP by ticket; absent sl/tp filled from the live position) | |
-| `modify_pending` | `trade_modify_sl_tp` on a pending order (SL/TP only) | **Capability-gated (§17.4): the gate stays CLOSED.** The code path, tests, and the 2026-11-19 live-verification pass (docs/upgrade/PHASE-2B-VERIFICATION.md) are done — conditions (a)–(c) — but the Platform-published minimum `connector_version` (condition d) is still owed, so the default `modify_pending_proven=False` rejects the op as `UnsupportedOperation`. |
+| `modify_pending` | `trade_modify_sl_tp` on a pending order (SL/TP only) | **Capability-gated (§17.4): opens only on explicit operator opt-in (`NSE_BRIDGE_ENABLE_MODIFY_PENDING=1`) AND a local version >= `1.4.1` (the published minimum, Platform `commands.rs::MODIFY_PENDING_MIN_VERSION`).** The code path, tests, and the 2026-11-19 live-verification pass (docs/upgrade/PHASE-2B-VERIFICATION.md) are done — conditions (a)–(d). Otherwise rejected as `UnsupportedOperation`. |
 
 `cancel_order` is explicitly NOT sendable in v1. `open_order` is
 implemented behind the §17.5 activation gate: the market + pending

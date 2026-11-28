@@ -40,7 +40,7 @@ object (`code`, `category`, `cause`, `recovery`, `retry_safe`).
 |---|---|---|---|
 | `close_position` | `{type, ticket}` | `status: executed`, payload = raw MT5 close result | Idempotent ambiguous-close handling kept; on `TRADE_UNVERIFIED` reconciles (position gone ⇒ `executed`, recovered) |
 | `modify_sl_tp` | `{type, ticket, sl?, tp?}` (nullable; absent = leave unchanged) | `status: executed`, payload = raw MT5 modify result | Absent sl/tp filled from the live position before dispatch |
-| `modify_pending` | `{type, ticket, sl?, tp?}` (SL/TP only — no price/volume/expiration changes) | `status: executed`, payload = raw MT5 modify result | **Capability-gated (§17.4): starts REJECTED.** Live proof at market open + published minimum `connector_version` still owed (docs/PLATFORM-GAPS.md §4). Until `modify_pending_proven=True`, rejected as `UnsupportedOperation` exactly like a non-allowlisted op |
+| `modify_pending` | `{type, ticket, sl?, tp?}` (SL/TP only — no price/volume/expiration changes) | `status: executed`, payload = raw MT5 modify result | **Capability-gated (§17.4): starts REJECTED unless the operator opts in (`NSE_BRIDGE_ENABLE_MODIFY_PENDING=1`) on a Bridge >= 1.4.1 (the published minimum `connector_version`).** Otherwise rejected as `UnsupportedOperation` exactly like a non-allowlisted op |
 
 Explicitly NOT sendable in v1: `open_order`, `cancel_order`
 (§6.1, §17.5). Any other `operation.type` → `UnsupportedOperation`
