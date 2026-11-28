@@ -99,11 +99,11 @@ verification stages nothing. The rules, in order:
 
 - No public key configured → refuse (`NO_PUBLIC_KEY`). The key comes
   from `NSE_BRIDGE_UPDATE_PUBLIC_KEY` (base64 raw 32-byte Ed25519
-  public key) or a bundled `nse_bridge/update_public_key.b64` file.
-  **No such file exists in this repo and no key value is invented
-  here.** The real NSE release-signing public key must be provisioned
-  by the operator. Until then the updater can only *check*, never
-  install — this is the honest, fail-closed state, not a bug.
+  public key) or the bundled `nse_bridge/update_public_key.b64` file
+  (provisioned by the P1-6 signing pipeline; the frozen exe bundles
+  it via `bridge.spec`). With neither configured the updater can only
+  *check*, never install — this is the honest, fail-closed state, not
+  a bug.
 - `signature` null in the release metadata → refuse
   (`SIGNATURE_MISSING`); SHA-256 missing → refuse
   (`SHA256_MISSING`); size mismatch → refuse; bad signature → refuse.

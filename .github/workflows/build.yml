@@ -651,7 +651,9 @@ jobs:
           if-no-files-found: error
 
   # Release: tags only. All six platform artifacts are checksummed +
-  # manifested here, and every file (artifact + .sha256 sidecar +
+  # manifested here, signed with Ed25519 when the release-signing
+  # secret is set (P1-6; .sig sidecars + manifest "signature" fields),
+  # and every file (artifact + .sha256 sidecar + .sig sidecar +
   # manifest) is attached to the GitHub release. No release is ever
   # cut from an untested build: this job needs build-windows,
   # build-windows-arm and build-unix, which each ran the gates and a
@@ -732,6 +734,77 @@ jobs:
             --extra "linux-x64:$tgzX64" --extra "linux-arm64:$tgzArm"
           Get-ChildItem dist/*.sha256, dist/release-manifest.json | ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_ }
 
+      - name: Sign release artifacts (Ed25519)
+        # P1-6: signs every staged artifact with the release-signing
+        # private key (GitHub Actions secret
+        # NSE_BRIDGE_RELEASE_SIGNING_KEY — PEM or base64 seed; the
+        # secret itself is set by the repo owner, never in this file).
+        # The signatures are the exact base64 Ed25519 over the
+        # artifact bytes that nse_bridge/updates.py verify_artifact
+        # accepts. The manifest is then rewritten with the signatures
+        # attached, and every signature is verified against the
+        # bundled public key (nse_bridge/update_public_key.b64)
+        # before attach. If the secret is not set yet the step warns
+        # loudly and exits 0 — the release ships UNSIGNED (the
+        # v1.4.0 precedent) instead of failing over a pending
+        # operator step. (The secret check MUST live in the shell:
+        # the `secrets` context is not allowed in a step `if:`, and
+        # GitHub rejects the whole workflow file when it appears
+        # there — actionlint [expression].)
+        env:
+          NSE_BRIDGE_RELEASE_SIGNING_KEY: ${{ secrets.NSE_BRIDGE_RELEASE_SIGNING_KEY }}
+        shell: pwsh
+        run: |
+          if (-not $env:NSE_BRIDGE_RELEASE_SIGNING_KEY) {
+            Write-Host "::warning::NSE_BRIDGE_RELEASE_SIGNING_KEY is not set — this release ships UNSIGNED (v1.4.0 precedent). Set the GitHub Actions secret to sign future releases; see docs/RELEASE.md §5."
+            exit 0
+          }
+          # The sign script needs only `cryptography`, pinned to
+          # requirements.txt (the release job installs nothing else).
+          python -m pip install -q "cryptography==50.0.2"
+          $artifacts = @(
+            (Get-Item dist/NSE-MT5-Bridge.exe).FullName,
+            (Get-Item dist/NSE-MT5-Bridge-Setup-*.exe).FullName,
+            (Get-Item dist/NSE-MT5-Bridge-*-windows-arm64.exe).FullName,
+            (Get-Item dist/NSE-MT5-Bridge-*-macos-x64.dmg).FullName,
+            (Get-Item dist/NSE-MT5-Bridge-*-macos-arm64.dmg).FullName,
+            (Get-Item dist/NSE-MT5-Bridge-*-linux-x64.tar.gz).FullName,
+            (Get-Item dist/NSE-MT5-Bridge-*-linux-arm64.tar.gz).FullName
+          )
+          python scripts/sign_release_artifact.py @artifacts
+          if ($LASTEXITCODE -ne 0) { throw "signing failed" }
+          # Re-write the manifest with the signatures attached
+          # (SHA-256 sidecars are recomputed identically).
+          $setup = (Get-Item dist/NSE-MT5-Bridge-Setup-*.exe).FullName
+          $setupName = (Get-Item dist/NSE-MT5-Bridge-Setup-*.exe).Name
+          $armExe = (Get-Item dist/NSE-MT5-Bridge-*-windows-arm64.exe).FullName
+          $armName = (Get-Item dist/NSE-MT5-Bridge-*-windows-arm64.exe).Name
+          $dmgX64 = (Get-Item dist/NSE-MT5-Bridge-*-macos-x64.dmg).FullName
+          $dmgX64Name = (Get-Item dist/NSE-MT5-Bridge-*-macos-x64.dmg).Name
+          $dmgArm = (Get-Item dist/NSE-MT5-Bridge-*-macos-arm64.dmg).FullName
+          $dmgArmName = (Get-Item dist/NSE-MT5-Bridge-*-macos-arm64.dmg).Name
+          $tgzX64 = (Get-Item dist/NSE-MT5-Bridge-*-linux-x64.tar.gz).FullName
+          $tgzX64Name = (Get-Item dist/NSE-MT5-Bridge-*-linux-x64.tar.gz).Name
+          $tgzArm = (Get-Item dist/NSE-MT5-Bridge-*-linux-arm64.tar.gz).FullName
+          $tgzArmName = (Get-Item dist/NSE-MT5-Bridge-*-linux-arm64.tar.gz).Name
+          python scripts/write_release_manifest.py dist/NSE-MT5-Bridge.exe --setup $setup --tag ${{ github.ref_name }} --out-dir dist `
+            --extra "windows-arm64:$armExe" `
+            --extra "macos-x64:$dmgX64" --extra "macos-arm64:$dmgArm" `
+            --extra "linux-x64:$tgzX64" --extra "linux-arm64:$tgzArm" `
+            --signature "NSE-MT5-Bridge.exe:dist/NSE-MT5-Bridge.exe.sig" `
+            --signature "${setupName}:dist/${setupName}.sig" `
+            --signature "${armName}:dist/${armName}.sig" `
+            --signature "${dmgX64Name}:dist/${dmgX64Name}.sig" `
+            --signature "${dmgArmName}:dist/${dmgArmName}.sig" `
+            --signature "${tgzX64Name}:dist/${tgzX64Name}.sig" `
+            --signature "${tgzArmName}:dist/${tgzArmName}.sig"
+          if ($LASTEXITCODE -ne 0) { throw "manifest rewrite with signatures failed" }
+          # Verify every signature against the bundled public key
+          # (SHA-256 from the manifest, then Ed25519 — the same order
+          # verify_artifact uses) before anything is attached.
+          python scripts/sign_release_artifact.py --verify --public-key-file nse_bridge/update_public_key.b64 --manifest dist/release-manifest.json @artifacts
+          if ($LASTEXITCODE -ne 0) { throw "signature verification failed" }
+
       - name: Attach to release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -750,6 +823,7 @@ jobs:
             dist/NSE-MT5-Bridge-*-linux-x64.tar.gz.sha256
             dist/NSE-MT5-Bridge-*-linux-arm64.tar.gz
             dist/NSE-MT5-Bridge-*-linux-arm64.tar.gz.sha256
+            dist/*.sig
             dist/release-manifest.json
           # v1.2.3-rc.1 (or any tag containing '-') is a prerelease;
           # v1.2.3 is stable. The two are never mixed in one release.

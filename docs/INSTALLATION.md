@@ -84,12 +84,16 @@ mismatch · `6` installer failed · `7` post-install verification
 failed. The script is idempotent — safe to rerun.
 
 **Signature honesty:** CONTRACT v1 reserves Ed25519 release
-signatures, but no signing key has been published yet —
-`releases/latest` answers `signature: null`. Until a signed manifest
-exists, verification relies on the SHA-256 manifest + sidecar over
-HTTPS, and `install.ps1` (and the Bridge's own updater) say so
-explicitly rather than pretending a signature check ran. No key is
-fabricated and no verification is bypassed.
+signatures. Signed releases (P1-6) carry a base64 Ed25519 signature
+per file in the manifest (`files[].signature`) plus a `<name>.sig`
+sidecar, and `releases/latest` serves the setup installer's signature
+once the Platform D19 change lands; `install.ps1` reports a present
+signature and points at `scripts/sign_release_artifact.py --verify`
+(it cannot verify Ed25519 natively). An unsigned release still
+answers `signature: null`, and verification relies on the SHA-256
+manifest + sidecar over HTTPS — `install.ps1` (and the Bridge's own
+updater) say so explicitly rather than pretending a signature check
+ran. No key is fabricated and no verification is bypassed.
 
 ## 3. Windows x64 — portable executable
 

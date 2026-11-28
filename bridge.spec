@@ -85,6 +85,13 @@ datas += [("nse_bridge/gui/static", "nse_bridge/gui/static")]
 # (LoadImageW / webview.start(icon=...)). Without this the frozen
 # exe has no .ico file to load — only the exe resource remains.
 datas += [("assets/icon.ico", "assets")]
+# The release-signing PUBLIC key (P1-6): the frozen exe verifies
+# update signatures against it via load_update_public_key(), which
+# reads nse_bridge/update_public_key.b64 next to updates.py — under
+# PyInstaller that is _MEIPASS/nse_bridge/, so the file must be
+# bundled as data or the updater fail-closes with NO_PUBLIC_KEY.
+# Public material only; the private key never enters this repo.
+datas += [("nse_bridge/update_public_key.b64", "nse_bridge")]
 
 a = Analysis(
     ["run_bridge.py"],

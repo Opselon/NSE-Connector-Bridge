@@ -274,6 +274,13 @@ def make_rest_handler(state: MockServerState):
                 return
             path = self.path.split("?")[0]
             if path == "/api/v1/connector/releases/latest":
+                # Fixture of an UNSIGNED release (v1.4.0 shipped
+                # unsigned; unsigned releases still exist): the
+                # updater must refuse it with SIGNATURE_MISSING.
+                # This is deliberate — the signed path is covered by
+                # tests/unit/test_updater.py with real Ed25519 keys,
+                # and scripts/sign_release_artifact.py produces the
+                # signatures the verifier accepts.
                 self._send(
                     200,
                     {

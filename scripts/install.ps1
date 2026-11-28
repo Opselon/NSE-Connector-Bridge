@@ -229,11 +229,24 @@ try {
     Write-Host ("    verified {0} ({1} bytes, sha256 {2}...)" -f $wanted, $artifactAsset.size, $verified.Substring(0, 16))
 
     # Signature provenance — report honestly, never fake a pass.
-    # CONTRACT v1 reserves Ed25519 over the artifact; no signed
-    # manifest or public key has been published yet, so there is
-    # nothing to verify against today. The SHA-256 chain above is the
-    # verification that exists.
-    Write-Warn2 "No Ed25519 release signature is published for this release yet (CONTRACT v1 §3.5 reserves one; the signing pipeline is pending). Verification relied on the SHA-256 manifest + sidecar over HTTPS."
+    # Signed releases (P1-6) carry a base64 Ed25519 signature per
+    # file in the manifest ("signature" on the files[] entry) plus a
+    # "<name>.sig" sidecar on the release. This installer cannot
+    # verify Ed25519 natively (no Ed25519 primitive in Windows
+    # PowerShell / .NET), so a present signature is REPORTED, not
+    # verified here — verify it with
+    #   python scripts/sign_release_artifact.py --verify
+    #       --public-key-file nse_bridge/update_public_key.b64
+    #       --manifest release-manifest.json <artifact>
+    # before installing. The SHA-256 chain above is the verification
+    # this script itself performs. An unsigned release (no signature
+    # in the manifest, e.g. v1.4.0) still says so explicitly.
+    $manifestEntry = $manifest.files | Where-Object { $_.name -eq $wanted } | Select-Object -First 1
+    if ($manifestEntry -and $manifestEntry.signature) {
+        Write-Host ("    Ed25519 signature published for {0} (base64 {1}...) — not verified by this installer (no Ed25519 primitive in PowerShell); verify with scripts/sign_release_artifact.py --verify before installing." -f $wanted, $manifestEntry.signature.Substring(0, 16))
+    } else {
+        Write-Warn2 "No Ed25519 release signature is published for this release yet (CONTRACT v1 §3.5 reserves one; the signing pipeline is pending). Verification relied on the SHA-256 manifest + sidecar over HTTPS."
+    }
 
     if ($VerifyOnly) {
         Write-Step "Verify-only requested — download and verification complete, nothing installed"
