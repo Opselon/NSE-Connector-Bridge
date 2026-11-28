@@ -18,14 +18,17 @@ Connection lifecycle ports the production fixes:
 
 from __future__ import annotations
 
+import contextlib
+import itertools
 import os
 import platform
 import queue
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,6 +38,66 @@ from pathlib import Path
 #: are themselves bounded); a full queue means the worker is stalled —
 #: callers must fail fast instead of queuing unbounded work.
 MT5_JOB_QUEUE_MAX = 256
+
+#: Worker-queue priority lanes (P1-3). Lower runs first; the lane is
+#: the *queueing* order only — the worker itself stays strictly
+#: serial (one job at a time, one thread), because the MT5 extension
+#: owns one process-global IPC channel and is not thread-safe.
+#: Lanes: URGENT (closes, priority-9 envelopes) > COMMAND (all other
+#: server commands + policy moves + order placement) > NORMAL (GUI,
+#: diagnostics, sync, one-off reads) > BACKGROUND (chart fetches and
+#: periodic polls — re-derivable, never trading). A lane never
+#: pre-empts a job already running on the worker; it only jumps jobs
+#: still queued. Starvation of the background lane is bounded: a
+#: command's driver jobs are sequential and at most one command is
+#: active per (device, fence token), so queued background work is
+#: delayed only by the finite set of in-flight commands' jobs.
+MT5_PRIORITY_URGENT: int = 0
+MT5_PRIORITY_COMMAND: int = 1
+MT5_PRIORITY_NORMAL: int = 5
+MT5_PRIORITY_BACKGROUND: int = 9
+MT5_PRIORITY_MIN: int = 0
+MT5_PRIORITY_MAX: int = 9
+
+#: Lane names for diagnostics (``queue_depths``).
+_MT5_PRIORITY_NAMES: dict[int, str] = {
+    MT5_PRIORITY_URGENT: "urgent",
+    MT5_PRIORITY_COMMAND: "command",
+    MT5_PRIORITY_NORMAL: "normal",
+    MT5_PRIORITY_BACKGROUND: "background",
+}
+
+#: Ambient worker-queue priority for the current execution context.
+#: Set by :func:`mt5_priority_scope` (command dispatch, policy
+#: moves, chart fetchers, pollers) and read by :meth:`Mt5Driver.run`
+#: when no explicit ``priority`` is passed. A ``ContextVar`` (not a
+#: thread-local): the value set in async code propagates through
+#: ``run_in_threadpool`` into the thread that calls ``driver.run``,
+#: and a threadpool thread's copy never leaks into the next task.
+_ambient_priority: ContextVar[int] = ContextVar("mt5_ambient_priority", default=MT5_PRIORITY_NORMAL)
+
+
+@contextlib.contextmanager
+def mt5_priority_scope(priority: int) -> Iterator[None]:
+    """Run the enclosed driver calls in one worker-queue lane.
+
+    ``priority`` must be 0–9 (the ``MT5_PRIORITY_*`` constants).
+    Out-of-range values raise ``ValueError`` — a programming error,
+    never silently clamped.
+    """
+    if not MT5_PRIORITY_MIN <= priority <= MT5_PRIORITY_MAX:
+        raise ValueError(f"MT5 worker priority {priority!r} is outside 0–9")
+    token = _ambient_priority.set(priority)
+    try:
+        yield
+    finally:
+        _ambient_priority.reset(token)
+
+
+def current_mt5_priority() -> int:
+    """Ambient worker-queue priority for the current context."""
+    return _ambient_priority.get()
+
 
 #: Order-placement timeout (P3 v2): a single ``order_send`` must
 #: answer within this long. The generic ``run`` default is 60 s;
@@ -625,14 +688,33 @@ class OpMetrics:
 
 
 class Mt5Driver:
-    """Serialized, thread-safe access to the MetaTrader5 C++ IPC driver."""
+    """Serialized, thread-safe access to the MetaTrader5 C++ IPC driver.
+
+    One worker thread runs one job at a time (the driver is not
+    thread-safe — never parallelized). Jobs queue in priority lanes
+    (P1-3): commands jump chart/sync work that is still queued; a
+    job already running is never pre-empted. See the
+    ``MT5_PRIORITY_*`` constants and :func:`mt5_priority_scope`.
+    """
 
     def __init__(self, settings: BridgeSettings) -> None:
         self.settings = settings
-        # Bounded job queue (see MT5_JOB_QUEUE_MAX): a stalled worker
-        # produces fast, clear failures instead of unbounded queued
-        # work while every caller waits out its own future timeout.
-        self._jobs: queue.Queue[tuple[Callable[[Any], Any], Future]] = queue.Queue(maxsize=MT5_JOB_QUEUE_MAX)
+        # Priority queue (P1-3): entries are (priority, seq, job,
+        # future) — lower priority runs first, ``seq`` is a monotonic
+        # tie-break so jobs in the same lane run FIFO and tuple
+        # comparison never reaches the (unorderable) job/future.
+        # Bounded (see MT5_JOB_QUEUE_MAX): a stalled worker produces
+        # fast, clear failures instead of unbounded queued work while
+        # every caller waits out its own future timeout.
+        self._jobs: queue.PriorityQueue[tuple[int, int, Callable[[Any], Any], Future]] = queue.PriorityQueue(
+            maxsize=MT5_JOB_QUEUE_MAX
+        )
+        self._seq = itertools.count()
+        #: Queued jobs per lane (``queue_depths``); guarded by
+        #: ``_depth_lock`` — incremented on enqueue, decremented on
+        #: dequeue, so diagnostics can see which lane is backing up.
+        self._lane_depths: dict[int, int] = {}
+        self._depth_lock = threading.Lock()
         self._thread = threading.Thread(name="mt5-worker", target=self._work, daemon=True)
         self._mt5: Any = None
         self._connected = False
@@ -655,7 +737,9 @@ class Mt5Driver:
     # ------------------------------------------------------------------
     def _work(self) -> None:  # pragma: no cover — infinite worker loop
         while True:
-            job, fut = self._jobs.get()
+            _priority, _seq, job, fut = self._jobs.get()
+            with self._depth_lock:
+                self._lane_depths[_priority] = self._lane_depths.get(_priority, 1) - 1
             try:
                 fut.set_result(job(self._module()))
             except BaseException as exc:  # noqa: BLE001 — isolate the worker
@@ -674,13 +758,34 @@ class Mt5Driver:
         op: str | None = None,
         context: dict[str, Any] | None = None,
         timeout: float = 60.0,
+        priority: int | None = None,
     ) -> Any:
-        """Execute job(mt5) on the worker thread; record diagnostics + metrics."""
+        """Execute job(mt5) on the worker thread; record diagnostics + metrics.
+
+        ``priority`` is a worker-queue lane (0–9, the
+        ``MT5_PRIORITY_*`` constants; lower runs first). ``None``
+        means the ambient lane for the current context
+        (:func:`mt5_priority_scope`, default NORMAL) — so a command's
+        whole dispatch inherits its lane without every engine helper
+        taking a priority argument. The lane orders QUEUED jobs only:
+        a job already running on the worker is never pre-empted, and
+        the worker stays strictly serial.
+        """
         name: str = op or str(getattr(job, "__name__", "unnamed_job"))
+        lane = _ambient_priority.get() if priority is None else priority
+        if not MT5_PRIORITY_MIN <= lane <= MT5_PRIORITY_MAX:
+            raise ValueError(f"MT5 worker priority {lane!r} is outside 0–9")
         fut: Future = Future()
+        # Count the job BEFORE it enters the queue: the worker can
+        # dequeue (and decrement) the instant put_nowait lands, so
+        # incrementing after the put would leak phantom depth.
+        with self._depth_lock:
+            self._lane_depths[lane] = self._lane_depths.get(lane, 0) + 1
         try:
-            self._jobs.put_nowait((job, fut))
+            self._jobs.put_nowait((lane, next(self._seq), job, fut))
         except queue.Full as exc:
+            with self._depth_lock:
+                self._lane_depths[lane] = self._lane_depths.get(lane, 1) - 1
             # Backpressure, not silent waiting: the worker is stalled
             # or hopelessly behind — fail in milliseconds rather than
             # queue behind 60 s timeouts.
@@ -699,11 +804,27 @@ class Mt5Driver:
         self._record(name, True, duration_ms, context=context)
         return result
 
+    def queue_depths(self) -> dict[str, int]:
+        """Queued jobs per lane plus the total (diagnostics).
+
+        Keys are lane names (``urgent``/``command``/``normal``/
+        ``background``) plus ``total``; lanes with no queued jobs
+        report 0 so the shape is stable.
+        """
+        with self._depth_lock:
+            depths = dict(self._lane_depths)
+        out = {name: depths.get(lane, 0) for lane, name in _MT5_PRIORITY_NAMES.items()}
+        # Total counts every queued job, including any lane without a
+        # name (an explicit priority between the named lanes).
+        out["total"] = sum(depths.values())
+        return out
+
     def run_order_send(
         self,
         job: Callable[[Any], Any],
         op: str | None = None,
         context: dict[str, Any] | None = None,
+        priority: int | None = None,
     ) -> Any:
         """Order-placement path (P3 v2): ``run`` with the placement
         timeout, mapping a timeout / queue-full failure onto
@@ -714,12 +835,17 @@ class Mt5Driver:
         reconcile the live book before any retry, never re-send
         blindly. A plain ``TimeoutError`` here would surface as an
         internal error and invite exactly that blind retry.
+
+        ``priority`` defaults to the COMMAND lane (P1-3: a placement
+        jumps queued chart/sync work); an explicit value wins over
+        the ambient lane.
         """
         from ..errors import BridgeError, ErrorCode
 
         name = op or str(getattr(job, "__name__", "unnamed_job"))
+        lane = MT5_PRIORITY_COMMAND if priority is None else priority
         try:
-            return self.run(job, op=name, context=context, timeout=ORDER_SEND_TIMEOUT_S)
+            return self.run(job, op=name, context=context, timeout=ORDER_SEND_TIMEOUT_S, priority=lane)
         except TimeoutError as exc:
             raise BridgeError(
                 ErrorCode.TRADE_UNVERIFIED,
