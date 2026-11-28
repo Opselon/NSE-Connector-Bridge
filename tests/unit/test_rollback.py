@@ -18,7 +18,11 @@ Covers, with mocks only (no user PC, no MT5, no real download):
 The fake "exes" are inert shell scripts (sleep / exit 1) — they are
 never a real Bridge, and the staged bytes are never executed except
 through the apply script's own restart launch, exactly as in
-production.
+production. The two real-process start tests run on POSIX only:
+Windows cannot execute a shell script as a .exe (WinError 193), so
+on win32 they skip and the stubbed-launcher tests below carry the
+start-check coverage on every platform, including the launch-failure
+case (PR #37 Windows CI).
 Label: unit.
 """
 
@@ -289,6 +293,10 @@ def test_apply_script_tampered_staged_file_touches_nothing(settings, keypair, tm
 # ---------------------------------------------------------------------------
 # failed start: new version exits in the grace window -> previous restored
 # ---------------------------------------------------------------------------
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows cannot execute a shell-script .exe (WinError 193); the launch path is covered by the stubbed-launcher tests",
+)
 def test_failed_start_falls_back_to_previous_version(settings, keypair, tmp_path):
     updater, staged = _stage(settings, keypair, BROKEN_EXE)
     target = tmp_path / "dummy-target.exe"
@@ -313,6 +321,10 @@ def test_failed_start_falls_back_to_previous_version(settings, keypair, tmp_path
         _kill(apply_result.get("restarted_pid"))
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows cannot execute a shell-script .exe (WinError 193); the launch path is covered by the stubbed-launcher tests",
+)
 def test_healthy_start_keeps_new_version(settings, keypair, tmp_path):
     updater, staged = _stage(settings, keypair, HEALTHY_EXE)
     target = tmp_path / "dummy-target.exe"
@@ -406,3 +418,169 @@ def test_fresh_install_has_no_previous_version(settings, keypair, tmp_path):
 
 def test_apply_script_template_stays_ascii():
     assert APPLY_SCRIPT_TEMPLATE.isascii()
+
+
+# ---------------------------------------------------------------------------
+# start check via a stubbed launcher (runs on every platform, incl.
+# Windows — the shell-script fake exes above cannot execute there,
+# so the subprocess tests skip on win32 and these carry the coverage)
+# ---------------------------------------------------------------------------
+def _template_ns() -> dict:
+    ns: dict = {"__name__": "apply_update_test"}
+    # The test's subject IS the exec'd template; the string is our own
+    # module constant, never user input.
+    exec(APPLY_SCRIPT_TEMPLATE, ns)  # noqa: S102
+    return ns
+
+
+class _FakeProc:
+    """Stand-in for subprocess.Popen: poll() None = still running."""
+
+    def __init__(self, *, alive, pid=4242):
+        self._alive = alive
+        self.pid = pid
+
+    def poll(self):
+        return None if self._alive else 1
+
+
+def _stub_launcher(behaviours):
+    """A _launch_detached stub: behaviour per call (a _FakeProc, or an
+    exception to raise); the last behaviour repeats for later calls."""
+    calls = {"n": 0}
+
+    def launch(argv):
+        idx = calls["n"]
+        calls["n"] += 1
+        behaviour = behaviours[min(idx, len(behaviours) - 1)]
+        if isinstance(behaviour, Exception):
+            raise behaviour
+        return behaviour
+
+    launch.calls = calls
+    return launch
+
+
+def _run_apply_main(ns, monkeypatch, *, staged, target, sha256):
+    """Run the template's main() in-process with a stubbed launcher
+    already installed in the namespace; returns its exit code."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "apply_update.py",
+            "--staged",
+            str(staged),
+            "--target",
+            str(target),
+            "--parent-pid",
+            str(_dead_pid()),
+            "--sha256",
+            sha256,
+            "--previous-version",
+            BRIDGE_VERSION,
+            "--new-version",
+            "99.99.99",
+            "--start-grace-seconds",
+            "1",
+            "--rollback-observe-seconds",
+            "1",
+            "--restart-cmd",
+            str(target),
+        ],
+    )
+    return ns["main"]()
+
+
+def test_failed_start_falls_back_via_stubbed_launcher(settings, keypair, tmp_path, monkeypatch):
+    _, staged = _stage(settings, keypair, BROKEN_EXE)
+    target = tmp_path / "dummy-target.exe"
+    target.write_bytes(HEALTHY_EXE)  # the previous version
+    ns = _template_ns()
+    ns["_launch_detached"] = _stub_launcher([_FakeProc(alive=False, pid=4242), _FakeProc(alive=True, pid=4243)])
+    exit_code = _run_apply_main(
+        ns, monkeypatch, staged=staged, target=target, sha256=hashlib.sha256(BROKEN_EXE).hexdigest()
+    )
+    apply_result = _apply_result(settings)
+    assert exit_code == 1
+    assert apply_result["ok"] is False
+    assert apply_result["rolled_back"] is True
+    assert apply_result["rollback_restored"] is True
+    assert apply_result["rollback_launch_failed"] is False
+    assert apply_result["rollback_process_alive"] is True
+    assert apply_result["rollback_pid"] == 4243
+    assert target.read_bytes() == HEALTHY_EXE  # previous version restored
+
+
+def test_healthy_start_keeps_new_version_via_stubbed_launcher(settings, keypair, tmp_path, monkeypatch):
+    _, staged = _stage(settings, keypair, HEALTHY_EXE)
+    target = tmp_path / "dummy-target.exe"
+    previous_exe = b"#!/bin/sh\nsleep 60\n# previous version\n"
+    target.write_bytes(previous_exe)
+    ns = _template_ns()
+    ns["_launch_detached"] = _stub_launcher([_FakeProc(alive=True, pid=4242)])
+    exit_code = _run_apply_main(
+        ns, monkeypatch, staged=staged, target=target, sha256=hashlib.sha256(HEALTHY_EXE).hexdigest()
+    )
+    apply_result = _apply_result(settings)
+    assert exit_code == 0
+    assert apply_result["ok"] is True
+    assert apply_result["rolled_back"] is False
+    assert apply_result["start_check"] == "passed"
+    assert apply_result["restarted_pid"] == 4242
+    assert target.read_bytes() == HEALTHY_EXE
+    assert rollback_backup_path(target).read_bytes() == previous_exe
+
+
+def test_launch_failure_falls_back_to_previous_version(settings, keypair, tmp_path, monkeypatch):
+    """The Windows PR #37 scenario: the new exe cannot be launched
+    at all (WinError 193) — that is a failed start, not a successful
+    install, and the previous version is restored and relaunched."""
+    _, staged = _stage(settings, keypair, BROKEN_EXE)
+    target = tmp_path / "dummy-target.exe"
+    target.write_bytes(HEALTHY_EXE)  # the previous version
+    ns = _template_ns()
+    ns["_launch_detached"] = _stub_launcher(
+        [
+            OSError("[WinError 193] %1 is not a valid Win32 application"),
+            _FakeProc(alive=True, pid=4243),
+        ]
+    )
+    exit_code = _run_apply_main(
+        ns, monkeypatch, staged=staged, target=target, sha256=hashlib.sha256(BROKEN_EXE).hexdigest()
+    )
+    apply_result = _apply_result(settings)
+    assert exit_code == 1
+    assert apply_result["ok"] is False
+    assert "failed to launch" in (apply_result["error"] or "")
+    assert apply_result["rolled_back"] is True
+    assert apply_result["rollback_restored"] is True
+    assert apply_result["rollback_launch_failed"] is False
+    assert apply_result["rollback_process_alive"] is True
+    assert target.read_bytes() == HEALTHY_EXE  # previous version restored
+
+
+def test_launch_failure_on_both_attempts_reports_rollback_launch_failed(settings, keypair, tmp_path, monkeypatch):
+    """Fail-closed: when even the restored previous version cannot be
+    launched, the failure is recorded (never reported as success)."""
+    _, staged = _stage(settings, keypair, BROKEN_EXE)
+    target = tmp_path / "dummy-target.exe"
+    target.write_bytes(HEALTHY_EXE)  # the previous version
+    ns = _template_ns()
+    ns["_launch_detached"] = _stub_launcher(
+        [
+            OSError("[WinError 193] %1 is not a valid Win32 application"),
+            OSError("[WinError 193] %1 is not a valid Win32 application"),
+        ]
+    )
+    exit_code = _run_apply_main(
+        ns, monkeypatch, staged=staged, target=target, sha256=hashlib.sha256(BROKEN_EXE).hexdigest()
+    )
+    apply_result = _apply_result(settings)
+    assert exit_code == 1
+    assert apply_result["ok"] is False
+    assert apply_result["rolled_back"] is True
+    assert apply_result["rollback_restored"] is True
+    assert apply_result["rollback_launch_failed"] is True
+    assert apply_result["rollback_pid"] is None
+    assert target.read_bytes() == HEALTHY_EXE  # restored on disk even so

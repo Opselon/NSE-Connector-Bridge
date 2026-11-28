@@ -42,12 +42,14 @@ generation is retained. The staged file's SHA-256 is re-verified
 before any replacement (a failed re-check leaves the target
 untouched: the running version IS the fallback). After the restart
 the script watches the new process for a grace window (default
-15 s); if it exits in that window the backup is restored over the
-target and the previous version is relaunched, recorded as
-``rolled_back`` in ``apply-result.json``. Fail-closed throughout:
-a missing or SHA-mismatched backup is never launched, and a fresh
-install (no previous version) has nothing to fall back to — both
-cases are recorded, not silent.
+15 s); if it cannot be launched at all, or exits in that window,
+the backup is restored over the target and the previous version is
+relaunched, recorded as ``rolled_back`` in ``apply-result.json``.
+Fail-closed throughout: a missing or SHA-mismatched backup is never
+launched, and a fresh install (no previous version) has nothing to
+fall back to — both cases are recorded, not silent. Any OSError
+during the install forces ``ok`` to False — a failed restart launch
+must never report as a successful install.
 """
 
 from __future__ import annotations
@@ -544,6 +546,42 @@ def _wait_alive(proc, seconds):
     return proc.poll() is None
 
 
+def _fail_start(result, rollback, args, reason):
+    """Failed start: restore the previous version and relaunch it.
+
+    Used both when the new version exits inside the grace window
+    and when it cannot be launched at all (e.g. WinError 193 on
+    Windows -- the staged file is not a valid Win32 application).
+    Records the outcome in `result`; never raises (a rollback
+    relaunch that itself fails is recorded as
+    rollback_launch_failed, not raised).
+    """
+    result["ok"] = False
+    result["error"] = reason
+    result["rolled_back"] = True
+    restored = _restore_previous(rollback)
+    result["rollback_restored"] = restored
+    if restored:
+        _make_executable(args.target)
+        try:
+            rproc = _launch_detached([args.restart_cmd])
+        except OSError as exc:
+            result["rollback_pid"] = None
+            result["rollback_process_alive"] = False
+            result["rollback_launch_failed"] = True
+            result["rollback_error"] = str(exc)
+        else:
+            result["rollback_pid"] = rproc.pid
+            if args.rollback_observe_seconds > 0:
+                alive = _wait_alive(rproc, args.rollback_observe_seconds)
+            else:
+                alive = None
+            result["rollback_process_alive"] = alive
+            result["rollback_launch_failed"] = alive is False
+    else:
+        result["rollback_launch_failed"] = True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--staged", required=True)
@@ -588,41 +626,36 @@ def main():
                 result["ok"] = True
                 result["target"] = args.target
                 if args.restart_cmd:
-                    proc = _launch_detached([args.restart_cmd])
-                    result["restarted"] = True
-                    result["restarted_pid"] = proc.pid
-                    if args.start_grace_seconds > 0:
-                        if _wait_alive(proc, args.start_grace_seconds):
-                            result["start_check"] = "passed"
-                        else:
-                            # Failed start: the new version exited in
-                            # the grace window. Restore the previous
-                            # version and relaunch it.
-                            result["ok"] = False
-                            result["error"] = (
-                                "new version exited within %ss of start -- "
-                                "rolled back to previous version"
-                                % args.start_grace_seconds)
-                            result["rolled_back"] = True
-                            restored = _restore_previous(rollback)
-                            result["rollback_restored"] = restored
-                            if restored:
-                                _make_executable(args.target)
-                                rproc = _launch_detached([args.restart_cmd])
-                                result["rollback_pid"] = rproc.pid
-                                if args.rollback_observe_seconds > 0:
-                                    alive = _wait_alive(rproc, args.rollback_observe_seconds)
-                                else:
-                                    alive = None
-                                result["rollback_process_alive"] = alive
-                                result["rollback_launch_failed"] = alive is False
-                            else:
-                                result["rollback_launch_failed"] = True
+                    try:
+                        proc = _launch_detached([args.restart_cmd])
+                    except OSError as exc:
+                        # The new version cannot even be launched
+                        # (e.g. not a valid Win32 application): that
+                        # is a failed start, not a successful install.
+                        result["restarted"] = False
+                        _fail_start(
+                            result, rollback, args,
+                            "new version failed to launch (%s) -- rolled back to previous version" % exc)
                     else:
-                        result["start_check"] = "skipped_no_grace_window"
+                        result["restarted"] = True
+                        result["restarted_pid"] = proc.pid
+                        if args.start_grace_seconds > 0:
+                            if _wait_alive(proc, args.start_grace_seconds):
+                                result["start_check"] = "passed"
+                            else:
+                                _fail_start(
+                                    result, rollback, args,
+                                    "new version exited within %ss of start -- "
+                                    "rolled back to previous version" % args.start_grace_seconds)
+                        else:
+                            result["start_check"] = "skipped_no_grace_window"
                 else:
                     result["start_check"] = "skipped_no_restart"
         except OSError as exc:
+            # An exception anywhere in the install means not-ok, even
+            # if ok was already set: a failed restart launch used to
+            # report ok=True with an error attached (Windows CI, PR #37).
+            result["ok"] = False
             result["error"] = f"install failed: {exc}"
     out = os.path.join(staging_dir, "apply-result.json")
     try:

@@ -60,11 +60,13 @@ restart          on shutdown, the staged apply script (our own code,
 install          script waits for the bridge PID to exit, re-verifies
                  the staged file's SHA-256, backs up the current exe
                  (see §3), replaces the target, restarts it
-start check      the script watches the new process for a grace window
-                 (default 15 s, --start-grace-seconds). A healthy
-                 bridge never exits on its own in that window.
+start check      the script launches the new process and watches it for
+                 a grace window (default 15 s, --start-grace-seconds).
+                 A healthy bridge never exits on its own in that window;
+                 a launch failure (e.g. not a valid Win32 application)
+                 counts as a failed start too.
    ├─ alive      update complete; previous version retained (§3)
-   └─ exited     failed start → restore the backup over the target,
+   └─ failed     failed start → restore the backup over the target,
                  relaunch the previous version, record rolled_back
 ```
 
@@ -109,7 +111,7 @@ screen) reports the rollback state:
 |---|---|---|
 | Failed verify at download | `Updater.download()` — size / SHA-256 / signature check | Structured error (`NO_PUBLIC_KEY`, `SIGNATURE_MISSING`, `SHA256_MISMATCH`, `SIGNATURE_INVALID`, …); nothing is staged; the running Bridge is untouched and keeps serving. This is the normal "fallback": the current version *is* the fallback. |
 | Failed verify at install | Apply script re-hashes the staged file before replacing the target | Install refused; the target exe is never touched, no backup is created, the previous version stays installed. Recorded in `apply-result.json` (`error: "staged file SHA-256 mismatch …"`). |
-| New version fails to start | Apply script's start check: the relaunched process exits within the 15 s grace window | The backup is copied back over the target, the previous version is relaunched, and `apply-result.json` records `rolled_back: true` with the reason. The update is reported as failed (`ok: false`) — the Bridge is running again, but on the previous version. |
+| New version fails to start | Apply script's start check: the relaunched process exits within the 15 s grace window, **or cannot be launched at all** (e.g. WinError 193 on Windows — the staged file is not a valid Win32 application) | The backup is copied back over the target, the previous version is relaunched, and `apply-result.json` records `rolled_back: true` with the reason. The update is reported as failed (`ok: false`) — the Bridge is running again, but on the previous version. A launch failure is a failed start, never a successful install: any `OSError` during the install forces `ok` to `false`. |
 | Install itself fails | Replace/copy error in the apply script | If a backup was already taken, the script attempts to restore it before reporting failure; the target is never left half-written by design (`os.replace` is atomic; the copy fallback restores from backup on error). |
 
 Note the deliberate asymmetry: a *quick exit* is the failure signal.
@@ -210,6 +212,6 @@ previous version is unverifiable:
 | Claim | Proof |
 |---|---|
 | Fallback after a failed verify (download refuses, nothing staged, current version untouched; staged file tampered after staging → target untouched) | Mock tests, `tests/unit/test_rollback.py` — no user PC, no MT5 |
-| Fallback after a failed start (new exe exits in the grace window → previous exe restored and relaunched) | Mock tests, `tests/unit/test_rollback.py` — fake "exes" are inert shell scripts, never executed as real Bridges |
+| Fallback after a failed start (new exe exits in the grace window → previous exe restored and relaunched; new exe unlaunchable → same fallback) | Mock tests, `tests/unit/test_rollback.py` — real-process tests on POSIX (fake shell-script "exes", never executed as real Bridges) + stubbed-launcher tests on every platform, including Windows |
 | Previous-version retention (backup + manifest written at install time; status reports it; tampered backup → `rollback_available: false`) | Mock tests, `tests/unit/test_rollback.py` |
 | Live proof on Windows (real exe swap, real start, real rollback on a real machine) | **Owed** — the P1-9 Windows run; do not claim it until it is observed |
