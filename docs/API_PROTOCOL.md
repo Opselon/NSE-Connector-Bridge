@@ -355,7 +355,13 @@ Bridge maps its local states onto `action.result` truthfully.
 `duration_ms` measured client-side, raw MT5 payload preserved, `error`
 object only on failure with a `retry_safe` flag (`False` for every
 financial op in this phase — the server must re-authorize with a NEW
-`command_id` rather than rely on a blind client retry). If the socket
+`command_id` rather than rely on a blind client retry). When the
+failure carries a broker retcode, the error object also carries
+`retcode` (int, e.g. `10027`) + `retcode_label` (e.g.
+`CLIENT_DISABLES_AT - Autotrading disabled by client terminal`) so
+the server can branch on the broker reason instead of parsing
+free-text `cause` (audit P2-5); the keys are absent when no broker
+retcode applies, and no other error key changed. If the socket
 is down, results persist in the bounded pending queue and are delivered
 on reconnect — never dropped silently. Round-trip invariant: every
 issued command reaches exactly one terminal state; a command never

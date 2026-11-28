@@ -533,6 +533,7 @@ def trade_modify_pending_order(
                 f"Pending-order modify for #{params.ticket} returned "
                 + ("no result" if result is None else "retcode 10031 (no connection)")
                 + " — outcome unverified; reconcile the live order before retrying (never blind-retry).",
+                retcode=retcode,
                 details={
                     "ticket": params.ticket,
                     "retcode": retcode,

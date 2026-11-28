@@ -217,6 +217,7 @@ from loguru import logger
 from ..engine.v2_open_order import negotiate_protocol_version
 from ..errors import BridgeError, ErrorCode
 from ..mt5.driver import MT5_PRIORITY_COMMAND, MT5_PRIORITY_URGENT, mt5_priority_scope
+from ..retcodes import translate_retcode
 from ..timeutil import normalize_utc
 from .queue import BoundedPendingQueue
 from .rest import Entitlements
@@ -1029,8 +1030,17 @@ def _error_object(
     recovery: str | None = None,
     retry_safe: bool = False,
     server_intervention_required: bool = False,
+    retcode: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    """Build the ``action.result`` error object (§6.5).
+
+    ``retcode`` / ``retcode_label`` are present only when the failure
+    carries a broker retcode (audit P2-5): the server can then branch
+    on 10027 (algo trading disabled) vs 10030 (invalid fill) vs 10004
+    (requote) instead of parsing free-text ``cause``. Every other key
+    is unchanged — the shape is additive-only.
+    """
+    error: dict[str, Any] = {
         "code": code,
         "category": category,
         "source_action": source_action,
@@ -1040,6 +1050,10 @@ def _error_object(
         "retry_safe": retry_safe,
         "server_intervention_required": server_intervention_required,
     }
+    if retcode is not None:
+        error["retcode"] = int(retcode)
+        error["retcode_label"] = translate_retcode(retcode)
+    return error
 
 
 def build_action_result(
@@ -1779,6 +1793,7 @@ class CommandExecutor:
                     recovery="Reconcile the actual MT5 state before any retry; never blind-retry a non-idempotent op.",
                     retry_safe=False,
                     server_intervention_required=True,
+                    retcode=exc.retcode,
                 ),
             )
             execution.transition(CommandState.UNKNOWN)
@@ -1806,6 +1821,7 @@ class CommandExecutor:
                 source_action=source_tool,
                 cause=exc.message,
                 retry_safe=False,
+                retcode=exc.retcode,
             ),
         )
         execution.transition(CommandState.FAILED)

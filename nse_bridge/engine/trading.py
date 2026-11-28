@@ -159,8 +159,11 @@ def order_check_send(
     return check
 
 
-def _unverified(op: str, message: str, details: dict[str, Any]) -> BridgeError:
-    return BridgeError(ErrorCode.TRADE_UNVERIFIED, message, details=details)
+def _unverified(op: str, message: str, details: dict[str, Any], retcode: int | None = None) -> BridgeError:
+    """TRADE_UNVERIFIED with the broker retcode attached when known
+    (audit P2-5) so ``_finish_error`` can surface it in the
+    ``action.result`` error object instead of only in ``details``."""
+    return BridgeError(ErrorCode.TRADE_UNVERIFIED, message, retcode=retcode, details=details)
 
 
 def order_send_checked(ctx: BridgeContext, request: dict[str, Any], op: str) -> Any:
@@ -386,6 +389,7 @@ def market_order(
                 "retcode": None if raw is None else TRADE_RETCODE_CONNECTION,
                 "order_check": check,
             },
+            retcode=None if raw is None else TRADE_RETCODE_CONNECTION,
         )
     retcode = int(_f(raw, "retcode", 0))
     if retcode != TRADE_RETCODE_DONE:
@@ -597,6 +601,7 @@ def modify_position_sltp(
                     "attempts": attempt,
                     "order_check": last_check,
                 },
+                retcode=retcode,
             )
         if retcode == TRADE_RETCODE_NO_CHANGES:
             # Idempotent success (real-MT5 defect 1): the requested SL/TP
@@ -890,6 +895,7 @@ def close_position(
                     "attempts": attempt,
                     "order_check": last_check,
                 },
+                retcode=retcode,
             )
         if retcode in (TRADE_RETCODE_DONE, TRADE_RETCODE_DONE_PARTIAL):
             outcome = "done" if retcode == TRADE_RETCODE_DONE else "partial"
@@ -920,6 +926,7 @@ def close_position(
                             ErrorCode.TRADE_UNVERIFIED,
                             f"Close for #{ticket} reported DONE_PARTIAL but the position volume is unchanged "
                             f"({remaining}) — reconcile broker state before retrying.",
+                            retcode=retcode,
                             details={
                                 "ticket": ticket,
                                 "remaining_volume": remaining,
