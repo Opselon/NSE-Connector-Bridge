@@ -553,14 +553,21 @@ def parse_envelope(frame: Any) -> CommandEnvelope:
     # P3a wire compat (§14.2): the Platform emits the v2 names
     # `order_type` / `stop_limit`; the Bridge's native names are
     # `order_kind` / `stoplimit`. Accept both — Bridge name wins when
-    # both are present. A pending entry sent under the Platform names
-    # must never silently default to `market`.
+    # both are present. A missing kind is MALFORMED (audit P2-3):
+    # it is never defaulted to `market` — a pending entry whose kind
+    # was dropped in transit must fail loudly here, not execute as
+    # a market order. The Platform always sends `order_type`
+    # explicitly, so a kind-less open is a malformed frame, never a
+    # legitimate market open.
     order_kind_raw = operation.get("order_kind")
     if order_kind_raw in (None, ""):
         order_kind_raw = operation.get("order_type")
     order_kind = str(order_kind_raw).strip().lower() if order_kind_raw not in (None, "") else None
-    if order_kind == "market" or (operation.get("type") == "open_order" and order_kind is None):
-        order_kind = order_kind or "market"  # CONTRACTS §7 market default
+    if op_type == "open_order" and order_kind is None:
+        raise ValueError(
+            "command open_order operation is missing 'order_kind' (or 'order_type'); "
+            "an explicit order kind (market | limit | stop | stop_limit) is required"
+        )
     stoplimit_raw = operation.get("stoplimit")
     if stoplimit_raw is None:
         stoplimit_raw = operation.get("stop_limit")

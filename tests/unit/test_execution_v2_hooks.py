@@ -266,7 +266,7 @@ def ctx(tmp_path):
 
 
 NEGOTIATED = V2Negotiation(negotiated=True, schema_version="2")
-MARKET = V2OpenOrderRequest(symbol="EURUSD", side="buy", volume=0.1)
+MARKET = V2OpenOrderRequest(symbol="EURUSD", side="buy", volume=0.1, order_kind="market")
 
 
 # ----------------------------------------------------------------------
@@ -441,7 +441,7 @@ def _server_open_order_frame(*, protocol_version="2"):
         "command_id": "01900000-0000-7000-8000-000000000001",
         "account_id": "123456",
         "device_id": "dev-1",
-        "operation": {"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1},
+        "operation": {"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_kind": "market", "volume": 0.1},
         "issued_at": issued.isoformat().replace("+00:00", "Z"),
         "expires_at": (issued + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
         "idempotency_key": "01900000-0000-7000-8000-000000000001",
@@ -565,7 +565,7 @@ def _live_open_order_frame(*, protocol_version: str = "2") -> dict:
         "command_id": command_id,
         "account_id": "123456",
         "device_id": "dev-1",
-        "operation": {"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1},
+        "operation": {"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_kind": "market", "volume": 0.1},
         "issued_at": issued.isoformat().replace("+00:00", "Z"),
         "expires_at": (issued + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
         "idempotency_key": command_id,
@@ -694,9 +694,30 @@ def test_v2_from_operation_bridge_name_wins_over_platform_alias():
     assert req.stoplimit == pytest.approx(1.1040)
 
 
-def test_v2_from_operation_no_kind_defaults_market_only_when_no_order_type():
-    req = V2OpenOrderRequest.from_operation({"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1})
-    assert req.order_kind == "market"
+def test_v2_open_order_request_kind_is_required_kw_only():
+    """Audit P2-3 (a): ``order_kind`` has no default — a direct
+    construction without kind fails at runtime (``TypeError``) and
+    at type-check time (mypy: missing required keyword-only
+    argument), instead of silently becoming a market order."""
+    with pytest.raises(TypeError, match="order_kind"):
+        V2OpenOrderRequest(symbol="EURUSD", side="buy", volume=0.1)
+    # Positional kind is not accepted either — it is keyword-only.
+    with pytest.raises(TypeError):
+        V2OpenOrderRequest("EURUSD", "buy", 0.1, 0.0, 0.0, "market")
+
+
+def test_v2_from_operation_no_kind_fails_loudly():
+    """Audit P2-3 (b): a wire operation without ``order_kind`` /
+    ``order_type`` is rejected with a clear error — never defaulted
+    to market. The dropped-kind case is the dangerous one: a
+    pending entry (price present) whose kind was dropped in transit
+    must fail here, not execute as a market order."""
+    with pytest.raises(ValueError, match="missing 'order_kind'"):
+        V2OpenOrderRequest.from_operation({"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1})
+    with pytest.raises(ValueError, match="missing 'order_kind'"):
+        V2OpenOrderRequest.from_operation(
+            {"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1, "price": 1.1050}
+        )
 
 
 def test_v2_from_operation_unknown_kind_fails_loudly():
@@ -706,9 +727,11 @@ def test_v2_from_operation_unknown_kind_fails_loudly():
 
 def test_v2_from_operation_missing_required_fields_fail_loudly():
     with pytest.raises(ValueError, match="missing 'symbol'"):
-        V2OpenOrderRequest.from_operation({"type": "open_order", "side": "buy", "volume": 0.1})
+        V2OpenOrderRequest.from_operation({"type": "open_order", "side": "buy", "order_kind": "market", "volume": 0.1})
     with pytest.raises(ValueError, match="missing 'volume'"):
-        V2OpenOrderRequest.from_operation({"type": "open_order", "symbol": "EURUSD", "side": "buy"})
+        V2OpenOrderRequest.from_operation(
+            {"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_kind": "market"}
+        )
 
 
 def test_v2_from_operation_wrong_type_fails_loudly():
@@ -780,31 +803,42 @@ def test_v2_from_operation_negative_deviation_fails():
 def test_v2_from_operation_expiry_over_max_fails():
     with pytest.raises(ValueError, match="expiry_secs"):
         V2OpenOrderRequest.from_operation(
-            {"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1, "expiry_secs": 901}
+            {
+                "type": "open_order",
+                "symbol": "EURUSD",
+                "side": "buy",
+                "order_kind": "market",
+                "volume": 0.1,
+                "expiry_secs": 901,
+            }
         )
 
 
 def test_v2_from_operation_non_positive_sl_tp_fail():
     with pytest.raises(ValueError, match="sl must be > 0"):
         V2OpenOrderRequest.from_operation(
-            {"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1, "sl": 0.0}
+            {"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_kind": "market", "volume": 0.1, "sl": 0.0}
         )
     with pytest.raises(ValueError, match="tp must be > 0"):
         V2OpenOrderRequest.from_operation(
-            {"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1, "tp": -1.0}
+            {"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_kind": "market", "volume": 0.1, "tp": -1.0}
         )
 
 
 def test_v2_from_operation_unknown_side_fails():
     with pytest.raises(ValueError, match="unknown side"):
-        V2OpenOrderRequest.from_operation({"type": "open_order", "symbol": "EURUSD", "side": "sideways", "volume": 0.1})
+        V2OpenOrderRequest.from_operation(
+            {"type": "open_order", "symbol": "EURUSD", "side": "sideways", "order_kind": "market", "volume": 0.1}
+        )
 
 
 # ----------------------------------------------------------------------
 # passthrough: deviation / expiry / comment reach the MT5 request
 # ----------------------------------------------------------------------
 def test_v2_market_deviation_reaches_order_send(ctx):
-    req = V2OpenOrderRequest(symbol="EURUSD", side="buy", volume=0.1, deviation=5, comment="NSE_TEST")
+    req = V2OpenOrderRequest(
+        symbol="EURUSD", side="buy", volume=0.1, order_kind="market", deviation=5, comment="NSE_TEST"
+    )
     out = execute_v2_open_order(ctx, req, flag_enabled=True, negotiation=NEGOTIATED)
     assert out["status"] == "done"
     assert ctx.driver._mt5.sent_requests[0]["deviation"] == 5
@@ -825,7 +859,7 @@ def test_v2_pending_expiry_becomes_specified_time(ctx):
 def test_v2_market_preflight_rejects_volume_below_min(ctx):
     """MT5 pre-flight: a volume below the broker minimum fails
     before order_check / order_send are ever reached."""
-    req = V2OpenOrderRequest(symbol="EURUSD", side="buy", volume=0.001)
+    req = V2OpenOrderRequest(symbol="EURUSD", side="buy", volume=0.001, order_kind="market")
     with pytest.raises(BridgeError) as excinfo:
         execute_v2_open_order(ctx, req, flag_enabled=True, negotiation=NEGOTIATED)
     assert excinfo.value.code is ErrorCode.VALIDATION

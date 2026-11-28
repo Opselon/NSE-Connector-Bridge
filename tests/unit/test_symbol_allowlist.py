@@ -62,7 +62,7 @@ def _frame(symbol: str = "EURUSD", **overrides):
         "command_id": new_uuid7_str(),
         "account_id": ACCOUNT,
         "device_id": DEVICE,
-        "operation": {"type": "open_order", "symbol": symbol, "side": "buy", "volume": 0.1},
+        "operation": {"type": "open_order", "symbol": symbol, "side": "buy", "order_kind": "market", "volume": 0.1},
         "protocol_version": "2",
         "issued_at": issued.isoformat().replace("+00:00", "Z"),
         "expires_at": (issued + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),

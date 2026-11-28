@@ -109,7 +109,7 @@ def test_validation_order_wrong_account():
 @pytest.mark.unit
 def test_validation_order_allowlist_rejects_open_and_cancel():
     v = _validator()
-    assert v.validate(_frame(operation={"type": "open_order", "ticket": "1"})).rejection is (
+    assert v.validate(_frame(operation={"type": "open_order", "ticket": "1", "order_kind": "market"})).rejection is (
         RejectionReason.UNSUPPORTED_OPERATION
     )
     assert v.validate(_frame(operation={"type": "cancel_order", "ticket": "1"})).rejection is (
@@ -256,7 +256,9 @@ def test_executor_rejected_command_never_executes(monkeypatch):
         lambda ctx_, ticket, volume=None: calls.append(ticket) or {"status": "done"},
     )
     executor = CommandExecutor(ctx, _validator(), results_queue=None, clock=lambda: NOW)
-    execution, result = executor.execute(_frame(operation={"type": "open_order", "ticket": "1"}))
+    execution, result = executor.execute(
+        _frame(operation={"type": "open_order", "ticket": "1", "order_kind": "market"})
+    )
     assert execution.state is CommandState.FAILED
     assert result["status"] == "rejected"
     assert result["error"]["code"] == "UnsupportedOperation"
@@ -407,9 +409,24 @@ def test_parse_envelope_bridge_name_wins_over_platform_alias():
 
 
 @pytest.mark.unit
-def test_parse_envelope_open_order_without_kind_still_defaults_market():
-    env = parse_envelope(_open_frame())
-    assert env.order_kind == "market"
+def test_parse_envelope_open_order_without_kind_is_malformed():
+    """Audit P2-3 (b): an open_order frame without ``order_kind`` /
+    ``order_type`` is rejected with a clear error — never defaulted
+    to market. The dropped-kind case is the dangerous one: a pending
+    entry (price present) whose kind was dropped in transit must
+    fail here, not execute as a market order."""
+    no_kind = _frame(operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1})
+    with pytest.raises(ValueError, match="missing 'order_kind'"):
+        parse_envelope(no_kind)
+    dropped_pending_kind = _frame(
+        operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1, "price": 1.1050}
+    )
+    with pytest.raises(ValueError, match="missing 'order_kind'"):
+        parse_envelope(dropped_pending_kind)
+    # A non-open op carries no kind and still parses — kind is an
+    # open_order field only.
+    env = parse_envelope(_frame(operation={"type": "close_position", "ticket": "9000001"}))
+    assert env.order_kind is None
 
 
 # ----------------------------------------------------------------------
@@ -459,7 +476,7 @@ def test_parse_envelope_v2_defaults():
     env = parse_envelope(_frame(operation={"type": "close_position", "ticket": "9000001"}))
     assert env.protocol_version == "1"
     assert env.priority == 9
-    env2 = parse_envelope(_open_frame())
+    env2 = parse_envelope(_open_frame(order_kind="market"))
     assert env2.protocol_version == "1"
     assert env2.priority == 0
 
@@ -602,7 +619,7 @@ def test_open_order_rejected_when_flag_opted_out(monkeypatch):
     execution, result = executor.execute(
         _frame(
             protocol_version="2",
-            operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.01},
+            operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_kind": "market", "volume": 0.01},
         )
     )
     assert execution.state is CommandState.FAILED
@@ -623,7 +640,7 @@ def test_open_order_accepted_with_default_flag_and_v2_envelope(monkeypatch):
     outcome = validator.validate(
         _frame(
             protocol_version="2",
-            operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.01},
+            operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_kind": "market", "volume": 0.01},
         )
     )
     assert outcome.ok is True
@@ -651,6 +668,7 @@ def test_open_order_gate_open_market_dispatches(monkeypatch):
                 "type": "open_order",
                 "symbol": "EURUSD",
                 "side": "buy",
+                "order_kind": "market",
                 "volume": 0.01,
                 "sl": 1.08,
                 "tp": 1.10,
@@ -712,10 +730,20 @@ def test_open_order_gate_open_pending_dispatches(monkeypatch):
 def test_open_order_structural_requirements_enforced():
     # A market open parses structurally; a pending open carries price
     # (+ stoplimit for stop_limit). An open has no broker ticket yet.
-    env = parse_envelope(_frame(operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.01}))
+    env = parse_envelope(
+        _frame(
+            operation={
+                "type": "open_order",
+                "symbol": "EURUSD",
+                "side": "buy",
+                "order_kind": "market",
+                "volume": 0.01,
+            }
+        )
+    )
     assert env.symbol == "EURUSD"
     assert env.side == "buy"
-    assert env.order_kind == "market"  # CONTRACTS §7 default
+    assert env.order_kind == "market"  # explicit kind, no default
     assert env.ticket == ""  # an open has no broker ticket yet
     pending_env = parse_envelope(
         _frame(
@@ -743,12 +771,48 @@ def test_open_order_gate_open_but_malformed_open_is_validation_error(monkeypatch
     execution, result = executor.execute(
         _frame(
             protocol_version="2",
-            operation={"type": "open_order", "symbol": "EURUSD", "side": "sideways", "volume": 0.01},
+            operation={
+                "type": "open_order",
+                "symbol": "EURUSD",
+                "side": "sideways",
+                "order_kind": "market",
+                "volume": 0.01,
+            },
         )
     )
     assert execution.state is CommandState.FAILED
     assert result["status"] == "mcp_failed"
     assert result["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.unit
+def test_open_order_without_kind_is_rejected_before_any_execution(monkeypatch):
+    """Audit P2-3, executor level: a kind-less open_order frame —
+    here a pending-shaped one (price present, kind dropped) — is
+    rejected as Malformed at validation, before fencing, before the
+    v2 seam, before any MT5 call. It is never executed as market."""
+    ctx = _ctx()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "nse_bridge.engine.v2_open_order.market_order",
+        lambda ctx_, **kw: calls.append("market") or {"status": "done"},
+    )
+    monkeypatch.setattr(
+        "nse_bridge.engine.v2_open_order.trade_send_pending_order",
+        lambda ctx_, params: calls.append("pending") or {"status": "done"},
+    )
+    validator = _validator(open_order_authorized=True)
+    executor = CommandExecutor(ctx, validator, clock=lambda: NOW)
+    execution, result = executor.execute(
+        _frame(
+            protocol_version="2",
+            operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.01, "price": 1.1050},
+        )
+    )
+    assert execution.state is CommandState.FAILED
+    assert result["status"] == "rejected"
+    assert result["error"]["code"] == "Malformed"
+    assert calls == []  # nothing reached MT5
 
 
 @pytest.mark.unit
@@ -782,7 +846,7 @@ def test_open_order_uncertain_send_reconciles_via_fingerprint(monkeypatch):
     execution, result = executor.execute(
         _frame(
             protocol_version="2",
-            operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.01},
+            operation={"type": "open_order", "symbol": "EURUSD", "side": "buy", "order_kind": "market", "volume": 0.01},
         )
     )
     # W4: reconciliation proves the open landed → executed, never re-sent.
