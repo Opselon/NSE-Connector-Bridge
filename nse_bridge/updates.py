@@ -33,6 +33,21 @@ Ed25519 signature **before** any install. Rules, fail-closed:
 
 No downloaded byte is ever executed — including in tests, which use
 inert fixtures and never perform a real download.
+
+Rollback / recovery (P1-7, docs/ROLLBACK.md): before the target exe
+is replaced, the apply script copies the running exe aside next to
+it (``<target>.previous``) and records its version + SHA-256 in
+``rollback-state.json`` in the staging dir — exactly one previous
+generation is retained. The staged file's SHA-256 is re-verified
+before any replacement (a failed re-check leaves the target
+untouched: the running version IS the fallback). After the restart
+the script watches the new process for a grace window (default
+15 s); if it exits in that window the backup is restored over the
+target and the previous version is relaunched, recorded as
+``rolled_back`` in ``apply-result.json``. Fail-closed throughout:
+a missing or SHA-mismatched backup is never launched, and a fresh
+install (no previous version) has nothing to fall back to — both
+cases are recorded, not silent.
 """
 
 from __future__ import annotations
@@ -73,14 +88,36 @@ except ImportError:  # pragma: no cover — cryptography is a pinned dependency
 
 __all__ = [
     "APPLY_SCRIPT_TEMPLATE",
+    "ROLLBACK_BACKUP_SUFFIX",
+    "ROLLBACK_OBSERVE_SECONDS",
+    "ROLLBACK_STATE_FILENAME",
+    "START_GRACE_SECONDS",
     "UpdateError",
     "Updater",
     "load_update_public_key",
+    "read_rollback_state",
+    "rollback_backup_path",
     "verify_artifact",
 ]
 
 #: Hard cap for a download whose metadata carries no size_bytes.
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
+
+#: Rollback (P1-7): the previous-version manifest lives in the
+#: staging dir under this name; the backup exe itself lives next to
+#: the installed target with ROLLBACK_BACKUP_SUFFIX appended.
+ROLLBACK_STATE_FILENAME = "rollback-state.json"
+ROLLBACK_BACKUP_SUFFIX = ".previous"
+
+#: Start check: seconds the relaunched process must stay alive
+#: before the update counts as installed. A healthy bridge never
+#: exits on its own in this window; a crash-on-start (missing DLL,
+#: broken bundle) exits in under a second.
+START_GRACE_SECONDS = 15
+
+#: Observation window for a relaunched previous version after a
+#: rollback, before the result records whether it stayed up.
+ROLLBACK_OBSERVE_SECONDS = 5
 
 #: Structured error codes surfaced to the GUI / status endpoint.
 ERR_NO_PUBLIC_KEY = "NO_PUBLIC_KEY"
@@ -137,6 +174,63 @@ def _is_newer(candidate: str | None, installed: str) -> bool:
 
 def _sanitize_version(version: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", version) or "unknown"
+
+
+def _sha256_file(path: Path) -> str:
+    """SHA-256 of a file on disk (chunked — the file is exe-sized)."""
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def rollback_backup_path(target: str | Path) -> Path:
+    """Where the previous version is retained for an install target."""
+    return Path(str(target) + ROLLBACK_BACKUP_SUFFIX)
+
+
+def read_rollback_state(staging_dir: Path | None) -> dict[str, Any] | None:
+    """The retained previous version, verified — or None.
+
+    Reads ``rollback-state.json`` from the staging dir and only
+    trusts it when the recorded backup file exists AND its SHA-256
+    matches the recorded ``previous_sha256``. Anything else (no
+    state file, malformed JSON, missing fields, missing backup,
+    hash mismatch — including the fresh-install state, which
+    records ``previous_version: null``) returns None: no verifiable
+    previous version exists, so no fallback launch may be
+    attempted. Fail-closed, never silent about it — the caller
+    reports ``rollback_available: false``.
+    """
+    if staging_dir is None:
+        return None
+    try:
+        raw = json.loads((Path(staging_dir) / ROLLBACK_STATE_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    previous_version = raw.get("previous_version")
+    previous_sha256 = raw.get("previous_sha256")
+    previous_path = raw.get("previous_path")
+    if not isinstance(previous_version, str) or not previous_version:
+        return None
+    if not isinstance(previous_sha256, str) or not previous_sha256:
+        return None
+    if not isinstance(previous_path, str) or not previous_path:
+        return None
+    backup = Path(previous_path)
+    if not backup.is_file():
+        return None
+    try:
+        actual = _sha256_file(backup)
+    except OSError:
+        return None
+    if actual.lower() != previous_sha256.strip().lower():
+        logger.warning("[UPDATER] rollback backup {} hash mismatch — refusing to trust it", backup)
+        return None
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +424,126 @@ def _replace_file(src, dst):
     os.remove(src)
 
 
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _make_executable(path):
+    """POSIX: a replaced/restored target must stay executable.
+
+    The staged file is written 0644, so without this a Linux target
+    would fail to launch with PermissionError and trigger a needless
+    rollback (the same applies to a restored backup, whose copy
+    does not preserve the mode). Best-effort: a failure is left for
+    the start check to catch, never raised here. No-op on Windows.
+    """
+    if sys.platform == "win32":
+        return False
+    try:
+        mode = os.stat(path).st_mode
+        os.chmod(path, mode | 0o111)
+        return True
+    except OSError:
+        return False
+
+
+def _write_rollback_state(staging_dir, state):
+    out = os.path.join(staging_dir, "rollback-state.json")
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=2)
+
+
+def _backup_previous(target, staging_dir, previous_version, new_version, new_sha256):
+    """Retain the running exe + its manifest before replacement (P1-7).
+
+    Copies the current target to ``<target>.previous`` and records
+    its version + SHA-256 in rollback-state.json in the staging
+    dir. Returns the state dict. A fresh install has no target yet:
+    available False, previous_version None -- the install proceeds
+    without a backup. Any copy failure raises OSError (after
+    retries on transient locks): no backup, no switch -- the caller
+    refuses the install.
+    """
+    backup_path = target + ".previous"
+    state = {
+        "previous_version": previous_version or None,
+        "previous_sha256": None,
+        "previous_path": backup_path,
+        "target": target,
+        "new_version": new_version or None,
+        "new_sha256": new_sha256,
+        "backed_up_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "available": False,
+    }
+    if not os.path.isfile(target):
+        state["previous_version"] = None
+        _write_rollback_state(staging_dir, state)
+        return state
+    state["previous_sha256"] = _sha256_file(target)
+    for _ in range(5):
+        try:
+            shutil.copy2(target, backup_path)
+            break
+        except PermissionError:
+            time.sleep(0.2)
+    else:
+        raise OSError("could not back up previous version (locked): %s" % target)
+    if _sha256_file(backup_path) != state["previous_sha256"]:
+        raise OSError("previous-version backup hash mismatch: %s" % backup_path)
+    state["available"] = True
+    _write_rollback_state(staging_dir, state)
+    return state
+
+
+def _restore_previous(state):
+    """Copy the retained previous exe back over the target.
+
+    Fail-closed: no state, no backup file, or a backup whose SHA-256
+    does not match the recorded manifest returns False and touches
+    nothing -- unverified bytes are never restored or launched. The
+    restored target is re-hashed before reporting success. Never
+    raises (it runs inside failure handling); the backup file itself
+    is preserved, so the previous version stays recoverable.
+    """
+    try:
+        if not state or not state.get("available"):
+            return False
+        backup_path = state.get("previous_path")
+        target = state.get("target")
+        expected = state.get("previous_sha256")
+        if not backup_path or not target or not expected:
+            return False
+        if not os.path.isfile(backup_path):
+            return False
+        if _sha256_file(backup_path).lower() != str(expected).lower():
+            return False
+        shutil.copyfile(backup_path, target)
+        return _sha256_file(target).lower() == str(expected).lower()
+    except OSError:
+        return False
+
+
+def _launch_detached(argv):
+    kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "start_new_session": True}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    return subprocess.Popen(argv, **kwargs)
+
+
+def _wait_alive(proc, seconds):
+    """True when the process is still running after `seconds`."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return False
+        time.sleep(0.25)
+    return proc.poll() is None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--staged", required=True)
@@ -337,8 +551,13 @@ def main():
     ap.add_argument("--parent-pid", type=int, required=True)
     ap.add_argument("--sha256", required=True)
     ap.add_argument("--restart-cmd", default="")
+    ap.add_argument("--previous-version", default="")
+    ap.add_argument("--new-version", default="")
+    ap.add_argument("--start-grace-seconds", type=int, default=15)
+    ap.add_argument("--rollback-observe-seconds", type=int, default=5)
     args = ap.parse_args()
-    result = {"ok": False, "error": None}
+    result = {"ok": False, "error": None, "rolled_back": False, "rollback_available": False}
+    staging_dir = os.path.dirname(os.path.abspath(args.staged))
     deadline = time.time() + 120
     while not _pid_gone(args.parent_pid) and time.time() < deadline:
         time.sleep(0.5)
@@ -351,19 +570,61 @@ def main():
             if digest.lower() != args.sha256.lower():
                 result["error"] = "staged file SHA-256 mismatch -- update NOT applied"
             else:
-                _replace_file(args.staged, args.target)
+                # Retention (P1-7): back up the running exe BEFORE
+                # replacing it. A backup that cannot be taken refuses
+                # the install -- no backup, no switch.
+                rollback = _backup_previous(
+                    args.target, staging_dir, args.previous_version,
+                    args.new_version, digest)
+                result["previous_version"] = rollback.get("previous_version")
+                result["rollback_available"] = rollback.get("available", False)
+                try:
+                    _replace_file(args.staged, args.target)
+                except OSError:
+                    # Never leave a half-written target: restore the backup.
+                    _restore_previous(rollback)
+                    raise
+                result["executable_bit_set"] = _make_executable(args.target)
                 result["ok"] = True
                 result["target"] = args.target
                 if args.restart_cmd:
-                    kwargs = {"start_new_session": True}
-                    if sys.platform == "win32":
-                        kwargs["creationflags"] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-                    subprocess.Popen([args.restart_cmd], stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL, **kwargs)
+                    proc = _launch_detached([args.restart_cmd])
                     result["restarted"] = True
+                    result["restarted_pid"] = proc.pid
+                    if args.start_grace_seconds > 0:
+                        if _wait_alive(proc, args.start_grace_seconds):
+                            result["start_check"] = "passed"
+                        else:
+                            # Failed start: the new version exited in
+                            # the grace window. Restore the previous
+                            # version and relaunch it.
+                            result["ok"] = False
+                            result["error"] = (
+                                "new version exited within %ss of start -- "
+                                "rolled back to previous version"
+                                % args.start_grace_seconds)
+                            result["rolled_back"] = True
+                            restored = _restore_previous(rollback)
+                            result["rollback_restored"] = restored
+                            if restored:
+                                _make_executable(args.target)
+                                rproc = _launch_detached([args.restart_cmd])
+                                result["rollback_pid"] = rproc.pid
+                                if args.rollback_observe_seconds > 0:
+                                    alive = _wait_alive(rproc, args.rollback_observe_seconds)
+                                else:
+                                    alive = None
+                                result["rollback_process_alive"] = alive
+                                result["rollback_launch_failed"] = alive is False
+                            else:
+                                result["rollback_launch_failed"] = True
+                    else:
+                        result["start_check"] = "skipped_no_grace_window"
+                else:
+                    result["start_check"] = "skipped_no_restart"
         except OSError as exc:
             result["error"] = f"install failed: {exc}"
-    out = os.path.join(os.path.dirname(os.path.abspath(args.staged)), "apply-result.json")
+    out = os.path.join(staging_dir, "apply-result.json")
     try:
         with open(out, "w", encoding="utf-8") as fh:
             json.dump(result, fh)
@@ -532,6 +793,7 @@ class Updater:
                 staged = persisted
                 if state in ("idle", "up_to_date", "update_available"):
                     state = "staged"
+        rollback = read_rollback_state(self.staging_dir)
         return {
             "installed_version": BRIDGE_VERSION,
             "state": state,
@@ -544,6 +806,13 @@ class Updater:
             "restart_required": bool(staged.path),
             "install_target": self.install_target,
             "update_public_key_configured": self.update_public_key_configured,
+            # Rollback (P1-7): the retained previous version, only
+            # reported when its backup exists and matches its
+            # manifest — a tampered or missing backup reports false
+            # (fail-closed: it is never launched).
+            "rollback_available": rollback is not None,
+            "previous_version": rollback["previous_version"] if rollback else None,
+            "previous_sha256": rollback["previous_sha256"] if rollback else None,
             "error": self._error.to_dict() if self._error else None,
             "detail": self._detail,
         }
@@ -747,6 +1016,10 @@ class Updater:
                     "sha256": rel.sha256,
                     "size_bytes": len(data),
                     "signature_verified": True,
+                    # The version being replaced — the apply script
+                    # records it as the previous version when it
+                    # backs the running exe up (P1-7 rollback).
+                    "installed_version": BRIDGE_VERSION,
                     "staged_at": datetime.now(UTC).isoformat(),
                 },
                 indent=2,
@@ -838,6 +1111,18 @@ class Updater:
             str(os.getpid()),
             "--sha256",
             staged_state.sha256 or "",
+            # Rollback (P1-7): the apply script backs the running
+            # exe up as the previous version before replacing it,
+            # then watches the new process and falls back on a
+            # failed start.
+            "--previous-version",
+            BRIDGE_VERSION,
+            "--new-version",
+            staged_state.version or "",
+            "--start-grace-seconds",
+            str(START_GRACE_SECONDS),
+            "--rollback-observe-seconds",
+            str(ROLLBACK_OBSERVE_SECONDS),
             "--restart-cmd",
             target,
         ]

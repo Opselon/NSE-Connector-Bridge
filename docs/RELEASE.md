@@ -127,6 +127,7 @@ aspirational — it states what was actually executed.
 | Enrolment state machine | **PROVEN** | `tests/unit/test_enrolment.py` + `tests/integration/test_enrolment.py` (mock server) |
 | Telemetry 9-field shape | **PROVEN** | `tests/unit/test_telemetry.py` (`test_event_has_exactly_the_nine_contract_fields`) |
 | Updater fail-closed | **PROVEN** | `tests/unit/test_updater.py` (no key / null signature / bad SHA / bad signature / min-version — all refuse, nothing staged) |
+| Rollback / recovery (P1-7) | **PROVEN (mock)** | Previous-version retention + fallback launch (`nse_bridge/updates.py`, `docs/ROLLBACK.md`); `tests/unit/test_rollback.py` proves fallback after a failed verify and after a failed start, and fail-closed behaviour for a tampered/missing backup. Live Windows proof (real exe swap + start) is owed — the P1-9 Windows run. |
 | Self-healing: all 15 scenarios | **PROVEN (unit)** | `tests/unit/test_self_healing.py` — one test per scenario minimum; registration is the `Scenario` enum + `_handle_*` dispatch (see docs/ARCHITECTURE.md §6) |
 | Lint / format / types / security (spec §20) | **PROVEN** | `ruff check .` + `ruff format --check .` + `mypy nse_bridge` + `bandit` + `pip-audit` → all exit 0 (A1; the 15 pre-existing ruff findings are fixed, mypy 87→0 with real fixes, bandit skips 4 reviewed Low rules only) |
 | `--diagnostic` flag | **PROVEN (parses)** | `python -m nse_bridge --help` shows it; `tests/unit/test_diagnostic_flag.py` |
@@ -225,6 +226,17 @@ Run after committing, from the committed tree:
 9. **Backtest intentionally excluded** (clarification #2). There is
    no backtest subsystem, screen, or status — by design, not by
    omission. Do not add one in this phase.
+10. **Rollback / recovery strategy (P1-7) — IMPLEMENTED.**
+    `docs/ROLLBACK.md` states the strategy; the updater implements
+    it: the apply script backs the running exe up
+    (`<target>.previous` + `rollback-state.json` manifest) before
+    replacing it, re-verifies the staged file's SHA-256 before any
+    switch, watches the relaunched process for a 15 s grace window,
+    and restores + relaunches the previous version if the new one
+    exits in that window. Fail-closed: a missing/tampered backup is
+    never launched; a fresh install has no previous version. Proven
+    by `tests/unit/test_rollback.py` (mock only — fake shell-script
+    "exes"); live Windows proof is owed (P1-9).
 
 ## 6. Acceptance
 
