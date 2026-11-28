@@ -47,21 +47,24 @@ contract-defined but NOT sendable until its capability gate passes —
 (b) tests, (c) live proof at market open that ``trade_modify_sl_tp``
 accepts a pending-order ticket, (d) a published minimum
 ``connector_version`` recorded in the contract. This Bridge has (a),
-(b) and (c) (2026-11-19, live on the MetaQuotes-Demo terminal,
-E-P2B-6 in docs/upgrade/PHASE-2B-VERIFICATION.md); (d) is the
-Platform owner's published minimum ``"1.4.1"`` (Platform
-``commands.rs::MODIFY_PENDING_MIN_VERSION``). The gate opens only
-when BOTH hold: the operator explicitly opts in
-(``BridgeSettings.enable_modify_pending``, env
+(b), (c) and (d): (a)–(c) (2026-11-19, live on the MetaQuotes-Demo
+terminal, E-P2B-6 in docs/upgrade/PHASE-2B-VERIFICATION.md); (d) the
+Platform published minimum ``"1.4.1"`` in code (Platform
+``commands.rs::MODIFY_PENDING_MIN_VERSION``, ``commands.rs:86``,
+PR #228, deployed 2026-11-28, prod sha-3e1be367). ``"1.4.1"`` below
+is this Bridge's own version floor — the first release carrying this
+gate mechanism — as a local hardcoded constant, not a value read from
+any Platform frame. The gate opens only when BOTH hold: the operator
+explicitly opts in (``BridgeSettings.enable_modify_pending``, env
 ``NSE_BRIDGE_ENABLE_MODIFY_PENDING=1`` — default OFF, fail closed)
 AND this Bridge's own version is >= ``MODIFY_PENDING_MIN_VERSION``
 (see :func:`modify_pending_gate_open`, wired through
 ``realtime/channel.py`` into ``CommandValidator.modify_pending_proven``).
 There is no wire channel for the minimum version — the Platform never
-sends one; the Bridge sends its version at validate-key /
-register-device and the Platform enforces its own minimum before
-sending. The server MUST NOT send it to a Bridge below the minimum
-either (its own capability rule, §17.4).
+sends one in a command frame; the Bridge sends its version at
+validate-key / register-device and the Platform enforces its own
+minimum before sending. The server MUST NOT send it to a Bridge below
+the minimum either (its own capability rule, §17.4).
 
 Local validation order (§6.3) — EXACT, the server assumes this order
 when interpreting rejections (malformed → expired → wrong-device →
@@ -165,8 +168,12 @@ P3 v2 protocol (Bridge v1.4.0 B3 — Platform MASTER §14,
   ``stop_limit`` / ``deviation`` / ``expiry_secs`` + provenance
   refs), ``cancel_order``, ``partial_close`` — plus the v1 ops
   unchanged. ``trailing_stop`` / ``break_even`` stay refused: their
-  MT5 primitives live in the (dormant) policy service, not on this
+  MT5 primitives live in the policy service, not on this
   path — a v2 op with no verified primitive is never guessed.
+  (The service itself is constructed and its 2 s poll loop runs —
+  `realtime/channel.py`; only the envelope supply is dormant: no
+  `policy.envelope` frame has arrived, so no trailing/breakeven
+  move can execute.)
 - ``open_order`` additionally requires BOTH v2 gates: the flag
   (``enable_v2_open_order``, default ON — opt-out via
   ``NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0``) AND a negotiated v2 envelope.
@@ -273,9 +280,12 @@ SERVER_ALLOWLIST = frozenset({"close_position", "modify_sl_tp", "modify_pending"
 #: §14.1 — the v2 server allowlist: every v1 op plus the new typed
 #: ops this Bridge can execute against verified primitives.
 #: ``trailing_stop`` / ``break_even`` are deliberately NOT here:
-#: their execution lives in the (dormant) policy service and has no
+#: their execution lives in the policy service and has no
 #: verified command-path primitive in this slice — a v2 op with no
-#: primitive is refused, never guessed.
+#: primitive is refused, never guessed. (The service is constructed
+#: and polling — `realtime/channel.py` — but the envelope supply is
+#: dormant, so no move executes until the Platform sends a
+#: ``policy.envelope``.)
 SERVER_ALLOWLIST_V2 = frozenset(
     {"close_position", "partial_close", "modify_sl_tp", "modify_pending", "open_order", "cancel_order"}
 )
@@ -305,9 +315,12 @@ def default_priority(kind: str) -> int:
 #: pending-order ticket: DONE 2026-11-19 on the MetaQuotes-Demo
 #: terminal (retcode 10009, SL landed on the live order, order_check
 #: passed — E-P2B-6 in docs/upgrade/PHASE-2B-VERIFICATION.md); (d) the
-#: published minimum connector_version is "1.4.1" (Platform
-#: ``commands.rs::MODIFY_PENDING_MIN_VERSION``) — the first release
-#: carrying this gate mechanism. The gate opens only via
+#: published minimum connector_version "1.4.1" — DONE (Platform
+#: ``commands.rs::MODIFY_PENDING_MIN_VERSION``, ``commands.rs:86``,
+#: PR #228, deployed 2026-11-28, prod sha-3e1be367). ``"1.4.1"`` below
+#: is this Bridge's own version floor — the first release carrying
+#: this gate mechanism — as a local hardcoded constant, not a value
+#: read from any Platform frame. The gate opens only via
 #: :func:`modify_pending_gate_open` (explicit operator opt-in AND a
 #: qualifying local version); it stays CLOSED by default.
 MODIFY_PENDING_MIN_VERSION = "1.4.1"
@@ -317,7 +330,8 @@ MODIFY_PENDING_MIN_VERSION = "1.4.1"
 MODIFY_PENDING_GATE_NOTE = (
     "modify_pending is capability-gated (§17.4): conditions (a) code, "
     "(b) tests, (c) live proof (2026-11-19, E-P2B-6) and (d) the "
-    "published minimum connector_version 1.4.1 are done; the gate opens "
+    "published minimum connector_version 1.4.1 (Platform #228, "
+    "commands.rs:86, deployed) are done. The gate opens "
     "only when the operator opts in (NSE_BRIDGE_ENABLE_MODIFY_PENDING=1) "
     "on a Bridge >= 1.4.1 — otherwise modify_pending is rejected "
     "as UnsupportedOperation."
@@ -365,8 +379,8 @@ def modify_pending_gate_open(*, enabled: bool, bridge_version: str) -> bool:
     and a 1.4.1 build without the flag still refuses. There is no wire
     channel for the minimum version (the Platform never sends one),
     so the local version floor is the Bridge-side half of the
-    published minimum; the Platform enforces the same floor
-    server-side before sending.
+    published minimum (Platform ``commands.rs:86``, PR #228); the
+    Platform enforces the same floor server-side before sending.
     """
     return bool(enabled) and _version_at_least(bridge_version, MODIFY_PENDING_MIN_VERSION)
 
