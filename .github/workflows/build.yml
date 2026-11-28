@@ -744,15 +744,21 @@ jobs:
         # accepts. The manifest is then rewritten with the signatures
         # attached, and every signature is verified against the
         # bundled public key (nse_bridge/update_public_key.b64)
-        # before attach. If the secret is not set yet the step is
-        # skipped and the release ships UNSIGNED (the v1.4.0
-        # precedent) — the next step says so loudly instead of
-        # failing the release over a pending operator step.
-        if: secrets.NSE_BRIDGE_RELEASE_SIGNING_KEY != ''
+        # before attach. If the secret is not set yet the step warns
+        # loudly and exits 0 — the release ships UNSIGNED (the
+        # v1.4.0 precedent) instead of failing over a pending
+        # operator step. (The secret check MUST live in the shell:
+        # the `secrets` context is not allowed in a step `if:`, and
+        # GitHub rejects the whole workflow file when it appears
+        # there — actionlint [expression].)
         env:
           NSE_BRIDGE_RELEASE_SIGNING_KEY: ${{ secrets.NSE_BRIDGE_RELEASE_SIGNING_KEY }}
         shell: pwsh
         run: |
+          if (-not $env:NSE_BRIDGE_RELEASE_SIGNING_KEY) {
+            Write-Host "::warning::NSE_BRIDGE_RELEASE_SIGNING_KEY is not set — this release ships UNSIGNED (v1.4.0 precedent). Set the GitHub Actions secret to sign future releases; see docs/RELEASE.md §5."
+            exit 0
+          }
           # The sign script needs only `cryptography`, pinned to
           # requirements.txt (the release job installs nothing else).
           python -m pip install -q "cryptography==50.0.2"
@@ -798,12 +804,6 @@ jobs:
           # verify_artifact uses) before anything is attached.
           python scripts/sign_release_artifact.py --verify --public-key-file nse_bridge/update_public_key.b64 --manifest dist/release-manifest.json @artifacts
           if ($LASTEXITCODE -ne 0) { throw "signature verification failed" }
-
-      - name: Signing skipped — no release-signing secret set
-        if: secrets.NSE_BRIDGE_RELEASE_SIGNING_KEY == ''
-        shell: pwsh
-        run: |
-          Write-Host "::warning::NSE_BRIDGE_RELEASE_SIGNING_KEY is not set — this release ships UNSIGNED (v1.4.0 precedent). Set the GitHub Actions secret to sign future releases; see docs/RELEASE.md §5."
 
       - name: Attach to release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
