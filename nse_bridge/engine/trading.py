@@ -60,8 +60,16 @@ def mt5_trade_constants(ctx: BridgeContext) -> dict[str, int]:
     canonical against the ACTUAL loaded package (never a hardcoded
     guess) while leaving it buildable outside the worker so the exact
     request can go through :func:`order_check_send` first (W2 step 4).
+
+    P1-4: the constants are per-package, not per-call — the first
+    fetch is cached on the context and reused until the driver is
+    replaced or the terminal reconnects (``connection_epoch`` bump);
+    a copy is returned so callers can never mutate the cached dict.
     """
     ctx.driver.ensure_connected()
+    cached = ctx.ipc_cache.get_constants(ctx.driver)
+    if cached is not None:
+        return cached
 
     def job(mt5: Any):
         return {
@@ -75,7 +83,9 @@ def mt5_trade_constants(ctx: BridgeContext) -> dict[str, int]:
             "order_time_specified": int(mt5.ORDER_TIME_SPECIFIED),
         }
 
-    return ctx.driver.run(job, op="mt5_constants")
+    consts = ctx.driver.run(job, op="mt5_constants")
+    ctx.ipc_cache.set_constants(ctx.driver, consts)
+    return dict(consts)
 
 
 def _check_result_dict(raw: Any) -> Any:
@@ -443,6 +453,11 @@ def modify_position_sltp(
     them could never succeed. Every attempt re-fetches the live
     position and re-runs ``order_check`` (fresh state per attempt),
     and the payload reports ``attempts``.
+
+    P1-4: the filling mode + trade constants are cached per symbol on
+    the context via the shared helpers (TTL + reconnect invalidation)
+    — no code change is needed here, and the per-attempt position
+    fetch + ``order_check`` above are unchanged.
     """
     ctx.driver.ensure_connected()
     policy = retry_policy or ExecutionRetryPolicy()
@@ -673,6 +688,13 @@ def close_position(
     is already gone, the close landed despite the retcode and the call
     returns done (recovered) instead of closing twice.
 
+    P1-4: ``mt5_trade_constants`` + the filling mode are cached per
+    symbol on the context (TTL + reconnect invalidation), and the
+    retryable-retcode guard's position fetch is carried into the next
+    attempt instead of re-fetched. ``order_check`` + reconciliation
+    still run fresh on every attempt — the caching is latency only,
+    never a behaviour change.
+
     Idempotency (S4): retcode 10036 POSITION_CLOSED means the position
     is already closed. The ticket is verified gone in the live book
     and the call returns done with ``already_closed: True`` (this call
@@ -685,8 +707,21 @@ def close_position(
     last: Any = None
     last_check: dict[str, Any] | None = None
     last_retcode: int | None = None
+    # P1-4: the retryable-retcode guard below already fetched the live
+    # position to prove the close did not land — carry that row into
+    # the next attempt instead of fetching it twice. The carried row
+    # is one backoff old (0.1–0.4 s); type/symbol/magic are immutable
+    # for a ticket and only volume can shrink (a partial close by
+    # another actor) — a stale-high volume can only make the broker
+    # reject (INVALID_VOLUME), never over-close, and order_check still
+    # runs fresh on the exact request every attempt.
+    carried_pos: Any = None
     for attempt in range(1, policy.max_attempts + 1):
-        pos_raw = fetch_position(ctx, ticket)
+        if carried_pos is not None:
+            pos_raw = carried_pos
+            carried_pos = None
+        else:
+            pos_raw = fetch_position(ctx, ticket)
         if not _position_owns(ctx, pos_raw):
             raise BridgeError(
                 ErrorCode.TRADE_REJECTED,
@@ -862,7 +897,7 @@ def close_position(
             # ambiguous retcode? If the ticket is gone, the close
             # landed — report it recovered, never send again.
             try:
-                fetch_position(ctx, ticket)
+                guard_pos = fetch_position(ctx, ticket)
             except BridgeError as exc:
                 if exc.code is ErrorCode.TICKET_NOT_FOUND:
                     logger.info(
@@ -889,6 +924,10 @@ def close_position(
                         "order_check": last_check,
                     }
                 raise
+            # P1-4: the position is still open and this guard fetch is
+            # the live row the next attempt needs — carry it forward
+            # instead of re-fetching it at the top of the loop.
+            carried_pos = guard_pos
             logger.warning(
                 "[CLOSE] ticket={} retcode={} ({}) — retryable, backing off before attempt {}/{}",
                 ticket,
