@@ -44,6 +44,108 @@ class LogStore:
         return items[-limit:]
 
 
+#: TTL for cached per-symbol filling modes (P1-4, close-path IPC
+#: caching). A broker's filling mode changes only when its symbol
+#: spec changes; 60 s bounds the staleness while collapsing the
+#: ``symbol_info`` hop out of every close/modify after the first.
+#: The pre-send ``order_check`` still runs fresh on the exact request
+#: every time, so a stale mode can only cost a rejected attempt, never
+#: a wrong fill — and a terminal reconnect invalidates immediately
+#: (see :class:`TerminalValueCache`).
+FILLING_MODE_CACHE_TTL_S = 60.0
+
+
+class TerminalValueCache:
+    """Per-context cache for terminal values stable across calls (P1-4).
+
+    The close path re-fetched two such values on EVERY attempt:
+    the MT5 action/type constants (identical for the loaded package)
+    and the per-symbol filling mode (a broker symbol-spec bitmask).
+    Both are cached here, on the :class:`BridgeContext`, so every
+    caller of :func:`mt5_trade_constants` /
+    :func:`resolve_filling_mode` shares them with no signature change.
+
+    Invalidation (audit requirement):
+
+    * terminal reconnect — the entry records the driver object and its
+      ``connection_epoch`` (``Mt5Driver.connection_epoch``, bumped on
+      every successful connect); a different driver or a newer epoch
+      misses and re-fetches. Drivers without the attribute (unit-test
+      fakes) report epoch 0 and never bump, so the cache simply lives
+      as long as the context — tests build a fresh context per case.
+    * symbol-spec change — filling modes expire after
+      ``FILLING_MODE_CACHE_TTL_S``; constants have no TTL because the
+      loaded package's constants cannot change without a reconnect.
+    * explicit — :meth:`invalidate` drops everything; call it from any
+      future broker-change hook (the B3 ``broker_connection_change``
+      self-healing path has no live ``on_refresh_symbols`` wiring today,
+      so the TTL is the operative invalidation for spec changes).
+
+    Fallback defaults are NEVER cached: a ``symbol_info`` returning
+    ``None`` (unknown symbol) or an unparseable bitmask resolves to a
+    default that must be re-derived on the next call, not frozen in.
+    Thread-safe: closes/modifies can arrive from the WS and REST paths
+    concurrently, and the serialized worker is the only other
+    synchronization point.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._driver: Any = None
+        self._epoch: int = 0
+        self._constants: dict[str, int] | None = None
+        self._filling: dict[str, tuple[int, float]] = {}
+
+    @staticmethod
+    def _epoch_for(driver: Any) -> int:
+        return int(getattr(driver, "connection_epoch", 0) or 0)
+
+    def _epoch_matches(self, driver: Any) -> bool:
+        return self._driver is driver and self._epoch == self._epoch_for(driver)
+
+    def get_constants(self, driver: Any) -> dict[str, int] | None:
+        """Cached trade constants, or None on a miss (copy — callers
+        must never mutate the cached dict)."""
+        with self._lock:
+            if self._constants is None or not self._epoch_matches(driver):
+                return None
+            return dict(self._constants)
+
+    def set_constants(self, driver: Any, consts: dict[str, int]) -> None:
+        with self._lock:
+            self._driver = driver
+            self._epoch = self._epoch_for(driver)
+            self._constants = dict(consts)
+
+    def get_filling(self, driver: Any, symbol: str) -> int | None:
+        """Cached filling mode for ``symbol``, or None on a miss/expiry."""
+        with self._lock:
+            if not self._epoch_matches(driver):
+                return None
+            entry = self._filling.get(symbol)
+            if entry is None:
+                return None
+            mode, fetched_at = entry
+            if time.monotonic() - fetched_at >= FILLING_MODE_CACHE_TTL_S:
+                del self._filling[symbol]
+                return None
+            return mode
+
+    def set_filling(self, driver: Any, symbol: str, mode: int) -> None:
+        with self._lock:
+            self._driver = driver
+            self._epoch = self._epoch_for(driver)
+            self._filling[symbol] = (mode, time.monotonic())
+
+    def invalidate(self) -> None:
+        """Drop every cached value (reconnect / broker-change hook)."""
+        with self._lock:
+            self._driver = None
+            self._epoch = 0
+            self._constants = None
+            self._filling.clear()
+
+
 @dataclass
 class TradeExecMetrics:
     """Order-dispatch telemetry (get_trade_execution_metrics)."""
@@ -178,6 +280,10 @@ class BridgeContext:
     #: first canonical ``BASE/QUOTE`` order symbol — never built for
     #: exact broker names, so existing callers pay nothing for it.
     symbol_resolver: Any = None  # SymbolResolver, built by get_symbol_resolver
+    #: Close-path IPC cache (P1-4): trade constants + per-symbol
+    #: filling modes, shared by every engine caller on this context.
+    #: See :class:`TerminalValueCache` for TTL / reconnect invalidation.
+    ipc_cache: TerminalValueCache = field(default_factory=TerminalValueCache)
     # Last validate-key snapshot (CONTRACT v1 §3.1), stored by the GUI
     # refresh action (POST /api/v1/account/validate-key) from the Phase 2
     # REST client. Server-resolved only (user_id, subscription,
@@ -363,10 +469,21 @@ def resolve_filling_mode(ctx: BridgeContext, symbol: str) -> int:
 
     filling_mode flags: 1=FOK, 2=IOC; fallback RETURN.
     Returns ORDER_FILLING_* constant used by order_send requests.
+
+    P1-4: the bitmask comes from the broker symbol spec, which does
+    not change between closes — the resolved mode is cached per symbol
+    on the context (TTL :data:`FILLING_MODE_CACHE_TTL_S`, invalidated
+    on terminal reconnect). The fallback defaults (unknown symbol /
+    unparseable bitmask) are never cached. ``order_check`` still runs
+    fresh on the exact request every time, so a stale cached mode can
+    only cost a rejected attempt, never a wrong fill.
     """
     from ..mt5.types import f as _f
 
     ctx.driver.ensure_connected()
+    cached = ctx.ipc_cache.get_filling(ctx.driver, symbol)
+    if cached is not None:
+        return cached
 
     def job(mt5: Any):
         return mt5.symbol_info(symbol)
@@ -378,7 +495,10 @@ def resolve_filling_mode(ctx: BridgeContext, symbol: str) -> int:
     if modes is None:
         return 1  # ORDER_FILLING_IOC default on garbage
     if modes & 2:
-        return 1  # ORDER_FILLING_IOC
-    if modes & 1:
-        return 0  # ORDER_FILLING_FOK
-    return 2  # ORDER_FILLING_RETURN
+        resolved = 1  # ORDER_FILLING_IOC
+    elif modes & 1:
+        resolved = 0  # ORDER_FILLING_FOK
+    else:
+        resolved = 2  # ORDER_FILLING_RETURN
+    ctx.ipc_cache.set_filling(ctx.driver, symbol, resolved)
+    return resolved

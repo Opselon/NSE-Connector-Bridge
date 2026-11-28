@@ -718,6 +718,10 @@ class Mt5Driver:
         self._thread = threading.Thread(name="mt5-worker", target=self._work, daemon=True)
         self._mt5: Any = None
         self._connected = False
+        #: Generation counter for the terminal connection (P1-4): bumped
+        #: on every successful connect, so per-context caches keyed on
+        #: it (see ``TerminalValueCache``) invalidate on reconnect.
+        self._connection_epoch = 0
         self._state = "DISCONNECTED"
         self._state_detail = ""
         self._state_since = datetime.now(UTC)
@@ -923,6 +927,18 @@ class Mt5Driver:
     def connected(self) -> bool:
         return self._connected
 
+    @property
+    def connection_epoch(self) -> int:
+        """Generational counter, bumped on every successful (re)connect.
+
+        Per-context terminal-value caches key on this (plus driver
+        identity) so a reconnect invalidates constants / filling modes
+        fetched against the previous terminal session. Monotonic within
+        a driver instance; never reset by disconnect (a disconnected
+        driver refuses all calls via ``ensure_connected`` anyway).
+        """
+        return self._connection_epoch
+
     def ensure_connected(self) -> None:
         if not self._connected:
             from ..errors import BridgeError, ErrorCode
@@ -1088,6 +1104,7 @@ class Mt5Driver:
                 return {"ok": False, "error": detail}
 
         self._connected = True
+        self._connection_epoch += 1
         self._set_state("CONNECTED", "connected")
         self._detect_broker_offset(mt5)
         logger.info(
