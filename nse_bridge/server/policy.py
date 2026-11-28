@@ -2,8 +2,8 @@
 management authority in Phase 2b.
 
 The server issues a fresh, short-lived envelope authorizing **fast
-trailing-stop and breakeven SL adjustments only** — sub-minute SL
-moves that cannot wait for a gateway round-trip. The envelope NEVER
+trailing-stop, breakeven SL, and trailing-TP adjustments only** — sub-minute
+SL/TP moves that cannot wait for a gateway round-trip. The envelope NEVER
 authorizes an open, a close, or a volume change; the Bridge never
 invents policy and never runs a local strategy.
 
@@ -31,7 +31,7 @@ Rules enforced here (fail closed):
   a stored envelope exists; ``now < expires_at``; the WebSocket to the
   platform is healthy (``ctx.server_channel_state["connected"]``);
   the specific ``rule_id`` exists in the envelope's rules; the rule
-  authorizes the requested kind (trailing | breakeven); and the
+  authorizes the requested kind (trailing | breakeven | trailing_tp); and the
   position's symbol falls within ``bounds.allowed_symbols`` when the
   bound is present.
 - Expired/invalid/missing envelope or a dead WebSocket → hold: no new
@@ -51,12 +51,21 @@ Rules enforced here (fail closed):
 Rule params (PROPOSED — the server owns the values; the Bridge only
 executes the mechanical math)::
 
-    trailing:  {"kind": "trailing",  "distance_points": >0, "step_points": >=0}
-    breakeven: {"kind": "breakeven", "trigger_points": >0, "offset_points": >=0}
+    trailing:     {"kind": "trailing",     "distance_points": >0, "step_points": >=0}
+    breakeven:    {"kind": "breakeven",    "trigger_points": >0, "offset_points": >=0}
+    trailing_tp:  {"kind": "trailing_tp",  "distance_points": >0, "step_points": >=0}
 
 A trailing move only TIGHTENS the stop (never widens it); a breakeven
 move only fires once the position is at least ``trigger_points`` in
-profit and moves the stop to entry ± ``offset_points``.
+profit and moves the stop to entry ± ``offset_points``. A trailing-TP
+move only ratchets the take-profit AWAY from entry (never toward it),
+keeping the TP ahead of the current price by ``distance_points`` — a
+TP behind the current price would close the position on arrival, so
+it is never proposed — and only fires when the candidate beats the
+current TP by at least ``step_points`` (a position with no TP yet
+baselines on its entry price). The TP math mirrors the Platform
+server loop (``connector::trailing_tp::ratchet_tp``), which proves
+the math first; the envelope is only the sub-minute fast path.
 """
 
 from __future__ import annotations
@@ -95,7 +104,7 @@ ENVELOPE_MAX_AGE_S = 300.0
 #: a platform that never sends this frame keeps the Bridge dormant).
 POLICY_FRAME_TYPE = "policy.envelope"
 
-RULE_KINDS = ("trailing", "breakeven")
+RULE_KINDS = ("trailing", "breakeven", "trailing_tp")
 
 
 class PolicyEnvelopeModel(BaseModel):
@@ -269,6 +278,8 @@ class PolicyMoveRecord:
     symbol: str
     sl_from: float | None = None
     sl_to: float | None = None
+    tp_from: float | None = None
+    tp_to: float | None = None
     status: str = "pending"  # executed | refused | failed
     denial_reason: str | None = None
     error_code: str | None = None
@@ -286,6 +297,8 @@ class PolicyMoveRecord:
             "symbol": self.symbol,
             "sl_from": self.sl_from,
             "sl_to": self.sl_to,
+            "tp_from": self.tp_from,
+            "tp_to": self.tp_to,
             "status": self.status,
             "denial_reason": self.denial_reason,
             "error_code": self.error_code,
@@ -334,6 +347,63 @@ def _sl_target_for_move(
         candidate = entry + offset if is_long else entry - offset
         return candidate if better(candidate) else None
     return None
+
+
+def _tp_target_for_move(
+    params: dict[str, Any], *, pos: Any, tick_bid: float, tick_ask: float, point: float
+) -> float | None:
+    """Mechanical TP level for an authorized trailing-TP move — never a decision.
+
+    The mirror of :func:`_sl_target_for_move` for the take-profit side,
+    with the same semantics as the Platform server loop
+    (``connector::trailing_tp::ratchet_tp``), which proves this math
+    first: the candidate TP trails AHEAD of the current price (bid for
+    a long, ask for a short) by ``distance_points`` — a TP behind the
+    current price would close the position on arrival, so it is never
+    proposed. Returns the new TP, or None when the mechanical
+    conditions are not met (no ratchet available: the move is a no-op,
+    not an error).
+
+    The move fires only when ALL of these hold: the distance is
+    positive; the candidate sits on the profit side of entry (never
+    toward entry); and the candidate beats the current TP by at least
+    ``step_points`` (a position with no TP yet baselines on its entry
+    price, and the improvement must be strict — a step of 0 still
+    never re-issues an unchanged TP). The candidate sits exactly
+    ``distance_points`` from the tick; the broker stops level is
+    enforced by the ``order_check`` inside ``modify_position_sltp``
+    at execution, as for every other SLTP move.
+    """
+    pos_type = int(getattr(pos, "type", -1))
+    entry = float(getattr(pos, "price_open", 0.0) or 0.0)
+    current_tp = float(getattr(pos, "tp", 0.0) or 0.0)
+    is_long = pos_type == 0
+    if entry <= 0 or point <= 0 or tick_bid <= 0 or tick_ask <= 0:
+        return None
+    distance = float(params.get("distance_points") or 0.0) * point
+    step = float(params.get("step_points") or 0.0) * point
+    if distance <= 0 or step < 0:
+        return None
+    # Baseline: the current TP, or the entry price when the position
+    # carries no TP yet.
+    baseline = current_tp if current_tp > 0 else entry
+    if is_long:
+        candidate = tick_bid + distance
+        if candidate <= entry + 1e-9:
+            return None
+        if candidate <= baseline + 1e-9:
+            return None
+        if candidate - baseline < step - 1e-9:
+            return None
+        return candidate
+    candidate = tick_ask - distance
+    if candidate >= entry - 1e-9:
+        return None
+    if candidate >= baseline - 1e-9:
+        return None
+    if baseline - candidate < step - 1e-9:
+        return None
+    return candidate
 
 
 class PolicyMoveExecutor:
@@ -387,8 +457,9 @@ class PolicyMoveExecutor:
                 continue
             # Rule selection: the envelope's rules are evaluated in
             # order — the FIRST rule whose mechanical conditions can
-            # produce a tighter stop for this position is used. Rule
-            # matching is data-driven; the Bridge adds no preferences.
+            # produce a better stop / take-profit for this position is
+            # used. Rule matching is data-driven; the Bridge adds no
+            # preferences.
             record: PolicyMoveRecord | None = None
             for rule_id, rule in self.gate.envelope.rules_by_id.items() if self.gate.envelope else ():
                 params = rule.get("params") or {}
@@ -469,32 +540,50 @@ class PolicyMoveExecutor:
                 record.error_code = "POLICY_POINT_UNKNOWN"
                 record.completed_at = completed
                 return record
-            target = _sl_target_for_move(
-                record.kind,
-                params,
-                pos=pos,
-                tick_bid=float(_f(tick, "bid", 0.0) or 0.0),
-                tick_ask=float(_f(tick, "ask", 0.0) or 0.0),
-                point=point,
-            )
-            if target is None:
-                record.status = "refused"
-                record.denial_reason = "no_tighter_stop"
-                record.completed_at = completed
-                return record
-            record.sl_from = float(_f(pos, "sl", 0.0) or 0.0)
-            result = modify_position_sltp(self.ctx, record.ticket, float(target), float(_f(pos, "tp", 0.0) or 0.0))
-            record.sl_to = float(target)
+            tick_bid = float(_f(tick, "bid", 0.0) or 0.0)
+            tick_ask = float(_f(tick, "ask", 0.0) or 0.0)
+            current_sl = float(_f(pos, "sl", 0.0) or 0.0)
+            current_tp = float(_f(pos, "tp", 0.0) or 0.0)
+            if record.kind == "trailing_tp":
+                # TP ratchet: the stop stays exactly where it is; only
+                # the take-profit moves (away from entry, ahead of price).
+                target = _tp_target_for_move(params, pos=pos, tick_bid=tick_bid, tick_ask=tick_ask, point=point)
+                if target is None:
+                    record.status = "refused"
+                    record.denial_reason = "no_better_tp"
+                    record.completed_at = completed
+                    return record
+                record.tp_from = current_tp
+                result = modify_position_sltp(self.ctx, record.ticket, current_sl, float(target))
+                record.tp_to = float(target)
+                log_detail = f"tp {record.tp_from} → {record.tp_to}"
+            else:
+                target = _sl_target_for_move(
+                    record.kind,
+                    params,
+                    pos=pos,
+                    tick_bid=tick_bid,
+                    tick_ask=tick_ask,
+                    point=point,
+                )
+                if target is None:
+                    record.status = "refused"
+                    record.denial_reason = "no_tighter_stop"
+                    record.completed_at = completed
+                    return record
+                record.sl_from = current_sl
+                result = modify_position_sltp(self.ctx, record.ticket, float(target), current_tp)
+                record.sl_to = float(target)
+                log_detail = f"sl {record.sl_from} → {record.sl_to}"
             record.status = "executed"
             record.retcode = int(result.get("retcode") or 0) if isinstance(result, dict) else None
             record.completed_at = completed
             logger.info(
-                "[POLICY] move executed ticket={} rule={} version={} sl {} → {} (decision {})",
+                "[POLICY] move executed ticket={} rule={} version={} {} (decision {})",
                 record.ticket,
                 record.rule_id,
                 record.envelope_version,
-                record.sl_from,
-                record.sl_to,
+                log_detail,
                 record.decision_id,
             )
             return record
