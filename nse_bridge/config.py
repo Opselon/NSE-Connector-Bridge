@@ -230,6 +230,29 @@ class BridgeSettings(BaseSettings):
     # the durable override; the default is on.
     enable_v2_open_order: bool = True
 
+    # --- modify_pending gate (§17.4, P0-1) ---------------------------
+    # Client-side `modify_pending` gate flag. DEFAULT DISABLED (fail
+    # closed): a fresh Bridge install refuses server-sent
+    # `modify_pending` frames as `UnsupportedOperation` until the
+    # operator explicitly opts in with
+    # NSE_BRIDGE_ENABLE_MODIFY_PENDING=1 (or =true) — or `true` in
+    # config.json. The flag alone never opens the gate: the running
+    # Bridge version must also be >= `MODIFY_PENDING_MIN_VERSION`
+    # ("1.4.1", the first release carrying this gate mechanism — see
+    # `nse_bridge/server/commands.py::modify_pending_gate_open`).
+    # There is NO wire channel for this: the Platform never sends the
+    # Bridge a minimum version (the Bridge sends its own version to
+    # the Platform at validate-key / register-device, and the Platform
+    # enforces its own `MODIFY_PENDING_MIN_VERSION` before sending).
+    # The flag is the operator's explicit opt-in on this device; the
+    # version floor is the release train's. Deliberately NOT persisted
+    # by persist_settings — the env var is the durable override.
+    # NOTE: like `enable_v2_open_order`, the validator is built once
+    # in `realtime/channel.py::_ensure_components`, so toggling the
+    # flag takes effect on the next channel (re)build / Bridge
+    # restart, not mid-session (P2-1 staleness, same as the v2 flag).
+    enable_modify_pending: bool = False
+
     # --- streaming ------------------------------------------------------
     stream_account_interval_ms: int = 1000
 

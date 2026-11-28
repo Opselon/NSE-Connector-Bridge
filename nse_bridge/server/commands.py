@@ -42,14 +42,21 @@ contract-defined but NOT sendable until its capability gate passes —
 (a) a ``ModifyPending`` variant + allowlist entry in the Connector,
 (b) tests, (c) live proof at market open that ``trade_modify_sl_tp``
 accepts a pending-order ticket, (d) a published minimum
-``connector_version`` recorded in the contract. This Bridge has (a)
-and (b); (c) is DONE (2026-11-19, live on the MetaQuotes-Demo
-terminal, E-P2B-6 in docs/upgrade/PHASE-2B-VERIFICATION.md); (d) is
-the Platform owner's decision and remains outstanding — so the gate
-starts CLOSED: ``modify_pending`` is rejected as
-``UnsupportedOperation`` exactly like any other non-allowlisted op
-until (d) lands and ``modify_pending_proven=True`` is set by the code
-that owns the decision. The server MUST NOT send it before then
+``connector_version`` recorded in the contract. This Bridge has (a),
+(b) and (c) (2026-11-19, live on the MetaQuotes-Demo terminal,
+E-P2B-6 in docs/upgrade/PHASE-2B-VERIFICATION.md); (d) is the
+Platform owner's published minimum ``"1.4.1"`` (Platform
+``commands.rs::MODIFY_PENDING_MIN_VERSION``). The gate opens only
+when BOTH hold: the operator explicitly opts in
+(``BridgeSettings.enable_modify_pending``, env
+``NSE_BRIDGE_ENABLE_MODIFY_PENDING=1`` — default OFF, fail closed)
+AND this Bridge's own version is >= ``MODIFY_PENDING_MIN_VERSION``
+(see :func:`modify_pending_gate_open`, wired through
+``realtime/channel.py`` into ``CommandValidator.modify_pending_proven``).
+There is no wire channel for the minimum version — the Platform never
+sends one; the Bridge sends its version at validate-key /
+register-device and the Platform enforces its own minimum before
+sending. The server MUST NOT send it to a Bridge below the minimum
 either (its own capability rule, §17.4).
 
 Local validation order (§6.3) — EXACT, the server assumes this order
@@ -274,17 +281,72 @@ def default_priority(kind: str) -> int:
 #: proof at market open that TRADE_ACTION_MODIFY accepts a
 #: pending-order ticket: DONE 2026-11-19 on the MetaQuotes-Demo
 #: terminal (retcode 10009, SL landed on the live order, order_check
-#: passed — E-P2B-6 in docs/upgrade/PHASE-2B-VERIFICATION.md); (d) NO
-#: published minimum connector_version is recorded in the contract —
-#: that publication is the Platform owner's decision. The gate stays
-#: CLOSED until (d) lands.
+#: passed — E-P2B-6 in docs/upgrade/PHASE-2B-VERIFICATION.md); (d) the
+#: published minimum connector_version is "1.4.1" (Platform
+#: ``commands.rs::MODIFY_PENDING_MIN_VERSION``) — the first release
+#: carrying this gate mechanism. The gate opens only via
+#: :func:`modify_pending_gate_open` (explicit operator opt-in AND a
+#: qualifying local version); it stays CLOSED by default.
+MODIFY_PENDING_MIN_VERSION = "1.4.1"
+
+#: §17.4 gate note, kept as the single human-readable statement of
+#: the gate's status for logs/docs.
 MODIFY_PENDING_GATE_NOTE = (
     "modify_pending is capability-gated (§17.4): conditions (a) code, "
-    "(b) tests and (c) live proof (2026-11-19, E-P2B-6) are done; (d) "
-    "the published minimum connector_version is the Platform owner's "
-    "decision and is still outstanding, so modify_pending is rejected "
-    "as UnsupportedOperation until the version gate is published."
+    "(b) tests, (c) live proof (2026-11-19, E-P2B-6) and (d) the "
+    "published minimum connector_version 1.4.1 are done; the gate opens "
+    "only when the operator opts in (NSE_BRIDGE_ENABLE_MODIFY_PENDING=1) "
+    "on a Bridge >= 1.4.1 — otherwise modify_pending is rejected "
+    "as UnsupportedOperation."
 )
+
+
+def _version_tuple(version: str | None) -> tuple[int, ...] | None:
+    """Dotted-numeric version → tuple, or None when unparseable.
+
+    Same shape as ``nse_bridge.updates._version_tuple`` (kept local so
+    this module does not import the updater): ``"1.4.1"`` →
+    ``(1, 4, 1)``; ``""`` / ``None`` / ``"1.4.x"`` → None (fail closed).
+    """
+    if not version:
+        return None
+    parts: list[int] = []
+    for piece in str(version).strip().split("."):
+        try:
+            parts.append(int(piece))
+        except ValueError:
+            return None
+    return tuple(parts) if parts else None
+
+
+def _version_at_least(version: str | None, minimum: str) -> bool:
+    """True when ``version`` >= ``minimum`` (dotted-numeric compare).
+
+    An unparseable version never qualifies — fail closed.
+    """
+    a, b = _version_tuple(version), _version_tuple(minimum)
+    if a is None or b is None:
+        return False
+    n = max(len(a), len(b))
+    return (a + (0,) * (n - len(a))) >= (b + (0,) * (n - len(b)))
+
+
+def modify_pending_gate_open(*, enabled: bool, bridge_version: str) -> bool:
+    """§17.4 gate decision (pure — unit-tested directly).
+
+    Opens only when BOTH hold: the operator explicitly opted in
+    (``BridgeSettings.enable_modify_pending``) AND this Bridge's own
+    version is >= ``MODIFY_PENDING_MIN_VERSION`` ("1.4.1", the first
+    release carrying this gate mechanism). Either half closed keeps
+    the gate closed — a 1.4.0 build with the flag set still refuses,
+    and a 1.4.1 build without the flag still refuses. There is no wire
+    channel for the minimum version (the Platform never sends one),
+    so the local version floor is the Bridge-side half of the
+    published minimum; the Platform enforces the same floor
+    server-side before sending.
+    """
+    return bool(enabled) and _version_at_least(bridge_version, MODIFY_PENDING_MIN_VERSION)
+
 
 #: Local MT5 source-tool names (§6.5 ``source_tool``) per operation.
 SOURCE_TOOL = {
@@ -751,6 +813,12 @@ class CommandValidator:
         self._get_account_id = get_account_id
         self._entitlements_source = entitlements
         self.replay_cache = replay_cache or ReplayCache()
+        #: §17.4 modify_pending gate, resolved value. Defaults False
+        #: (fail-closed); the production caller
+        #: (``realtime/channel.py``) passes
+        #: ``modify_pending_gate_open(enabled=settings.enable_modify_pending,
+        #: bridge_version=BRIDGE_VERSION)`` — explicit operator opt-in
+        #: AND a qualifying local version. Tests pass True directly.
         self.modify_pending_proven = modify_pending_proven
         #: P3 v2 / §17.5 activation gate, first half. The flag
         #: defaults ON at the settings layer

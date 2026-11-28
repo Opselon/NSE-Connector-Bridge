@@ -98,6 +98,7 @@ from typing import Any
 from loguru import logger
 from starlette.concurrency import run_in_threadpool
 
+from .. import BRIDGE_VERSION
 from ..config import validate_server_url
 from ..engine.common import BridgeContext
 from ..reliability import DurableResultQueue, DurableResultStore
@@ -113,6 +114,7 @@ from ..server.chart import (
 from ..server.commands import (
     CommandExecutor,
     CommandValidator,
+    modify_pending_gate_open,
 )
 from ..server.manifest import ManifestTracker, build_manifest, build_manifest_update_envelope
 from ..server.policy import POLICY_FRAME_TYPE
@@ -661,10 +663,23 @@ class ServerChannel:
             # opt-out via ``NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0``).
             # The flag alone never opens an open; without it, v2 opens
             # stay UnsupportedOperation.
+            # §17.4 (P0-1): the modify_pending gate is the same shape
+            # with the opposite default — explicit opt-in
+            # (``BridgeSettings.enable_modify_pending``; opt-in via
+            # ``NSE_BRIDGE_ENABLE_MODIFY_PENDING=1``) AND a qualifying
+            # local version (>= MODIFY_PENDING_MIN_VERSION "1.4.1").
+            # No wire channel carries the minimum version (the Platform
+            # never sends one), so the version floor is checked
+            # locally against this Bridge's own version; the Platform
+            # enforces the same floor server-side before sending.
             validator = CommandValidator(
                 device_id,
                 get_account_id=self._bound_account_id,
                 entitlements=lambda: rest.entitlements,
+                modify_pending_proven=modify_pending_gate_open(
+                    enabled=self.ctx.settings.enable_modify_pending,
+                    bridge_version=BRIDGE_VERSION,
+                ),
                 open_order_authorized=self.ctx.settings.enable_v2_open_order,
             )
             self._executor = CommandExecutor(
