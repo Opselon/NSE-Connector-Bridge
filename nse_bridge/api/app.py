@@ -178,6 +178,15 @@ def create_app(ctx: BridgeContext) -> FastAPI:
         )
         ctx.telemetry = telemetry
         app.state.telemetry = telemetry
+        # P1-8: the durable policy-move store — executed/failed
+        # autonomous moves persist here (policy_moves.jsonl in the
+        # data dir) and are served by GET /api/v1/policy/moves. The
+        # channel passes it to the PolicyService; the store file is
+        # created lazily on the first persisted move.
+        from ..reliability import PolicyMoveStore
+
+        ctx.policy_move_store = PolicyMoveStore(ctx.settings.data_dir / "policy_moves.jsonl")
+        app.state.policy_move_store = ctx.policy_move_store
         self_healing = SelfHealingRegistry(telemetry=telemetry)
         ctx.self_healing = self_healing
         app.state.self_healing = self_healing

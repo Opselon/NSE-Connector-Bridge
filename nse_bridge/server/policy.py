@@ -42,11 +42,25 @@ Rules enforced here (fail closed):
 - Every executed move carries ``rule_id`` + ``decision_id`` (uuidv7)
   + the envelope ``version`` so the server can trace it through the
   §17.3 decision-audit mechanism and reconcile it against the
-  envelope version (DESIGN.md D-7). CONTRACT v1 §5.3 defines no
-  client→server frame for autonomous moves — the trace data is
-  emitted as telemetry events and kept in a bounded local history
-  until the Platform defines the delivery channel (documented gap,
-  Platform-owned).
+  envelope version (DESIGN.md D-7). The delivery channel the audit
+  called missing (P1-8) is now defined — CONTRACT v1 §5.3
+  (Platform slice 8): every executed/failed move is persisted in
+  the durable policy-move store
+  (``reliability.policy_move_store``, ``policy_moves.jsonl`` in the
+  data dir, retrievable via ``GET /api/v1/policy/moves``) AND
+  emitted as a WARN ``policy.move.executed`` /
+  ``policy.move.failed`` telemetry event (correlation_id =
+  decision_id, details = the move record), which the durable
+  diagnostic queue + ``HttpDiagnosticsSink`` carry to
+  ``POST /api/v1/connector/diagnostics``. The event is WARN, not
+  INFO, because INFO events are never queued for delivery by design
+  (``telemetry.py``) and an executed autonomous move is a
+  financially significant event the server must receive for
+  reconciliation — step-gated, so it is not success-log flooding.
+  Refused/no-op evaluations (``no_tighter_stop`` / ``no_better_tp``)
+  are NOT persisted or delivered: they are the steady state of the
+  2 s poll loop, and persisting them would fill the ledger with
+  noise (the same rule the Platform's trailing-TP ledger applies).
 
 Rule params (PROPOSED — the server owns the values; the Bridge only
 executes the mechanical math)::
@@ -99,9 +113,10 @@ __all__ = [
 
 #: §4.10: ``expires_at - issued_at <= 5 min``.
 ENVELOPE_MAX_AGE_S = 300.0
-#: PROPOSED server→Bridge WS frame type (CONTRACT v1 §5.2 defines no
-#: policy frame yet; unknown frame types are silently ignored today, so
-#: a platform that never sends this frame keeps the Bridge dormant).
+#: Server→Bridge WS frame type (CONTRACT v1 §5.2, defined by the
+#: Platform slice 8 — the frame the audit called PROPOSED). Unknown
+#: frame types are silently ignored, so a platform that never sends
+#: this frame keeps the Bridge dormant.
 POLICY_FRAME_TYPE = "policy.envelope"
 
 RULE_KINDS = ("trailing", "breakeven", "trailing_tp")
@@ -424,10 +439,17 @@ class PolicyMoveExecutor:
         *,
         telemetry: Any = None,
         history_max: int = 50,
+        move_store: Any = None,
     ) -> None:
         self.ctx = ctx
         self.gate = gate
         self.telemetry = telemetry
+        #: Durable audit record (P1-8): executed/failed moves are
+        #: persisted here as well as kept in the in-memory history —
+        #: the history is a 50-deep view, the store survives restarts
+        #: and is what the local API serves. None in tests that do
+        #: not need persistence.
+        self.move_store = move_store
         self._history: deque[dict[str, Any]] = deque(maxlen=history_max)
         #: Tickets with a move currently in flight — one move per
         #: ticket at a time (a second poll cycle must not double-move).
@@ -517,6 +539,15 @@ class PolicyMoveExecutor:
         finally:
             self._in_flight.discard(ticket)
         self._history.append(result.to_dict())
+        # P1-8: the durable audit record — executed/failed moves only
+        # (refused no-ops stay in the in-memory history, never in the
+        # store). A store failure must never break execution, so it is
+        # swallowed with a warning, like telemetry.
+        if self.move_store is not None and result.status in ("executed", "failed"):
+            try:
+                self.move_store.append(result.to_dict())
+            except Exception:  # noqa: BLE001 — persistence must never break execution
+                logger.warning("[POLICY] durable move-store write failed")
         self._emit(result)
         return result
 
@@ -599,12 +630,27 @@ class PolicyMoveExecutor:
             return
         try:
             details = record.to_dict()
+            # P1-8 / CONTRACT §5.3: the move-report event. Both
+            # outcomes go out as WARN — INFO events are never queued
+            # for delivery (telemetry.py binding rule), and an
+            # executed autonomous move is a financially significant
+            # event the server must receive to reconcile "who moved
+            # my stop and why". correlation_id IS the decision_id, so
+            # the diagnostic queue's dedup key (event_type +
+            # error_code + correlation_id) is unique per move and two
+            # moves can never collapse into one queued entry.
             if record.status == "executed":
-                self.telemetry.info("policy.move.executed", component="server.policy", details=details)
+                self.telemetry.warn(
+                    "policy.move.executed",
+                    component="server.policy",
+                    correlation_id=record.decision_id,
+                    details=details,
+                )
             elif record.status == "failed":
                 self.telemetry.warn(
                     "policy.move.failed",
                     component="server.policy",
+                    correlation_id=record.decision_id,
                     error_code=record.error_code,
                     details=details,
                 )
@@ -615,10 +661,10 @@ class PolicyMoveExecutor:
 class PolicyService:
     """Gate + executor wired to the channel lifecycle."""
 
-    def __init__(self, ctx: BridgeContext, *, telemetry: Any = None, clock: Any = None) -> None:
+    def __init__(self, ctx: BridgeContext, *, telemetry: Any = None, clock: Any = None, move_store: Any = None) -> None:
         self.ctx = ctx
         self.gate = PolicyGate(clock=clock)
-        self.executor = PolicyMoveExecutor(ctx, self.gate, telemetry=telemetry)
+        self.executor = PolicyMoveExecutor(ctx, self.gate, telemetry=telemetry, move_store=move_store)
 
     def handle_envelope_frame(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Handle a (PROPOSED) ``policy.envelope`` server frame.

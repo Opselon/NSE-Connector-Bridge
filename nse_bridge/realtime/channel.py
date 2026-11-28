@@ -693,12 +693,18 @@ class ServerChannel:
         if self._policy is None:
             # W6 (D-5): the policy-envelope gate + trailing/breakeven
             # executor. Dormant until a valid, fresh ``policy.envelope``
-            # frame arrives (a frame type the contract does not define
-            # yet — unknown frames are ignored, so the service stays
-            # dormant in production until the Platform adopts it).
+            # frame arrives (CONTRACT v1 §5.2, defined by the Platform
+            # slice 8); unknown frames are ignored, so the service
+            # stays dormant in production until the Platform sends one.
+            # Executed/failed moves persist in the durable policy-move
+            # store (P1-8) when the app wired one onto the context.
             from ..server.policy import PolicyService
 
-            self._policy = PolicyService(self.ctx, telemetry=getattr(self.ctx, "telemetry", None))
+            self._policy = PolicyService(
+                self.ctx,
+                telemetry=getattr(self.ctx, "telemetry", None),
+                move_store=getattr(self.ctx, "policy_move_store", None),
+            )
 
     def start(self) -> None:
         """Start the supervised channel exactly once.
