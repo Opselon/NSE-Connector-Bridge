@@ -212,7 +212,7 @@ envelope when the manifest changes mid-session. No `ping`, no
 |---|---|---|
 | `close_position` | `trade_close_single_position` (close-by-ticket; idempotent ambiguous-close handling) | |
 | `modify_sl_tp` | `trade_modify_sl_tp` (SL/TP by ticket; absent sl/tp filled from the live position) | |
-| `modify_pending` | `trade_modify_pending_order` (SL/TP/price/expiration by ticket; absent sl/tp filled from the live order, absent price/expiry keep the live values) | **Capability-gated (§17.4): opens only on explicit operator opt-in (`NSE_BRIDGE_ENABLE_MODIFY_PENDING=1`) AND a local version >= `1.4.1` (the published minimum, Platform `commands.rs::MODIFY_PENDING_MIN_VERSION`).** The code path, tests, and the 2026-11-19 live-verification pass (docs/upgrade/PHASE-2B-VERIFICATION.md) are done — conditions (a)–(d). Otherwise rejected as `UnsupportedOperation`. |
+| `modify_pending` | `trade_modify_pending_order` (SL/TP/price/expiration by ticket; absent sl/tp filled from the live order, absent price/expiry keep the live values) | **Capability-gated (§17.4): opens only on explicit operator opt-in (`NSE_BRIDGE_ENABLE_MODIFY_PENDING=1`) AND a local version >= `1.4.1` (this Bridge's own floor; the Platform has published no minimum yet — Platform `commands.rs::MODIFY_PENDING_MIN_VERSION` is `""`).** The code path, tests, and the 2026-11-19 live-verification pass (docs/upgrade/PHASE-2B-VERIFICATION.md) are done — conditions (a)–(c); only (d), the published minimum version, is still owed. Otherwise rejected as `UnsupportedOperation`. |
 
 `cancel_order` is explicitly NOT sendable in v1. `open_order` is
 implemented behind the §17.5 activation gate: the market + pending
@@ -241,9 +241,14 @@ the validator):
   an env var, when set, still wins over `config.json` at load).
   (2) A v2 negotiation with the Platform (`V2Negotiation`,
   `negotiated=True` plus the negotiated `schema_version`).
-- **Refusal is loud:** a call with either gate closed raises
-  `FEATURE_DISABLED` naming exactly which gate is closed, and never
-  touches the driver (zero `order_send` calls).
+- **Refusal is loud, and differs by path:** a direct
+  `execute_v2_open_order` call with either gate closed raises
+  `FEATURE_DISABLED` naming exactly which gate is closed
+  (`v2_open_order.py:300,309`), and never touches the driver (zero
+  `order_send` calls). On the live command path the same refusal
+  surfaces as `UnsupportedOperation`: the validator rejects the frame
+  at step 5b (`server/commands.py:993–994`) before dispatch, so no
+  `FEATURE_DISABLED` ever reaches the server for a server-sent frame.
 - **Wired into the live command path:** `server/commands.py`
   imports the hook and `realtime/channel.py` passes a live-reading
   callable over `enable_v2_open_order` as `open_order_authorized`

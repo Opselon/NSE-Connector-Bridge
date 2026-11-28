@@ -156,19 +156,19 @@ explicitly left to the Platform side to define.
   retry/backoff/dedup/TTL semantics unchanged. Live proof against the
   deployed Platform is still owed (D11): unit tests prove the sink
   against `httpx.MockTransport` only.
-- Phase E status (2026-11-18): **unchanged — still open, and now the
-  single hardest blocker in the §25 table.** Spec §25 item 22 ("ERROR
-  and WARN events reach the server reliably") is **Not-proven** and
+- Phase E status (2026-11-18, refreshed 2026-11-28, audit P2-10):
+  **CLOSED on the Bridge side by P5a.** Spec §25 item 22 ("ERROR
+  and WARN events reach the server reliably") stays **Not-proven** and
   item 23 ("diagnostic delivery survives temporary network failures")
-  is **Partial**, both because of D1. The local pipeline is complete
-  (`TelemetryEmitter` + bounded `DiagnosticQueue`,
-  `nse_bridge/reliability/telemetry.py:163,351`) but the sink is inert
-  by design (`NullDiagnosticsSink` semantics — see the comment at
-  `nse_bridge/api/app.py:141–147`): no ERROR/WARN event reaches the
-  server today. A durable queue also exists now
-  (`DurableDiagnosticQueue`, `reliability/diagnostic_store.py:201`)
-  but is not yet wired into production — that wiring is Bridge-side
-  work (see §12), not a Platform dependency.
+  stays **Partial** — not because the sink is missing (it is wired:
+  `HttpDiagnosticsSink`, `nse_bridge/api/app.py:203–216`, ERROR
+  immediate drain + 60 s periodic drain,
+  `DIAGNOSTICS_DRAIN_INTERVAL_S`) and not because the queue is
+  unwired (the durable queue is wired in the `create_app` lifespan,
+  `api/app.py:175–180`, `c27bf0b`) — but because live ingest proof
+  against the deployed Platform is still owed (D11). The
+  `NullDiagnosticsSink` / drains-by-TTL description above applied
+  only before P5a.
 
 ## 3. `open_order` / `cancel_order` are NOT sendable in v1 (§6.1)
 
@@ -177,22 +177,29 @@ explicitly left to the Platform side to define.
   `cancel_order` are explicitly NOT sendable in v1. The full 91-command
   registry stays available **locally**; the server channel enforces the
   3-op allowlist at the channel boundary.
-- **v1.3.0 update (S4, 2026-11-24):** a client-side v2 `open_order`
-  hook now exists (`nse_bridge/engine/v2_open_order.py`) — but it is
-  BEHIND A FLAG, default DISABLED, and NOT wired into the live command
-  path. It refuses loudly (`FEATURE_DISABLED`) when the operator flag
-  (`NSE_BRIDGE_ENABLE_V2_OPEN_ORDER`) is off and when protocol v2 has
-  not been negotiated with the Platform, and it never touches the
-  driver on refusal. **The Bridge alone does not enable
-  new-position trading** — the P3 protocol (risk engine, financial
-  consent, kill-switch enforcement, negotiated `schema_version` bump)
-  remains the gate, and the §17.5 activation gate still rejects
-  server-sent `open_order` frames as `UnsupportedOperation`. The hook
-  is a tested, dormant entry point for the P3 work, not a live
-  trading surface. The v1 execution path itself was hardened in the
-  same release (bounded-backoff retries on retryable retcodes only,
-  fail-fast hard rejects, 10036 close idempotency,
-  reconcile-before-retry for `modify_pending` — see
+- **v1.4.0 update (audit P2-10, 2026-11-28):** the client-side v2
+  `open_order` hook (`nse_bridge/engine/v2_open_order.py`) is now
+  WIRED into the live command path (`server/commands.py:1739–1754`
+  dispatches through it; `realtime/channel.py:697` passes a
+  live-reading `enable_v2_open_order` callable into the validator)
+  behind TWO gates, both fail-closed: the operator flag
+  (`NSE_BRIDGE_ENABLE_V2_OPEN_ORDER`, `config.py:258`, default ON —
+  opt-out with `=0`, toggleable at runtime via `PUT /settings`, P2-1)
+  AND a per-frame negotiated v2 envelope
+  (`negotiate_protocol_version`, `v2_open_order.py:131–147`). A
+  server-sent `open_order` frame is accepted only when both gates are
+  open; with either gate closed the live path refuses it as
+  `UnsupportedOperation` at validator step 5b
+  (`server/commands.py:993–994`) and never touches the driver. (A
+  direct `execute_v2_open_order` call raises `FEATURE_DISABLED`
+  instead — see `docs/API_PROTOCOL.md` §3.1a.) **The Bridge alone
+  does not enable new-position trading** — the P3 protocol (risk
+  engine, financial consent, kill-switch enforcement, negotiated
+  `schema_version` bump) remains the gate. The hook is a tested, live
+  entry point for the P3 work, not a dormant one. The v1 execution
+  path itself was hardened in v1.3.0 (bounded-backoff retries on
+  retryable retcodes only, fail-fast hard rejects, 10036 close
+  idempotency, reconcile-before-retry for `modify_pending` — see
   `docs/API_PROTOCOL.md` §3.1b); none of that widens the allowlist.
 - Before the allowlist can widen, the Platform needs to prove, on the
   ops that are already allowed:
@@ -207,19 +214,28 @@ explicitly left to the Platform side to define.
   contract version bump (`schema_version`) that registers the new ops.
   The Bridge will not widen the allowlist unilaterally.
 
-## 4. `modify_pending` capability gate (§17.4) — live proof still owed
+## 4. `modify_pending` capability gate (§17.4) — live proof done, published minimum version still owed
 
 - `modify_pending` is contract-defined but starts REJECTED: the Bridge
-  enforces the §17.4 capability gate (`modify_pending_proven=False` by
-  default in `nse_bridge.server.commands.CommandValidator`) and rejects
-  the op until the gate is proven.
-- The §17.4 close-out still owed: live proof at market open that a
-  pending order's SL/TP can be modified through the server channel and
-  reconciled against MT5 state, plus a published minimum
-  `connector_version` from which the op is enabled.
-- Required from the Platform: the live proof run and the published
-  minimum connector version. Until both exist, the gate stays closed
-  and `modify_pending` commands are rejected with a structured reason.
+  enforces the §17.4 capability gate (P0-1: explicit operator opt-in
+  `NSE_BRIDGE_ENABLE_MODIFY_PENDING=1` AND a local version >=
+  `MODIFY_PENDING_MIN_VERSION` `"1.4.1"`,
+  `server/commands.py:368–382`) and rejects the op as
+  `UnsupportedOperation` until the gate opens.
+- The §17.4 close-out, conditions (a)–(c): DONE. Live proof at market
+  open ran 2026-11-19 on the MetaQuotes-Demo terminal (E-P2B-6,
+  `docs/upgrade/PHASE-2B-VERIFICATION.md:117–135`):
+  `TRADE_ACTION_MODIFY` via `trade_modify_pending_order`, retcode
+  10009, SL landed on the live order with price untouched. Only
+  condition (d) is still owed: a published minimum
+  `connector_version`. The Platform publishes none yet
+  (`MODIFY_PENDING_MIN_VERSION = ""`, Platform `commands.rs:47`);
+  until it does, the Platform refuses the op outright
+  (`modify_pending_not_supported`) and the Bridge gate stays closed
+  by default.
+- Required from the Platform: publish the minimum connector version.
+  Until then the gate stays closed and `modify_pending` commands are
+  rejected with a structured reason.
 
 ## 5. Task wire format is not in CONTRACT v1 (future server-assigned compute)
 
@@ -395,14 +411,17 @@ change.
   key lives only in the GitHub Actions secret + the FTP backup
   (`/opselon-passwords/nse-bridge-release-signing-private-key.pem`),
   never in the repo.
-- **No `.ico` asset** (§25 item 27): `windows/` holds only the exe
-  manifest; no icon asset exists for the frozen exe.
-- **No rollback/recovery strategy written** (§25 item 27): zero
-  matches for "rollback" in `nse_bridge/` and the release docs. A
-  written rollback strategy is owed before the first tagged release.
-- **`docs/GAP-ANALYSIS.md` is stale on the local side of D5/D6/D7:**
-  its §2.8/§4 statements ("no journal collector exists", "no resolver
-  exists", "close-by does not exist locally") predate this branch's
-  implementations. The gap analysis needs a refresh pass; it is out of
-  scope for this task (only this file and docs/ACCEPTANCE.md were
-  editable).
+- **~~No `.ico` asset~~ — CLOSED** (§25 item 27): committed
+  `assets/icon.ico` + `scripts/make_icon.py`, referenced by
+  `bridge.spec` (`datas` + exe `icon`) and the Inno installer
+  (`SetupIconFile`); integrity gate `tests/unit/test_icon_asset.py`.
+- **~~No rollback/recovery strategy written~~ — CLOSED by the P1-7
+  rollback strategy** (§25 item 27): `docs/ROLLBACK.md` is written
+  and implemented (previous-version retention + fallback launch,
+  `tests/unit/test_rollback.py` — mock proof only; live Windows proof
+  is owed, P1-9).
+- **~~`docs/GAP-ANALYSIS.md` is stale on the local side of D5/D6/D7~~ — CLOSED by the
+  audit P2-10 docs refresh:** its §2.8/§4 statements ("no journal collector exists", "no
+  resolver exists", "close-by does not exist locally") are refreshed in this PR
+  (§2.4/§2.7/§2.8/§2.12/§2.18/§4/§6 now record the local implementations; only the wire
+  halves stay open). The §1 inventory snapshot stays a dated record by design.

@@ -3,10 +3,12 @@
 Wired into the live server command path by
 :mod:`nse_bridge.server.commands` — a server-sent ``open_order``
 frame reaches :func:`execute_v2_open_order` ONLY when every gate
-below is open. The kill switch stays ENGAGED: this slice is code
-only, no execution enablement beyond what the Platform authorizes
-per command (the Platform's §6.4 gate refuses v2 commands while
-its switch is engaged; the Bridge enforces its own gates here).
+below is open. The flag defaults OPEN and the hook is live-wired:
+a frame is accepted when the flag is on AND protocol v2 was
+negotiated for that frame. The Platform's §6.4 gate still refuses
+v2 commands while its switch is engaged, and the Bridge enforces
+its own gates here — the flag alone never opens an execution the
+Platform did not authorize.
 
 Two independent gates; the flag defaults OPEN, negotiation stays
 fail-closed:
@@ -65,8 +67,8 @@ from .execution import PendingOrderRequest, trade_send_pending_order, validate_m
 from .trading import market_order
 
 #: The negotiated v2 contract version (Platform
-#: ``connector::contract::V2_SCHEMA_VERSION``). A handshake that
-#: negotiates any other schema is refused.
+#: ``connector::contract::V2_SCHEMA_VERSION``). A negotiation that
+#: lands on any other schema is refused.
 V2_SCHEMA_VERSION: str = "2"
 
 #: Minimum Bridge version that speaks protocol v2 (Platform
@@ -113,7 +115,7 @@ def connector_supports_v2(bridge_version: str = BRIDGE_VERSION) -> bool:
 
 @dataclass(frozen=True)
 class V2Negotiation:
-    """Result of the Platform v2 handshake (P3-owned wire shape).
+    """Result of the per-frame Platform v2 negotiation (P3-owned wire shape).
 
     ``negotiated`` is True only after the Platform stamped
     ``protocol_version: "2"`` on the command envelope AND this
@@ -307,7 +309,7 @@ def check_v2_open_order_available(
         raise BridgeError(
             ErrorCode.DISABLED,
             "v2 open_order is DISABLED: protocol v2 has not been negotiated with the Platform. "
-            "The Platform must ship the P3 contract and complete the v2 handshake (schema_version bump) first.",
+            "The Platform must ship the P3 contract and negotiate v2 for the frame (schema_version bump) first.",
             details={"gate": "negotiation", "negotiated": False},
         )
     if negotiation.schema_version is not None and negotiation.schema_version != V2_SCHEMA_VERSION:

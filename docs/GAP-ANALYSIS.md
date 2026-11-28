@@ -184,7 +184,7 @@ carried onto the renamed branch). Code size (`wc -l`, `nse_bridge/` + `scripts/`
   `MT5_CLOSE` / `MT5_RESTART` self-healing scenarios and the driver's state machine;
   no dedicated restart-detection probe was verified.
 
-### §2.4 Broker & symbol intelligence — **Partial** (the largest new-spec gap after §2.8)
+### §2.4 Broker & symbol intelligence — **Partial** (local side implemented; wire still missing — §4 D7)
 
 **Implemented (local capability).**
 
@@ -197,25 +197,23 @@ carried onto the renamed branch). Code size (`wc -l`, `nse_bridge/` + `scripts/`
   `get_symbol_spread`, `get_symbol_trading_sessions`, `get_symbol_trade_constraints`.
   The metadata surface is the MT5 `symbol_info` record, so broker-provided values are
   returned verbatim, never invented.
+- Symbol-resolution abstraction — IMPLEMENTED locally (audit P2-10 refresh):
+  `SymbolResolver` (`nse_bridge/symbols/resolver.py:140`) maps a canonical instrument
+  identifier to exact broker symbols over a `SymbolInventory`
+  (`symbols/inventory.py:81`: all/visible/hidden/search/select/availability) with full
+  broker metadata (`SymbolMetadata`, `symbols/metadata.py:82`), reports ambiguity
+  instead of guessing, and never substitutes. 29 tests in
+  `tests/unit/test_symbol_resolution.py`. What is still missing is only the wire half
+  (§4 D7): no sync kind carries symbols and no endpoint accepts an inventory.
 - No hardcoded trading defaults: `config.py:183-186` — `magic=None`, `bot_symbol=""`
   (magic/symbol come from the server per command or explicit device config).
 
 **Missing.**
 
-- **Symbol-resolution abstraction: entirely absent.** A repo-wide grep for
-  `resolv* / ambigu* / canonical` finds no resolver in `nse_bridge/` (only a timeframe
-  resolver in `engine/charts.py:18` and filling-mode resolution in `engine/common.py:265`).
-  There is no component that (1) receives a canonical instrument identifier from the
-  server, (2) discovers actual broker symbols, (3) compares metadata, (4) identifies
-  candidates, (5) returns exact broker symbol names, (6) **reports ambiguity instead of
-  guessing**, (7) caches valid mappings, or (8) refreshes mappings when the broker
-  environment changes. The local commands answer per-symbol queries only; nothing maps
-  `XAUUSD` → `XAUUSD.a` / `XAUUSDm` / `GOLD#`, and nothing reports that two candidates
-  are ambiguous. This is the single biggest §4 gap and blocks spec §4, §17 Symbols-screen
-  "resolution ambiguity", and any server-driven symbol work.
-- **Hidden symbols:** `get_trading_symbols` uses `mt5.symbols_get()` with a `visible_only`
-  filter, but there is no `select_symbols for Market Watch` step and no evidence the list
-  is the *complete* broker inventory (contrast contract §17.1.2, where the MCP action
+- **Hidden symbols:** the Market Watch select step now exists
+  (`SymbolInventory.select_for_market_watch`, `symbols/inventory.py:194`),
+  but there is still no evidence the list is the *complete* broker
+  inventory (contrast contract §17.1.2, where the MCP action
   takes `include_hidden: true`). Whether hidden symbols are reachable was **not verified**.
 - **Symbol availability / untradeable detection:** only via `trade_mode` in the list
   response; no dedicated availability probe or "symbol cannot currently be traded"
@@ -336,22 +334,33 @@ carried onto the renamed branch). Code size (`wc -l`, `nse_bridge/` + `scripts/`
 
 **Missing.**
 
-- **`PARTIALLY_COMPLETED` does not exist.** A repo-wide grep finds no occurrence of
-  `PARTIALLY_COMPLETED` (or `PARTIALLY`) in `nse_bridge/`, `tests/`, or `docs/`.
-  A partial close today completes as `COMPLETED` with no distinct state, no remaining-
-  volume reporting in the lifecycle, and no wire representation: contract §6.5
+- **`PARTIALLY_COMPLETED` — implemented LOCALLY (audit P2-10 refresh).**
+  The state exists in the lifecycle (`CommandState.PARTIALLY_COMPLETED`,
+  `server/commands.py:421`): a partial close (requested partial volume, or broker
+  retcode 10010 `DONE_PARTIAL`) reconciles against live MT5 truth and reports the
+  remaining volume. The wire representation is still missing: contract §6.5
   `action.result` statuses are exactly `rejected | executed | mcp_failed` — there is
-  no partial status on the wire either. Spec §7 requires the state; the contract has no
-  place to put it. This needs a contract decision (new `action.result` status or a
-  `partial` payload marker) before the Bridge can implement it truthfully (§4 D5, §6).
+  no partial status on the wire, so the wire status stays `executed` with the partial
+  facts (`partial`, `closed_volume`, `remaining_volume`, `reconciled`) in the payload.
+  Spec §7 requires the state; the contract has no place to put it. This still needs a
+  contract decision (new `action.result` status or a `partial` payload marker) before
+  the Bridge can report it truthfully on the wire (§4 D5, §6).
 - Execution timeout handling exists per-command (driver timeouts, 30 s chart timeout),
   but no per-command execution-timeout value is carried on the command envelope itself
   (contract defines `expires_at` only).
 
-### §2.8 Trading journal & execution event data — **Missing** (as a subsystem)
+### §2.8 Trading journal & execution event data — **Partial** (local collector implemented + wired; upload channel missing — §4 D6)
 
-**What exists (raw material, not a journal).**
+**What exists (local collector — implemented, audit P2-10 refresh).**
 
+- Journal collector: `JournalCollector` (`nse_bridge/journal/collector.py:324`) collects
+  the spec §8 event types as discrete events with the §8 field set (ticket/position/
+  order/deal IDs, symbol, volume, price, SL/TP, commission, swap, profit, execution
+  time, magic, broker return code, correlation + command IDs), derived from MT5 state
+  deltas, never inventing fills — and is WIRED in production: the `create_app`
+  lifespan constructs it and assigns it to `SyncEngine.journal`, pinned by
+  `tests/unit/test_production_wiring.py`. 28 tests in `tests/unit/test_journal.py`.
+- Event-level dedup exists: dedup keys (`journal/events.py:71`).
 - History sync: `history_orders` (orders + deals) and `history_positions` (closed
   positions) batches with checkpoint/dedup/pagination (`sync.py:419+`); ticket-less
   records dropped client-side with a `data_quality` warning path; bounded ranges
@@ -363,22 +372,11 @@ carried onto the renamed branch). Code size (`wc -l`, `nse_bridge/` + `scripts/`
 
 **Missing.**
 
-- No journal module, no journal event collector, no journal event stream: a grep for
-  `journal` across `nse_bridge/` returns nothing. None of the spec §8 event types is
-  collected as a discrete event (order submitted/accepted/rejected, position
-  opened/modified/partially/fully closed, pending created/modified/canceled, deal
-  executed, broker error, terminal/account connection change) with the §8 field set
-  (ticket/position/order/deal IDs, symbol, volume, price, SL/TP, commission, swap,
-  profit, execution time, magic, broker return code, correlation + command IDs).
-- No journal/event upload channel exists in CONTRACT v1 either — the only sync kinds are
+- No journal/event upload channel exists in CONTRACT v1 — the only sync kinds are
   `account | positions | history_orders | history_positions` (§3.3). Journal facts today
-  can only be *derived server-side* from those batches. A Bridge-side journal-event
-  collector would still have nowhere to send events until a contract endpoint exists
-  (§4 D7). Implementation order: build the local collector against the sync-batch
-  shapes first (deriving events from MT5 state deltas, never inventing fills), and
-  define the upload endpoint as a contract dependency — do not invent a frame.
-- Duplicate prevention during sync exists at batch level (batch_id dedup, ticket dedup);
-  event-level dedup for a future journal stream does not.
+  can only be *derived server-side* from those batches. The local collector has nowhere
+  to send events until a contract endpoint exists (§4 D6); define the upload endpoint
+  as a contract dependency — do not invent a frame.
 
 ### §2.9 Accounting & financial data — **Partial**
 
@@ -465,7 +463,7 @@ carried onto the renamed branch). Code size (`wc -l`, `nse_bridge/` + `scripts/`
   change between polls (the next poll simply re-reads full state, which bounds the gap
   to one poll interval — acceptable, but not a reconciler).
 
-### §2.12 Centralized logging, telemetry & diagnostics — **Partial** (local: Implemented; delivery: Missing by contract)
+### §2.12 Centralized logging, telemetry & diagnostics — **Partial** (local: Implemented; delivery: Wired, live proof owed)
 
 **Implemented (local pipeline).**
 
@@ -491,20 +489,18 @@ carried onto the renamed branch). Code size (`wc -l`, `nse_bridge/` + `scripts/`
 
 **Missing.**
 
-- **Delivery.** There is no diagnostics/events upload endpoint in CONTRACT v1 §4.2, and
-  the Bridge invents none. `DiagnosticsSink` (`telemetry.py:120-149`) is the adapter
-  interface for a future endpoint; the live sink is `NullDiagnosticsSink` — it sends
-  nothing, to no URL. The queue therefore **drains by TTL** (`telemetry.py:267-274`:
-  "queue drains by TTL — by design, until an endpoint exists"), i.e. ERROR/WARN events
-  expire undelivered when the queue fills or ages out. Truthful channels used instead:
-  `action.result` errors, heartbeat/liveness, manifest updates (`docs/PLATFORM-GAPS.md
-  §2`). This is the documented contract dependency D1, and it blocks spec §25 acceptance
-  items "ERROR and WARN events reach the server reliably" and "Diagnostic delivery
-  survives temporary network failures" — which cannot be satisfied by Bridge code alone.
-- **Persistent delivery of important unsent events:** the queue is in-memory; only
-  `action.result` payloads have a durable (JSONL) store. A Bridge restart loses queued
-  diagnostic events. (Acceptable only because no delivery channel exists yet; once D1
-  lands, the queue needs the same durable backing as the result store.)
+- **Delivery — WIRED (audit P2-10 refresh).** D1 is closed on the Bridge side by P5a:
+  the Platform defines the endpoint — `POST /api/v1/connector/diagnostics` (CONTRACT
+  §4.2 amended) — and the Bridge ships `HttpDiagnosticsSink`
+  (`nse_bridge/api/app.py:203–216`), attached at startup with the same Bearer <redacted>
+  `X-NSE-Device-Id` auth as every other device call. ERROR drains immediately on emit;
+  WARN/ERROR drain on the 60 s periodic drain (`DIAGNOSTICS_DRAIN_INTERVAL_S`).
+  **Still owed:** live ingest proof against the deployed Platform (D11) — unit tests
+  prove the sink against `httpx.MockTransport` only. Until that proof exists, spec §25
+  acceptance item "ERROR and WARN events reach the server reliably" stays Not-proven.
+- **Persistent delivery of important unsent events — WIRED.** The emitter's queue is the
+  durable one (`DurableDiagnosticQueue` over `DurableDiagnosticStore`,
+  `api/app.py:175–180`, `c27bf0b`): queued diagnostics survive a Bridge restart.
 
 ### §2.13 Automatic recovery & self-healing — **Partial** (15 of 20 scenarios)
 
@@ -681,25 +677,27 @@ No trading dashboard, no positions/orders screens, no AI screens, no Backtest sc
   `signature: null`; the Bridge refuses null-signature releases. No conflict — the
   Bridge never trusts SHA-256 alone from an unauthenticated source (spec §18).
 
-**Missing.**
+**Missing (audit P2-10 refresh: the items below are now done locally — only live proof is owed).**
 
-- **Release-signing public key unprovisioned** (see §1): until the operator provisions
-  it (env `NSE_BRIDGE_UPDATE_PUBLIC_KEY` or a bundled `update_public_key.b64` file),
-  **no update can install at all** — the updater fail-closes with `NO_PUBLIC_KEY`.
-  This is the correct fail-closed behaviour, but it means the update path is
-  currently non-functional end-to-end. Operator action required (§6).
-- **No rollback / recovery strategy.** A grep for `rollback` across `nse_bridge/` and
-  `updates.py` finds nothing. The mitigations that exist are: verification before
-  staging, download-only staging, and install-on-restart (a failed download/verify
-  never touches the running install). There is no previous-version backup, no
-  install-failure detection, and no automatic revert to the last good version. Spec
-  §18 requires a rollback or recovery strategy — **missing**.
-- **No `.ico` asset** (`bridge.spec:62-64`); PyInstaller falls back to its default icon.
-- **No installer** (WiX `.msi` / NSIS `.exe`): distribution is the PyInstaller single-file
-  exe only. Contract §12.4 asks for the installer path to be documented with a build
-  script + install instructions; that document does not exist in this repo.
-- **No tagged release has ever been cut** (no tag exists yet), so the release job has
-  never executed; the first real release is still owed (docs/ACCEPTANCE.md #13).
+- **Release-signing public key — PROVISIONED (P1-6).** The key is bundled
+  (`nse_bridge/update_public_key.b64`) and the release job signs every artifact when the
+  `NSE_BRIDGE_RELEASE_SIGNING_KEY` secret is set; a signed release installs end-to-end
+  and an unsigned one still refuses fail-closed. **Still owed:** live signed-release
+  install proof on Windows (P1-9) and the Platform D19 serve of the `.sig` sidecar
+  (`v1.4.0` ships SHA-256 only, no `.sig` assets yet).
+- **Rollback / recovery strategy — WRITTEN + IMPLEMENTED (P1-7).** `docs/ROLLBACK.md`
+  records the strategy (previous-version retention + fallback launch,
+  `tests/unit/test_rollback.py` — mock proof only). **Still owed:** live Windows proof
+  (P1-9).
+- **`.ico` asset — EXISTS AND IS BUNDLED.** `assets/icon.ico` (generated by
+  `scripts/make_icon.py`), wired into `bridge.spec` (`datas` + exe `icon`) and the Inno
+  installer (`SetupIconFile`); integrity gate `tests/unit/test_icon_asset.py`.
+- **Installer — EXISTS.** Inno Setup installer (`windows/NSE-MT5-Bridge.iss`, compiled
+  in CI on every PR) ships alongside the portable exe (`NSE-MT5-Bridge-Setup-1.4.0.exe`
+  in the `v1.4.0` release). Open: whether the Inno installer (vs the portable exe
+  alone) is the distribution (§6 item 7).
+- **Tagged release — CUT.** `v1.4.0` was tagged and published 2026-11-26 with 15 assets;
+  the release job has executed (see docs/ACCEPTANCE.md #13).
 
 ### §2.19 Future server-directed computation — **Partial** (boundary only — as specified)
 
@@ -1147,13 +1145,13 @@ section that does not define it, and the Bridge-side boundary/interface implemen
 
 | # | Required capability (spec ref) | Not in CONTRACT v1 | Bridge-side boundary implemented instead |
 |---|---|---|---|
-| D1 | **Diagnostics / events upload endpoint** — ship ERROR/WARN (and meaningful INFO) diagnostic events to the Platform (spec §12; acceptance items "ERROR and WARN events reach the server reliably", "diagnostic delivery survives temporary network failures") | **Not in CONTRACT v1 §4.2.** §4.2 explicitly defines no diagnostics endpoint; health is derived server-side from `last_seen_at`, WS liveness, last accepted batch, manifest. No path, auth, payload, rate limit, or retention is defined anywhere in the contract. | Local pipeline complete: `TelemetryEmitter` + bounded `DiagnosticQueue` (retry/backoff/dedup/limits/expiry) + `DiagnosticsSink` adapter interface (`reliability/telemetry.py:120-149`) with an inert `NullDiagnosticsSink`. Truthful reporting via existing channels only: `action.result` errors, heartbeat/liveness, manifest updates. The queue drains by TTL until an endpoint exists. **Required from Platform:** a contract amendment defining the endpoint (path, auth, payload, rate limits, retention). No URL or payload shape is proposed here. |
+| D1 | **Diagnostics / events upload endpoint** — ship ERROR/WARN (and meaningful INFO) diagnostic events to the Platform (spec §12; acceptance items "ERROR and WARN events reach the server reliably", "diagnostic delivery survives temporary network failures") | **CLOSED on the Bridge side by P5a (audit P2-10 refresh).** CONTRACT §4.2 amended: the endpoint is `POST /api/v1/connector/diagnostics` (Platform `connector::diagnostics`, migration 0095; wire shape `{ "events": [...] }`, 1–100 events, server answers `{ "accepted": <n>, "stored": <n> }`; durable budget `diagnostics` 30/min per device). | Local pipeline complete + sink WIRED: `HttpDiagnosticsSink` (`nse_bridge/api/app.py:203–216`), ERROR immediate drain + 60 s periodic drain, over the durable queue (`api/app.py:175–180`). **Still owed:** live ingest proof against the deployed Platform (D11); unit tests prove the sink against `httpx.MockTransport` only. |
 | D2 | **`open_order` sendable** — market BUY/SELL + all 6 pending types via the server channel (spec §6; contract §17.5/§18.8.1–18.8.8, status B) | **Not sendable in CONTRACT v1 §6.1.** `open_order` (`trade_send_market_order`, `trade_send_pending_order`) is explicitly NOT sendable; §17.5 makes it an OPEN DECISION for the user. No wire shape beyond the generic envelope is defined for it. | Local capability exists (`execution.py`, `trading.py`, `orders.py`); server channel allowlist excludes it (`commands.py:158`). **Required:** (1) user's explicit approval, (2) allowlist addition + tests, (3) Risk Engine + financial-consent gate proof on demo, (4) `schema_version` bump (§10). |
 | D3 | **`cancel_order` sendable** — cancel a pending order by ticket (spec §6; contract §18.9.6, status B) | **Not sendable in CONTRACT v1 §6.1.** `cancel_order` (`trade_delete_order`) is explicitly NOT sendable in v1. | Local capability exists (`trade_cancel_pending_order`, `orders.py:354`); server channel excludes it. **Required:** allowlist extension + demo proof + published minimum version (same close-out pattern as D4). |
 | D4 | **`modify_pending` close-out + pending price/expiration modification** (spec §6; contract §17.4, §18.9.2–18.9.4) | **§17.4 capability-gated, not sendable.** The op is contract-defined (SL/TP only) but no version qualifies (published minimum version: none). **§18.9.3/18.9.4 (price/expiration): no verified MT5 MCP action exists** in the live manifest ("possible gap", §18.16 item 2); no server op is defined for them. | SL/TP: gate starts CLOSED (`modify_pending_proven=False`); local mapping exists (`modify_pending_order_sltp`). Price/expiration: local capability exists via the Python driver (`trade_modify_pending_order`, `TRADE_ACTION_MODIFY`) but is **not** exposed remotely — the server channel maps `modify_pending` to SL/TP only. **Required:** (a) market-open live proof that a pending-order ticket is accepted, (b) published minimum `connector_version`, (c) for price/expiration, a contract op + MCP-coverage proof (or a contract statement that the Python-driver capability is the reference). |
-| D5 | **Partial-close and close-by via the server channel + `PARTIALLY_COMPLETED` lifecycle state** (spec §§6–7; contract §18.8.10, §18.8.12) | **No wire shape.** The §6.2 envelope carries only `{type, ticket, sl?, tp?}` — no `volume` field for partial close, no `close_by_ticket` field for close-by. Contract §6.5 `action.result` statuses are exactly `rejected \| executed \| mcp_failed` — **no partial status exists on the wire**, so the Bridge's (missing) `PARTIALLY_COMPLETED` state has nowhere to be reported. | Local partial close exists (`close_position(volume=…)`); close-by does **not** exist locally either. Reconciliation (`_reconcile`) can prove a reduced volume on read-back. **Required:** a contract amendment adding `volume` (partial close) and `close_by_ticket` (close-by) to the envelope, and a wire representation for partial completion (new `action.result` status or a `partial` payload marker) — plus the user/Platform decision on hedging-only semantics (MQL5 `PositionClosePartial` constraints; netting = opposing deal). |
-| D6 | **Journal / execution-event upload** — discrete events (order submitted/accepted/rejected, position opened/modified/closed, deal executed, broker error) with the spec §8 field set (spec §8) | **Not in CONTRACT v1.** No journal/event endpoint or frame exists. The only sync kinds are `account \| positions \| history_orders \| history_positions` (§3.3); WS client→server frames are only `heartbeat`, `action.result`, `chart.data`, `chart.tick` (§5.3). | No journal collector exists in the Bridge (§2.8). History batches carry the raw facts (orders/deals/closed positions) from which the Platform derives journal entries server-side. **Required:** a contract amendment defining a journal/event channel (or a formal statement that journal derivation from sync batches is the intended design, in which case the Bridge builds only the local event collector for GUI/diagnostics, not an upload path). |
-| D7 | **Symbol inventory / metadata sync + symbol-resolution service** (spec §4) | **Not in CONTRACT v1.** No sync kind carries symbols; no endpoint accepts a symbol inventory, metadata snapshot, or resolution request/response. The only symbol data path is §17.1 chart frames (per-symbol, on request/subscription). | No resolver exists (§2.4). Local symbol list/info commands exist. **Required:** a contract decision on how the server learns the broker's symbol inventory — e.g. a new sync kind, a chart-frame extension, or "on-demand only via chart frames" (in which case the resolver is still Bridge work, but the server never receives a full inventory). |
+| D5 | **Partial-close and close-by via the server channel + `PARTIALLY_COMPLETED` lifecycle state** (spec §§6–7; contract §18.8.10, §18.8.12) | **No wire shape.** The §6.2 envelope carries only `{type, ticket, sl?, tp?}` — no `volume` field for partial close, no `close_by_ticket` field for close-by. Contract §6.5 `action.result` statuses are exactly `rejected \| executed \| mcp_failed` — **no partial status exists on the wire**, so the Bridge's `PARTIALLY_COMPLETED` state (a local terminal state, `commands.py:421`) has nowhere to be reported. | Local partial close exists (`close_position(volume=…)`); close-by exists locally too (`trade_close_position_by`, `engine/positions.py:306`). Reconciliation (`_reconcile`) can prove a reduced volume on read-back. **Required:** a contract amendment adding `volume` (partial close) and `close_by_ticket` (close-by) to the envelope, and a wire representation for partial completion (new `action.result` status or a `partial` payload marker) — plus the user/Platform decision on hedging-only semantics (MQL5 `PositionClosePartial` constraints; netting = opposing deal). |
+| D6 | **Journal / execution-event upload** — discrete events (order submitted/accepted/rejected, position opened/modified/closed, deal executed, broker error) with the spec §8 field set (spec §8) | **Not in CONTRACT v1.** No journal/event endpoint or frame exists. The only sync kinds are `account \| positions \| history_orders \| history_positions` (§3.3); WS client→server frames are only `heartbeat`, `action.result`, `chart.data`, `chart.tick` (§5.3). | Journal collector exists AND is wired in production (§2.8): `JournalCollector` (`journal/collector.py:324`) with event-level dedup keys (`journal/events.py:71`), constructed in the `create_app` lifespan and assigned to `SyncEngine.journal`, pinned by `tests/unit/test_production_wiring.py`. History batches carry the raw facts (orders/deals/closed positions) from which the Platform derives journal entries server-side. **Required:** a contract amendment defining a journal/event channel (or a formal statement that journal derivation from sync batches is the intended design, in which case the Bridge builds only the local event collector for GUI/diagnostics, not an upload path). |
+| D7 | **Symbol inventory / metadata sync + symbol-resolution service** (spec §4) | **Not in CONTRACT v1.** No sync kind carries symbols; no endpoint accepts a symbol inventory, metadata snapshot, or resolution request/response. The only symbol data path is §17.1 chart frames (per-symbol, on request/subscription). | Resolver exists (§2.4): `SymbolResolver` (`symbols/resolver.py:140`, ambiguity reported, never guessed), `SymbolInventory` (`symbols/inventory.py:81`), `SymbolMetadata` (`symbols/metadata.py:82`); 29 tests in `tests/unit/test_symbol_resolution.py`. **Required:** a contract decision on how the server learns the broker's symbol inventory — e.g. a new sync kind, a chart-frame extension, or "on-demand only via chart frames" (in which case the resolver is still Bridge work, but the server never receives a full inventory). |
 | D8 | **Accounting source-data channel beyond the four sync kinds** (spec §9) | **Partially in CONTRACT v1 §3.3.** Balance/equity/margin/credit/deals flow inside `account` / `history_*` batches, but there is no dedicated accounting snapshot kind, no deposit/withdrawal/adjustment/fee surfacing, and no MT5-vs-derived labelling rule on the wire. | Raw values flow in existing batches; no labelling, no dedicated surfacing (§2.9). **Required:** a contract statement on whether the four kinds suffice (likely yes, with a labelling convention added to the batch payloads) or a new kind/field set. |
 | D9 | **Future server-assigned compute wire format** (spec §19) | **Not in CONTRACT v1.** No frame, endpoint, or kind registry for tasks exists anywhere in the contract. | Local boundary only: `nse_bridge/tasks/` (envelope, validation, bounded worker, EMPTY kind registry), not wired to the WS command path. **Required:** a future contract amendment registering task kinds and their wire format. Approved/trusted modules only — never arbitrary remote code execution. |
 | D10 | **Per-device credential exchange + per-command signatures** (contract §2.2 D-AUTH-1, §6.2 D-CMD-3 — v1.1) | **Deferred in CONTRACT v1.** Both are defined as v1.1 follow-ups; the `register-device` response is extensible and the `signature` field name is reserved, but neither mechanism exists. | Bridge sends the API key as Bearer on every call; commands are authenticated by the WSS session + server audit trail. No action until the Platform defines both mechanisms. |
@@ -1197,16 +1195,16 @@ command path, the lifecycle, or the GUI are sequenced. "Area" numbers are spec �
 
 | # | Area | Work | Depends on | Parallel with |
 |---|---|---|---|---|
-| C1 | 4 Symbol discovery + broker compat | **Build the symbol-resolution abstraction** (§2.4): canonical-ID → broker-symbol mapping with metadata comparison, candidate listing, ambiguity reporting (never guessing), mapping cache + refresh. Add hidden-symbol inventory handling and availability reporting. Fix/verify the stop-limit pending types (see C2). | B2 (terminal data), B3 (symbol-unavailable scenario) | C2, C3 |
-| C2 | 5 Order execution + recovery | Add `BUY_STOP_LIMIT` / `SELL_STOP_LIMIT` to the local execution path; add local close-by (`TRADE_ACTION_CLOSE_BY`); add `PARTIALLY_COMPLETED` to the lifecycle **once D5 defines its wire representation** (do not invent the wire status first); resolve the local `trade_modify_pending_order` volume question (§3 §18 F-row note). | C1 (symbol resolution for exact broker symbols) | C1, C3 |
-| C3 | 6 Account data + journal sync | Build the **journal-event collector** (§2.8) from MT5 state deltas (never inventing fills), with the spec §8 field set and event-level dedup; add MT5-vs-derived labelling to accounting payloads (§2.9) and explicit deposit/withdrawal/fee surfacing. | B1 (checkpoint persistence — journal ranges depend on it) | C1, C2 |
+| C1 | 4 Symbol discovery + broker compat | **Symbol-resolution abstraction — DONE locally (§2.4, audit P2-10 refresh):** `SymbolResolver` + `SymbolInventory` + `SymbolMetadata` exist (canonical-ID → broker-symbol mapping with metadata comparison, candidate listing, ambiguity reporting, mapping cache + refresh; hidden-symbol inventory handling and availability reporting; stop-limit pending types verified — `BUY_STOP_LIMIT` / `SELL_STOP_LIMIT` in `engine/execution.py:32–33`). Remaining is the D7 wire decision (how the server learns the inventory). | B2 (terminal data), B3 (symbol-unavailable scenario) | C2, C3 |
+| C2 | 5 Order execution + recovery | `BUY_STOP_LIMIT` / `SELL_STOP_LIMIT` in the local execution path — DONE (`engine/execution.py:32–33`); local close-by (`TRADE_ACTION_CLOSE_BY`) — DONE (`trade_close_position_by`, `engine/positions.py:306`); `PARTIALLY_COMPLETED` in the lifecycle — DONE locally (`commands.py:421`); the wire representation is still gated on D5 (do not invent the wire status first); the local `trade_modify_pending_order` volume question is P2-8's area (merged as PR #47). | C1 (symbol resolution for exact broker symbols) | C1, C3 |
+| C3 | 6 Account data + journal sync | **Journal-event collector — DONE locally (§2.8, audit P2-10 refresh):** `JournalCollector` built from MT5 state deltas (never inventing fills), with the spec §8 field set and event-level dedup, wired in production. MT5-vs-derived labelling for accounting payloads (§2.9) exists; explicit deposit/withdrawal/fee surfacing is local labelling only. Remaining is the D6 wire decision. | B1 (checkpoint persistence — journal ranges depend on it) | C1, C2 |
 | C4 | 9 GUI integration | Add the **Symbols** screen (inventory, exact broker names, search, metadata, availability, resolution ambiguity) and the **Execution** screen (recent lifecycle, status, failures, pending ops, reconciliation state). Both consume data built in C1–C3; no new data acquisition. | C1, C2, C3 | — (after C1–C3) |
 
 ### Phase D — Contract-gated work (cannot complete without Platform/user decisions)
 
 | # | Area | Work | Depends on | Parallel with |
 |---|---|---|---|---|
-| D-a | 2 REST + WS / 5 execution | `modify_pending` close-out (§17.4 a–d): allowlist-gate pass-tests, **market-open live proof**, published minimum `connector_version`. | User/Platform: live proof run + published version (D4) | D-b |
+| D-a | 2 REST + WS / 5 execution | `modify_pending` close-out (§17.4 a–d): (a)–(c) DONE — allowlist-gate, tests, **market-open live proof E-P2B-6 (2026-11-19)**; only (d) published minimum `connector_version` still owed. | Platform: published minimum version only (live proof done) | D-b |
 | D-b | 5 execution | `open_order` / `cancel_order` allowlist extensions + demo proof + `schema_version` bump. | **User decision** (§17.5) + Platform Risk Engine proof (D2/D3) | D-a |
 | D-c | 7 telemetry | Switch the `DiagnosticsSink` from inert to live once D1 defines the endpoint; backfill durable queue delivery + delivery tests. | Platform: D1 endpoint definition | D-a, D-b |
 | D-d | 1 Architecture | Close out remaining §18 B rows per §18.17 (allowlist extensions with market-open proof + published minimum version per op); update §18.15 counts. | D-a, D-b, C2 | — |
@@ -1243,26 +1241,29 @@ spec §21).
    Risk Engine + financial-consent proof on demo).
 3. **`PARTIALLY_COMPLETED` wire representation.** Spec §7 requires the state; contract
    §6.5 has no partial status. **Needs:** a Platform/contract decision — new
-   `action.result` status or a `partial` payload marker — before the Bridge implements
-   the state. Implementing it locally first would invent wire surface.
-4. **Diagnostics endpoint (D1).** Two spec §25 acceptance items cannot be satisfied
-   without it. **Needs:** a Platform contract amendment (path, auth, payload, rate
-   limits, retention). Question for the user: is the amendment in scope for the
-   Platform work now, or is telemetry-via-existing-channels accepted as the v1 position
-   (with the acceptance items marked blocked, not failed)?
+   `action.result` status or a `partial` payload marker — for the wire half. The Bridge
+   has implemented the state LOCALLY (`CommandState.PARTIALLY_COMPLETED`,
+   `commands.py:421`; wire stays `executed` with the partial facts in the payload) —
+   no wire surface was invented.
+4. **Diagnostics endpoint (D1).** CLOSED on the Bridge side by P5a: the endpoint
+   `POST /api/v1/connector/diagnostics` exists and the sink is wired. Two spec §25
+   acceptance items still cannot be satisfied without live proof (D11). **Needs:**
+   live ingest proof against the deployed Platform.
 5. **Journal/event channel (D6) and symbol-inventory channel (D7).** **Needs:** a
    Platform decision — new channel(s), or a formal statement that journal derivation
    from sync batches and on-demand chart frames are the intended designs.
-6. **Release-signing public key (operator action).** The updater cannot install anything
-   until the operator provisions the key. **Needs:** the user/operator to generate and
-   provision the Ed25519 keypair (private key stays with the release signer; public key
-   via env or bundled file). No key material is invented here.
-7. **`.ico` asset + installer.** **Needs:** the user to supply (or explicitly waive) a
-   real icon, and to decide whether a WiX/NSIS installer is wanted or the PyInstaller
-   exe alone is the distribution.
-8. **Rollback strategy for updates.** **Needs:** a design decision — previous-version
-   backup + revert, or "verified-staging + install-on-restart is sufficient" recorded
-   explicitly as the recovery strategy.
+6. **Release-signing public key (operator action) — CLOSED by P1-6.** The key is
+   provisioned (bundled `nse_bridge/update_public_key.b64` + release-job signing step).
+   **Needs:** live signed-release install proof (P1-9) and the Platform D19 serve of
+   the `.sig` sidecar.
+7. **`.ico` asset + installer — icon CLOSED.** `assets/icon.ico` exists and is bundled
+   (`bridge.spec`, Inno `SetupIconFile`); an Inno Setup installer exists
+   (`windows/NSE-MT5-Bridge.iss`, shipped as `NSE-MT5-Bridge-Setup-1.4.0.exe`).
+   **Needs:** only the decision whether the Inno installer (vs the portable exe alone)
+   is the distribution — WiX/NSIS is no longer the question.
+8. **Rollback strategy for updates — CLOSED by P1-7.** `docs/ROLLBACK.md` is written and
+   implemented (previous-version retention + fallback launch). **Needs:** live Windows
+   proof (P1-9).
 9. **Multiple attached terminals.** Spec §3 wants independent connection state per
    terminal; the Bridge attaches one terminal at a time. **Needs:** a scoping decision —
    is single-attached-terminal acceptable for v1 (multi-terminal = discovery +
