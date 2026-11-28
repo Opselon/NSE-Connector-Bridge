@@ -460,7 +460,6 @@ class CommandEnvelope:
     #: frame and meaningful only for the ops that carry them.
     protocol_version: str = PROTOCOL_VERSION_V1
     priority: int = PRIORITY_DEFAULT
-    deviation: float | None = None  # market opens: MT5 points, >= 0
     expiry_secs: int | None = None  # pending opens: 0..900
     comment: str | None = None
     policy_revision: int | None = None  # §8.6 fencing token
@@ -468,8 +467,6 @@ class CommandEnvelope:
     decision_ref: str | None = None
     risk_ref: str | None = None
     approval_ref: str | None = None
-    trailing_distance: float | None = None  # trailing_stop only
-    break_even_offset: float | None = None  # break_even only
     issued_at: str | None = None
     expires_at: str | None = None
     idempotency_key: str | None = None
@@ -612,15 +609,10 @@ def parse_envelope(frame: Any) -> CommandEnvelope:
         except (TypeError, ValueError):
             raise ValueError(f"command {name} is not an integer") from None
 
-    deviation = _opt_num(operation.get("deviation"), "deviation")
-    if deviation is not None and deviation < 0:
-        raise ValueError("command deviation must be >= 0")
     expiry_secs = _opt_int(operation.get("expiry_secs"), "expiry_secs")
     if expiry_secs is not None and not 0 <= expiry_secs <= 900:
         raise ValueError("command expiry_secs must be 0..900")
     policy_revision = _opt_int(operation.get("policy_revision"), "policy_revision")
-    trailing_distance = _opt_num(operation.get("trailing_distance"), "trailing_distance")
-    break_even_offset = _opt_num(operation.get("break_even_offset"), "break_even_offset")
 
     def _opt_str(value: Any) -> str | None:
         return str(value) if value not in (None, "") else None
@@ -641,7 +633,6 @@ def parse_envelope(frame: Any) -> CommandEnvelope:
         stoplimit=_num(stoplimit_raw),
         protocol_version=protocol_version,
         priority=priority,
-        deviation=deviation,
         expiry_secs=expiry_secs,
         comment=_opt_str(operation.get("comment")),
         policy_revision=policy_revision,
@@ -649,8 +640,6 @@ def parse_envelope(frame: Any) -> CommandEnvelope:
         decision_ref=_opt_str(operation.get("decision_ref")),
         risk_ref=_opt_str(operation.get("risk_ref")),
         approval_ref=_opt_str(operation.get("approval_ref")),
-        trailing_distance=trailing_distance,
-        break_even_offset=break_even_offset,
         issued_at=str(frame["issued_at"]),
         expires_at=str(frame["expires_at"]),
         idempotency_key=str(frame["idempotency_key"]) if frame.get("idempotency_key") is not None else None,

@@ -458,7 +458,6 @@ def test_parse_envelope_v2_fields():
     )
     assert env.protocol_version == "2"
     assert env.priority == 9
-    assert env.deviation == pytest.approx(10)
     assert env.expiry_secs == 300
     assert env.comment == "NSE_TEST"
     assert env.policy_revision == 7
@@ -497,12 +496,14 @@ def test_parse_envelope_priority_clamped_to_0_9():
 
 @pytest.mark.unit
 def test_parse_envelope_v2_malformed_fields_are_malformed():
-    with pytest.raises(ValueError):
-        parse_envelope(_open_frame(deviation=-1))
+    # NOTE (audit P2-6): the envelope no longer carries `deviation` —
+    # it is parsed and enforced at the v2 seam
+    # (`V2OpenOrderRequest.from_operation`, 0..1000, whole points),
+    # so a bad deviation is rejected at dispatch, not here. See
+    # `test_v2_from_operation_negative_deviation_fails` and
+    # `test_v2_from_operation_non_numeric_deviation_fails`.
     with pytest.raises(ValueError):
         parse_envelope(_open_frame(expiry_secs=901))
-    with pytest.raises(ValueError):
-        parse_envelope(_open_frame(deviation="abc"))
     with pytest.raises(ValueError):
         parse_envelope(_frame(priority="high", operation={"type": "close_position", "ticket": "9000001"}))
 
