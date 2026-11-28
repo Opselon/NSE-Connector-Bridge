@@ -24,7 +24,7 @@ from ..retcodes import (
     TRADE_RETCODE_NO_CHANGES,
     translate_retcode,
 )
-from ..timeutil import broker_dt
+from ..timeutil import broker_dt, broker_epoch_to_utc, normalize_utc
 from .common import BridgeContext
 from .registry import command
 from .retry import ExecutionRetryPolicy, retcode_class_label, retryable_retcode
@@ -420,15 +420,30 @@ def cancel_order_by_ticket(ctx: BridgeContext, ticket: int) -> dict[str, Any]:
     return trade_cancel_pending_order(ctx, TicketRequest(ticket=ticket))
 
 
-def _modify_pending_landed(ctx: BridgeContext, ticket: int, price: float, sl: float, tp: float) -> bool:
+def _modify_pending_landed(
+    ctx: BridgeContext,
+    ticket: int,
+    price: float,
+    sl: float,
+    tp: float,
+    expiration_utc: str | None = None,
+) -> bool:
     """Reconcile-before-retry: is the requested pending-order state
     already live in the broker book?
 
-    A MODIFY sets absolute state (price/SL/TP), so the live order is
-    conclusive evidence. Brokers normalize prices to tick size, so the
-    comparison allows a half-tick tolerance (same rule as the command
-    layer's SL/TP reconciliation); a failed lookup is "not landed",
-    never an error here — the caller retries instead.
+    A MODIFY sets absolute state (price/SL/TP[/expiration]), so the
+    live order is conclusive evidence. Brokers normalize prices to
+    tick size, so the comparison allows a half-tick tolerance (same
+    rule as the command layer's SL/TP reconciliation); expirations
+    are compared as UTC instants with a 60s tolerance (brokers may
+    store them minute-aligned). A failed lookup is "not landed",
+    never an error here — the caller retries instead. When no
+    expiration was requested the live expiry is not checked: the
+    modify leaves it untouched, so it cannot prove anything either
+    way. An expiration-only modify MUST pass its expiry here —
+    without this check a timeout after an unapplied expiry-only
+    modify would falsely report "reconciled" (price/SL/TP already
+    matched before the modify).
     """
     try:
         raw = _fetch_order(ctx, ticket)
@@ -444,11 +459,24 @@ def _modify_pending_landed(ctx: BridgeContext, ticket: int, price: float, sl: fl
                 tol = float(step) / 2.0 + 1e-9
         except Exception as exc:  # noqa: BLE001 — tolerance lookup is best-effort
             logger.debug("[MODIFY_PENDING] tick-size lookup failed, using 1e-9 tolerance: {}", type(exc).__name__)
-        return (
+        landed = (
             abs(float(_f(raw, "price_open", 0.0) or 0.0) - price) <= tol
             and abs(float(_f(raw, "sl", 0.0) or 0.0) - sl) <= tol
             and abs(float(_f(raw, "tp", 0.0) or 0.0) - tp) <= tol
         )
+        if not landed:
+            return False
+        if expiration_utc is not None:
+            requested = normalize_utc(expiration_utc, 0)
+            if requested is None:
+                return False
+            live_exp = _f(raw, "time_expiration", 0) or 0
+            if not live_exp:
+                return False
+            live_dt = broker_epoch_to_utc(float(live_exp), ctx.settings.broker_utc_offset_minutes)
+            if abs((live_dt - requested).total_seconds()) > 60:
+                return False
+        return True
     except Exception:  # noqa: BLE001 — reconcile failure means "unknown", the caller retries
         return False
 
@@ -498,6 +526,21 @@ def trade_modify_pending_order(
     price = params.price if params.price is not None else float(_f(raw, "price_open", 0.0))
     sl = params.sl if params.sl is not None else float(_f(raw, "sl", 0.0) or 0.0)
     tp = params.tp if params.tp is not None else float(_f(raw, "tp", 0.0) or 0.0)
+    # P2-8: an expiration that cannot be parsed is a caller error,
+    # never a silent drop — the old code skipped an unparseable
+    # expiration and sent the modify without it, so the Platform
+    # could believe an expiry was set when it was not.
+    expiration_dt: datetime | None = None
+    if params.expiration_utc:
+        expiration_dt = broker_dt(params.expiration_utc, ctx.settings)
+        if expiration_dt is None:
+            raise BridgeError(
+                ErrorCode.VALIDATION,
+                f"Pending-order modify for #{params.ticket}: expiration_utc {params.expiration_utc!r} "
+                "is not a valid RFC 3339 timestamp — refusing rather than sending the modify without an expiry.",
+                http_status=422,
+                details={"ticket": params.ticket, "expiration_utc": params.expiration_utc},
+            )
     from .trading import mt5_trade_constants
 
     consts = mt5_trade_constants(ctx)
@@ -508,11 +551,9 @@ def trade_modify_pending_order(
         "sl": float(sl),
         "tp": float(tp),
     }
-    if params.expiration_utc:
-        exp = broker_dt(params.expiration_utc, ctx.settings)
-        if exp is not None:
-            request["type_time"] = consts["order_time_specified"]
-            request["expiration"] = exp
+    if expiration_dt is not None:
+        request["type_time"] = consts["order_time_specified"]
+        request["expiration"] = expiration_dt
     last_check: dict[str, Any] | None = None
     last_retcode: int | None = None
     for attempt in range(1, policy.max_attempts + 1):
@@ -565,7 +606,7 @@ def trade_modify_pending_order(
         if retryable_retcode(retcode) and attempt < policy.max_attempts:
             # Reconcile-before-retry: the modify may have landed
             # despite the retcode (e.g. a timeout after apply).
-            if _modify_pending_landed(ctx, params.ticket, price, sl, tp):
+            if _modify_pending_landed(ctx, params.ticket, price, sl, tp, params.expiration_utc):
                 logger.info(
                     "[MODIFY_PENDING] ticket={} target state already live after retcode={} — reconciled, not re-sent",
                     params.ticket,

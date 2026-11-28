@@ -667,14 +667,26 @@ def modify_position_sltp(
     )
 
 
-def modify_pending_order_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: float) -> dict[str, Any]:
-    """Modify SL/TP of a pending order (contract §17.4 ``modify_pending``).
+def modify_pending_order_sltp(
+    ctx: BridgeContext,
+    ticket: int,
+    sl: float,
+    tp: float,
+    *,
+    price: float | None = None,
+    expiration_utc: str | None = None,
+) -> dict[str, Any]:
+    """Modify a pending order (contract §17.4 ``modify_pending``).
 
-    SL/TP ONLY — price/volume/expiration changes have no verified
-    action and are out of scope (§17.4). The pending order's price and
-    volume are preserved from the live order; the dispatch reuses the
-    proven local ``trade_modify_pending_order`` request shape
-    (``TRADE_ACTION_MODIFY`` with the order ticket).
+    SL/TP plus, since audit P2-8, price and expiration: ``price``
+    moves the pending entry and ``expiration_utc`` (absolute ISO
+    8601 UTC) switches it to ORDER_TIME_SPECIFIED. Absent values
+    keep the live order's price/expiry — the primitive fills them
+    from the live book, so a SL/TP-only frame behaves exactly as
+    before. Volume is still NOT changeable via modify (MQL5) —
+    delete + replace instead. The name stays ``..._sltp``: it is
+    the established server-path entry point (patched by the
+    command-path tests and named in the contract docs).
 
     CAPABILITY GATE (§17.4): this function is reachable ONLY through
     the server command path after the ``modify_pending`` gate passes
@@ -687,7 +699,9 @@ def modify_pending_order_sltp(ctx: BridgeContext, ticket: int, sl: float, tp: fl
     # Deferred import: orders.py imports this module at top level.
     from .orders import ModifyPendingRequest, trade_modify_pending_order
 
-    return trade_modify_pending_order(ctx, ModifyPendingRequest(ticket=ticket, sl=sl, tp=tp))
+    return trade_modify_pending_order(
+        ctx, ModifyPendingRequest(ticket=ticket, price=price, sl=sl, tp=tp, expiration_utc=expiration_utc)
+    )
 
 
 def _reconcile_close_volume(ctx: BridgeContext, ticket: int) -> tuple[float | None, bool]:

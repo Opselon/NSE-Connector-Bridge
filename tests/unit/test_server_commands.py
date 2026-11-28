@@ -883,7 +883,7 @@ def test_modify_pending_with_position_ticket_is_rejected_not_executed(monkeypatc
     dispatched: list[str] = []
     monkeypatch.setattr(
         "nse_bridge.engine.trading.modify_pending_order_sltp",
-        lambda ctx_, ticket, sl, tp: dispatched.append("dispatched") or {"status": "done"},
+        lambda ctx_, ticket, sl, tp, **_kwargs: dispatched.append("dispatched") or {"status": "done"},
     )
     executor = CommandExecutor(ctx, _validator(modify_pending_proven=True), clock=lambda: NOW)
     execution, result = executor.execute(_frame(operation={"type": "modify_pending", "ticket": "9000001", "sl": 1.05}))
@@ -903,7 +903,7 @@ def test_modify_pending_success_with_gate_open(monkeypatch):
     seen: dict[str, object] = {}
     monkeypatch.setattr(
         "nse_bridge.engine.trading.modify_pending_order_sltp",
-        lambda ctx_, ticket, sl, tp: (
+        lambda ctx_, ticket, sl, tp, **_kwargs: (
             seen.update({"ticket": ticket, "sl": sl, "tp": tp})
             or {"status": "done", "ticket": ticket, "retcode": 10009}
         ),
@@ -917,6 +917,106 @@ def test_modify_pending_success_with_gate_open(monkeypatch):
 
 
 @pytest.mark.unit
+def test_modify_pending_price_and_expiration_reach_dispatch(monkeypatch):
+    """P2-8: a modify_pending frame carrying price + expiration_utc
+    passes both through to the engine entry point — the values the
+    audit found dropped at the dispatch."""
+    ctx = _ctx()
+    monkeypatch.setattr(
+        "nse_bridge.engine.orders._fetch_order",
+        lambda ctx_, ticket: SimpleNamespace(ticket=ticket, symbol="EURUSD", sl=1.0990, tp=1.1020),
+    )
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "nse_bridge.engine.trading.modify_pending_order_sltp",
+        lambda ctx_, ticket, sl, tp, **kwargs: (
+            seen.update({"ticket": ticket, "sl": sl, "tp": tp, **kwargs})
+            or {"status": "done", "ticket": ticket, "retcode": 10009}
+        ),
+    )
+    executor = CommandExecutor(ctx, _validator(modify_pending_proven=True), clock=lambda: NOW)
+    execution, result = executor.execute(
+        _frame(
+            operation={
+                "type": "modify_pending",
+                "ticket": "9000002",
+                "sl": 1.04,
+                "price": 1.1015,
+                "expiration_utc": "2026-11-20T12:00:00Z",
+            }
+        )
+    )
+    assert execution.state is CommandState.COMPLETED
+    assert result["status"] == "executed"
+    assert seen["ticket"] == 9000002
+    assert seen["sl"] == pytest.approx(1.04)
+    assert seen["tp"] == pytest.approx(1.1020)  # absent tp still fills from the live order
+    assert seen["price"] == pytest.approx(1.1015)
+    assert seen["expiration_utc"] == "2026-11-20T12:00:00Z"
+
+
+@pytest.mark.unit
+def test_modify_pending_without_expiration_passes_none(monkeypatch):
+    """P2-8: a frame without expiration_utc passes None — the
+    primitive keeps the live expiry instead of inventing one."""
+    ctx = _ctx()
+    monkeypatch.setattr(
+        "nse_bridge.engine.orders._fetch_order",
+        lambda ctx_, ticket: SimpleNamespace(ticket=ticket, symbol="EURUSD", sl=1.0990, tp=1.1020),
+    )
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "nse_bridge.engine.trading.modify_pending_order_sltp",
+        lambda ctx_, ticket, sl, tp, **kwargs: (
+            seen.update({"ticket": ticket, "sl": sl, "tp": tp, **kwargs})
+            or {"status": "done", "ticket": ticket, "retcode": 10009}
+        ),
+    )
+    executor = CommandExecutor(ctx, _validator(modify_pending_proven=True), clock=lambda: NOW)
+    execution, _result = executor.execute(
+        _frame(operation={"type": "modify_pending", "ticket": "9000002", "price": 1.1015})
+    )
+    assert execution.state is CommandState.COMPLETED
+    assert seen["price"] == pytest.approx(1.1015)
+    assert seen["expiration_utc"] is None
+
+
+@pytest.mark.unit
+def test_modify_pending_non_positive_price_is_malformed():
+    """P2-8: a non-positive price is a shape violation at parse
+    time — rejected MALFORMED, never sent to MT5 as 0."""
+    v = _validator(modify_pending_proven=True)
+    assert (
+        v.validate(_frame(operation={"type": "modify_pending", "ticket": "9000002", "price": 0})).rejection
+        is RejectionReason.MALFORMED
+    )
+    assert (
+        v.validate(_frame(operation={"type": "modify_pending", "ticket": "9000002", "price": -1.5})).rejection
+        is RejectionReason.MALFORMED
+    )
+
+
+@pytest.mark.unit
+def test_modify_pending_unparseable_expiration_is_malformed():
+    """P2-8: an expiration that is not RFC 3339 is malformed —
+    rejected, never silently dropped from the modify."""
+    v = _validator(modify_pending_proven=True)
+    assert (
+        v.validate(
+            _frame(operation={"type": "modify_pending", "ticket": "9000002", "expiration_utc": "not-a-date"})
+        ).rejection
+        is RejectionReason.MALFORMED
+    )
+    # A well-formed absolute expiry validates.
+    assert (
+        v.validate(
+            _frame(operation={"type": "modify_pending", "ticket": "9000002", "expiration_utc": "2026-11-20T12:00:00Z"})
+        ).ok
+        is True
+    )
+
+
+@pytest.mark.unit
 def test_modify_pending_broker_rejection_is_failed_never_retried(monkeypatch):
     ctx = _ctx()
     monkeypatch.setattr(
@@ -925,7 +1025,7 @@ def test_modify_pending_broker_rejection_is_failed_never_retried(monkeypatch):
     )
     monkeypatch.setattr(
         "nse_bridge.engine.trading.modify_pending_order_sltp",
-        lambda ctx_, ticket, sl, tp: (_ for _ in ()).throw(
+        lambda ctx_, ticket, sl, tp, **_kwargs: (_ for _ in ()).throw(
             BridgeError(ErrorCode.TRADE_REJECTED, "modify rejected by broker", retcode=10016)
         ),
     )

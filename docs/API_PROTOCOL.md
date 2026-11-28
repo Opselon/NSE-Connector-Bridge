@@ -212,7 +212,7 @@ envelope when the manifest changes mid-session. No `ping`, no
 |---|---|---|
 | `close_position` | `trade_close_single_position` (close-by-ticket; idempotent ambiguous-close handling) | |
 | `modify_sl_tp` | `trade_modify_sl_tp` (SL/TP by ticket; absent sl/tp filled from the live position) | |
-| `modify_pending` | `trade_modify_sl_tp` on a pending order (SL/TP only) | **Capability-gated (§17.4): opens only on explicit operator opt-in (`NSE_BRIDGE_ENABLE_MODIFY_PENDING=1`) AND a local version >= `1.4.1` (the published minimum, Platform `commands.rs::MODIFY_PENDING_MIN_VERSION`).** The code path, tests, and the 2026-11-19 live-verification pass (docs/upgrade/PHASE-2B-VERIFICATION.md) are done — conditions (a)–(d). Otherwise rejected as `UnsupportedOperation`. |
+| `modify_pending` | `trade_modify_pending_order` (SL/TP/price/expiration by ticket; absent sl/tp filled from the live order, absent price/expiry keep the live values) | **Capability-gated (§17.4): opens only on explicit operator opt-in (`NSE_BRIDGE_ENABLE_MODIFY_PENDING=1`) AND a local version >= `1.4.1` (the published minimum, Platform `commands.rs::MODIFY_PENDING_MIN_VERSION`).** The code path, tests, and the 2026-11-19 live-verification pass (docs/upgrade/PHASE-2B-VERIFICATION.md) are done — conditions (a)–(d). Otherwise rejected as `UnsupportedOperation`. |
 
 `cancel_order` is explicitly NOT sendable in v1. `open_order` is
 implemented behind the §17.5 activation gate: the market + pending
@@ -297,7 +297,11 @@ wire shape, contract delta D5: executed + `partial` /
 no first-class status in CONTRACT v1 §6.2/§6.5 yet);
 `modify_sl_tp` / `modify_pending` take
 `{type, ticket, sl?, tp?}` with `sl`/`tp` nullable (absent = leave
-unchanged). `ticket` is a string (MT5 ticket ids exceed 32-bit ints).
+unchanged); `modify_pending` additionally takes `price?` (a
+positive number moves the pending entry) and `expiration_utc?`
+(an absolute ISO 8601 UTC timestamp; switches the order to
+ORDER_TIME_SPECIFIED — absent = leave the live expiry unchanged).
+`ticket` is a string (MT5 ticket ids exceed 32-bit ints).
 Unknown fields are ignored. There is no per-command signature in v1
 (§6.2, delta D-CMD-3): commands are authenticated by the
 mutually-authenticated WSS session itself.

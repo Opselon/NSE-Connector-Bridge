@@ -11,6 +11,7 @@ canonical-symbol resolution in the execution path.
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -722,6 +723,122 @@ def test_modify_pending_request_sends_no_volume(ctx):
     assert "volume" not in req
     assert req["price"] == 1.1015
     assert "volume" not in ModifyPendingRequest.model_fields
+
+
+# ----------------------------------------------------------------------
+# modify pending: price + expiration passthrough (audit P2-8)
+# ----------------------------------------------------------------------
+def _pending_order_6001(**overrides):
+    fields = {
+        "ticket": 6001,
+        "symbol": "EURUSD",
+        "type": 4,
+        "price_open": 1.1010,
+        "price_current": 1.1010,
+        "volume_current": 0.2,
+        "volume_initial": 0.2,
+        "sl": 1.0990,
+        "tp": 1.1020,
+        "time_setup": int(time.time()),
+        "type_time": 0,
+        "magic": 0,
+        "comment": "",
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+def test_modify_pending_price_and_expiration_reach_mt5(ctx):
+    """P2-8 acceptance: a pending modify carrying price + expiration
+    reaches MT5 as TRADE_ACTION_MODIFY with that price and
+    ORDER_TIME_SPECIFIED + the absolute expiry."""
+    ctx.driver._mt5.orders[6001] = _pending_order_6001()
+    out = trade_modify_pending_order(
+        ctx,
+        ModifyPendingRequest(ticket=6001, price=1.1015, sl=1.0995, expiration_utc="2026-11-20T12:00:00Z"),
+    )
+    fake = ctx.driver._mt5
+    assert out["status"] == "done"
+    assert len(fake.sent_requests) == 1
+    req = fake.sent_requests[0]
+    assert req["action"] == fake.TRADE_ACTION_MODIFY
+    assert req["price"] == 1.1015
+    assert req["sl"] == 1.0995
+    assert req["type_time"] == fake.ORDER_TIME_SPECIFIED
+    assert req["expiration"] == datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+
+
+def test_modify_pending_without_expiration_sends_no_expiry(ctx):
+    """P2-8 acceptance: a modify without expiration_utc sends no
+    type_time/expiration — the broker keeps the live expiry."""
+    ctx.driver._mt5.orders[6001] = _pending_order_6001()
+    out = trade_modify_pending_order(ctx, ModifyPendingRequest(ticket=6001, price=1.1015, sl=1.0995))
+    fake = ctx.driver._mt5
+    assert out["status"] == "done"
+    req = fake.sent_requests[0]
+    assert req["price"] == 1.1015
+    assert "expiration" not in req
+    assert "type_time" not in req
+
+
+def test_modify_pending_invalid_expiration_is_rejected_not_dropped(ctx):
+    """P2-8: an unparseable expiration_utc is a VALIDATION error
+    raised BEFORE any MT5 call — never silently dropped from the
+    modify (the old code skipped it and sent the modify without it)."""
+    ctx.driver._mt5.orders[6001] = _pending_order_6001()
+    with pytest.raises(BridgeError) as excinfo:
+        trade_modify_pending_order(ctx, ModifyPendingRequest(ticket=6001, price=1.1015, expiration_utc="not-a-date"))
+    assert excinfo.value.code is ErrorCode.VALIDATION
+    assert ctx.driver._mt5.send_calls == 0
+
+
+def test_modify_pending_expiration_only_reconcile_checks_expiry(ctx):
+    """P2-8: reconcile-before-retry must compare the expiry too —
+    an expiration-only modify whose price/SL/TP already match but
+    whose expiry has NOT landed must retry, not report reconciled."""
+    policy, sleeps = _recording_policy()
+    expiry = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+    ctx.driver._mt5.orders[6001] = _pending_order_6001(
+        price_open=1.1015,
+        sl=1.0990,
+        tp=1.1020,
+        time_expiration=int((expiry + timedelta(days=1)).timestamp()),  # a DIFFERENT expiry is live
+    )
+    ctx.driver._mt5.send_retcodes = [10012, 10009]  # TIMEOUT, then success
+    out = trade_modify_pending_order(
+        ctx,
+        ModifyPendingRequest(ticket=6001, price=1.1015, sl=1.0990, tp=1.1020, expiration_utc="2026-11-20T12:00:00Z"),
+        retry_policy=policy,
+    )
+    assert out["status"] == "done"
+    assert "reconciled" not in out  # NOT falsely reconciled — it re-sent
+    assert out["attempts"] == 2
+    assert ctx.driver._mt5.send_calls == 2
+    assert sleeps == [pytest.approx(0.10)]
+
+
+def test_modify_pending_reconciles_when_expiry_already_landed(ctx):
+    """P2-8: the same timeout, but the live order already holds the
+    requested expiry — reconcile, do not re-send."""
+    policy, sleeps = _recording_policy()
+    expiry = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+    ctx.driver._mt5.orders[6001] = _pending_order_6001(
+        price_open=1.1015,
+        sl=1.0990,
+        tp=1.1020,
+        time_expiration=int(expiry.timestamp()),
+    )
+    ctx.driver._mt5.send_retcodes = [10012]  # TIMEOUT — outcome ambiguous
+    out = trade_modify_pending_order(
+        ctx,
+        ModifyPendingRequest(ticket=6001, price=1.1015, sl=1.0990, tp=1.1020, expiration_utc="2026-11-20T12:00:00Z"),
+        retry_policy=policy,
+    )
+    assert out["status"] == "done"
+    assert out["reconciled"] is True
+    assert out["attempts"] == 1
+    assert ctx.driver._mt5.send_calls == 1  # never re-sent
+    assert sleeps == []
 
 
 # ----------------------------------------------------------------------
