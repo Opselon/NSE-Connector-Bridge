@@ -50,13 +50,19 @@ from nse_bridge.server.uuid7 import new_uuid7_str
 
 pytestmark = pytest.mark.unit
 
-NOW = datetime(2026, 11, 28, 12, 0, tzinfo=UTC)
+# Reference time for the injected validator/executor clocks. Frames
+# are built against the LIVE clock (see _frame): the channel tests
+# validate through ServerChannel, which uses the real clock, so a
+# hardcoded date goes EXPIRED once its 5-minute window passes and
+# the whole file fails (observed 2026-11-28 after 12:04 UTC).
+NOW = datetime.now(UTC).replace(microsecond=0)
 ACCOUNT = "123456"
 DEVICE = "dev-symbol-allowlist"
 
 
 def _frame(symbol: str = "EURUSD", **overrides):
-    issued = NOW - timedelta(minutes=1)
+    now = datetime.now(UTC).replace(microsecond=0)
+    issued = now - timedelta(minutes=1)
     frame = {
         "type": "command",
         "command_id": new_uuid7_str(),

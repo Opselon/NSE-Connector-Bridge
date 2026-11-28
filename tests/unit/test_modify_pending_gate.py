@@ -189,7 +189,7 @@ def test_gate_open_executor_reaches_trade_modify_pending_order(monkeypatch, tmp_
     seen: dict[str, object] = {}
     monkeypatch.setattr(
         "nse_bridge.engine.trading.modify_pending_order_sltp",
-        lambda ctx_, ticket, sl, tp: (
+        lambda ctx_, ticket, sl, tp, **_kwargs: (
             seen.update({"ticket": ticket, "sl": sl, "tp": tp})
             or {"status": "done", "ticket": ticket, "retcode": 10009}
         ),
@@ -207,7 +207,7 @@ def test_gate_closed_executor_refuses_with_zero_mt5_calls(monkeypatch, tmp_path)
     calls: list[str] = []
     monkeypatch.setattr(
         "nse_bridge.engine.trading.modify_pending_order_sltp",
-        lambda ctx_, ticket, sl, tp: (
+        lambda ctx_, ticket, sl, tp, **_kwargs: (
             calls.append("modify_pending_order_sltp")
             or (_ for _ in ()).throw(AssertionError("MT5 must never be reached when the gate is closed"))
         ),
@@ -226,7 +226,7 @@ def test_gate_closed_below_minimum_executor_refuses_with_zero_mt5_calls(monkeypa
     calls: list[str] = []
     monkeypatch.setattr(
         "nse_bridge.engine.trading.modify_pending_order_sltp",
-        lambda ctx_, ticket, sl, tp: (
+        lambda ctx_, ticket, sl, tp, **_kwargs: (
             calls.append("modify_pending_order_sltp")
             or (_ for _ in ()).throw(AssertionError("MT5 must never be reached below the minimum version"))
         ),

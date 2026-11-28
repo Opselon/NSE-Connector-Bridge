@@ -21,7 +21,11 @@ reduce-volume operation (CONTRACTS.md §7 ``partial_close`` row):
 ``{type, ticket, volume?}`` with ``volume`` a positive number of
 lots; absent/``null`` volume keeps the v1 semantics (full close), so
 a server that never sends the field behaves exactly as before.
-``modify_sl_tp`` / ``modify_pending`` take ``{type, ticket, sl?, tp?}``
+``modify_sl_tp`` takes ``{type, ticket, sl?, tp?}`` and
+``modify_pending`` takes ``{type, ticket, sl?, tp?, price?,
+expiration_utc?}`` (P2-8: price moves the pending entry,
+``expiration_utc`` is an absolute ISO 8601 UTC timestamp that
+switches it to ORDER_TIME_SPECIFIED; absent = leave unchanged)
 with ``sl``/``tp`` nullable (absent = leave unchanged). ``ticket`` is
 a string (MT5 ticket ids exceed 32-bit ints). Unknown fields are
 ignored. There is no per-command signature in v1 (§6.2, delta
@@ -131,8 +135,10 @@ driver, per ARCHITECTURE-CONTRACT §5):
 - ``modify_sl_tp`` → :func:`nse_bridge.engine.trading.modify_position_sltp`
   (SL/TP by ticket; absent sl/tp filled from the live position).
 - ``modify_pending`` → :func:`nse_bridge.engine.trading.modify_pending_order_sltp`
-  (SL/TP on a pending order by ticket; SL/TP only — price/volume/
-  expiration changes have no verified action, §17.4).
+  (SL/TP/price/expiration on a pending order by ticket; P2-8 —
+  price moves the entry, ``expiration_utc`` sets an absolute
+  expiry; absent fields keep the live order's values; volume is
+  still not changeable via modify — delete + replace instead.)
 
 Existing execution hardening is kept: stops/freeze checks, filling-mode
 resolution, retcode map, ``TRADE_UNVERIFIED`` on ambiguous results,
@@ -453,6 +459,12 @@ class CommandEnvelope:
     side: str | None = None
     order_kind: str | None = None  # market | limit | stop | stop_limit
     price: float | None = None  # pending entries only
+    #: P2-8 (modify_pending only): absolute expiry for the pending
+    #: order — an ISO 8601 UTC timestamp, sent to MT5 as
+    #: ORDER_TIME_SPECIFIED. Absent = leave the live expiry
+    #: unchanged. There is no wire channel to CLEAR an expiry:
+    #: the primitive only sets one when this field is present.
+    expiration_utc: str | None = None
     stoplimit: float | None = None  # stop_limit entries only
     #: P3 v2 envelope fields (§14.1–§14.2). ``protocol_version`` is
     #: "1" | "2" (absent/unknown → "1", fail-closed); ``priority``
@@ -617,6 +629,17 @@ def parse_envelope(frame: Any) -> CommandEnvelope:
     def _opt_str(value: Any) -> str | None:
         return str(value) if value not in (None, "") else None
 
+    # P2-8: modify_pending price/expiration passthrough. A
+    # non-positive price is a shape violation, never a value to
+    # send to MT5 as 0; an unparseable expiration is malformed,
+    # never silently dropped (the primitive used to skip it).
+    price = _num(operation.get("price"))
+    if op_type == "modify_pending" and price is not None and price <= 0:
+        raise ValueError("command modify_pending price must be a positive number")
+    expiration_utc = _opt_str(operation.get("expiration_utc"))
+    if op_type == "modify_pending" and expiration_utc is not None and normalize_utc(expiration_utc, 0) is None:
+        raise ValueError("command modify_pending expiration_utc is not RFC 3339")
+
     return CommandEnvelope(
         command_id=str(frame["command_id"]),
         account_id=str(frame["account_id"]),
@@ -629,7 +652,8 @@ def parse_envelope(frame: Any) -> CommandEnvelope:
         symbol=str(operation["symbol"]).strip() if operation.get("symbol") not in (None, "") else None,
         side=str(operation["side"]).strip().lower() if operation.get("side") not in (None, "") else None,
         order_kind=order_kind,
-        price=_num(operation.get("price")),
+        price=price,
+        expiration_utc=expiration_utc,
         stoplimit=_num(stoplimit_raw),
         protocol_version=protocol_version,
         priority=priority,
@@ -1673,7 +1697,12 @@ class CommandExecutor:
 
             sl = envelope.sl if envelope.sl is not None else float(_f(order, "sl", 0.0) or 0.0)
             tp = envelope.tp if envelope.tp is not None else float(_f(order, "tp", 0.0) or 0.0)
-            return modify_pending_order_sltp(self.ctx, envelope.ticket_int, sl, tp)
+            # P2-8: price/expiration pass through (absent = keep the
+            # live order's values — the primitive fills them from
+            # the live book, exactly like sl/tp above).
+            return modify_pending_order_sltp(
+                self.ctx, envelope.ticket_int, sl, tp, price=envelope.price, expiration_utc=envelope.expiration_utc
+            )
         if envelope.operation_type == "open_order":
             # W5 / §17.5: reachable ONLY through the activation gate
             # (``open_order_authorized=True``). The execution path runs
