@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import httpx
 import pytest
@@ -180,9 +181,48 @@ def test_verify_artifact_size_mismatch_refuses(keypair):
     assert excinfo.value.code == "SIZE_MISMATCH"
 
 
-def test_load_public_key_none_when_unconfigured(tmp_path):
+def test_load_public_key_bundled_when_unconfigured(tmp_path):
+    # P1-6: the NSE release-signing public key ships bundled, so an
+    # unconfigured Bridge now loads it instead of returning None.
+    # The loaded key must be exactly the bundled file's key.
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
     s = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
-    assert load_update_public_key(s) is None
+    key = load_update_public_key(s)
+    assert key is not None
+    bundled = (
+        (Path(__file__).resolve().parents[2] / "nse_bridge" / "update_public_key.b64")
+        .read_text(encoding="utf-8")
+        .strip()
+    )
+    assert key.public_bytes(Encoding.Raw, PublicFormat.Raw) == base64.b64decode(bundled)
+
+
+def test_load_public_key_none_when_no_bundled_file(tmp_path):
+    # The NO_PUBLIC_KEY case still exists — it is just unreachable in
+    # the shipped tree now that the bundled file exists. The
+    # bundled_path override (tests only) exercises it.
+    s = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
+    assert load_update_public_key(s, bundled_path=tmp_path / "absent.b64") is None
+
+
+def test_load_public_key_malformed_bundled_file_refuses(tmp_path):
+    bad = tmp_path / "bad.b64"
+    bad.write_text("!!!not-base64!!!", encoding="utf-8")
+    s = BridgeSettings(_env_file=None, data_dir=tmp_path, log_dir=str(tmp_path / "logs"))
+    with pytest.raises(UpdateError) as excinfo:
+        load_update_public_key(s, bundled_path=bad)
+    assert excinfo.value.code == "INVALID_PUBLIC_KEY"
+
+
+def test_bundled_public_key_is_well_formed_and_pinned_in_spec():
+    # The bundled key is PUBLIC material: base64 raw 32-byte Ed25519,
+    # and the frozen exe must bundle it (bridge.spec datas) or the
+    # updater fail-closes with NO_PUBLIC_KEY on installed Bridges.
+    repo = Path(__file__).resolve().parents[2]
+    bundled = (repo / "nse_bridge" / "update_public_key.b64").read_text(encoding="utf-8").strip()
+    assert len(base64.b64decode(bundled, validate=True)) == 32
+    assert "nse_bridge/update_public_key.b64" in (repo / "bridge.spec").read_text(encoding="utf-8")
 
 
 def test_load_public_key_malformed_refuses(tmp_path):
@@ -275,7 +315,11 @@ async def test_download_stages_verified_file(settings, keypair):
     assert (settings.data_dir / "updates" / "apply_update.py").is_file()
 
 
-async def test_download_refuses_without_public_key(settings, keypair):
+async def test_download_refuses_when_bundled_key_does_not_match(settings, keypair):
+    # P1-6: with no env key the BUNDLED key is used — so a release
+    # signed by any other key must refuse with SIGNATURE_INVALID
+    # (not NO_PUBLIC_KEY) and stage nothing. This proves the bundled
+    # key is actually consulted and enforced, not merely present.
     priv, _ = keypair
     settings.update_public_key = ""
     updater = _updater(
@@ -285,8 +329,7 @@ async def test_download_refuses_without_public_key(settings, keypair):
     )
     status = await updater.download()
     assert status["state"] == "error", status
-    assert status["error"]["code"] == "NO_PUBLIC_KEY"
-    assert "no update public key" in status["error"]["message"]
+    assert status["error"]["code"] == "SIGNATURE_INVALID"
     assert _staged_files(settings) == []
 
 
@@ -704,12 +747,15 @@ def test_updates_check_download_status_endpoints(client, keypair):
     assert _staged_files(settings) != []
 
 
-def test_updates_download_endpoint_refuses_without_public_key(client, keypair):
+def test_updates_download_endpoint_refuses_when_bundled_key_does_not_match(client, keypair):
+    # P1-6: same bundled-key enforcement as the direct download test,
+    # through the local API endpoint (no env key → bundled key used →
+    # test-signed release refuses SIGNATURE_INVALID, nothing staged).
     http, ctx, settings = _wire_updater(client, keypair, transport=_transport_for(ARTIFACT))
     settings.update_public_key = ""
     resp = http.post("/api/v1/updates/download", headers=_auth(ctx))
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
     assert data["state"] == "error"
-    assert data["error"]["code"] == "NO_PUBLIC_KEY"
+    assert data["error"]["code"] == "SIGNATURE_INVALID"
     assert _staged_files(settings) == []

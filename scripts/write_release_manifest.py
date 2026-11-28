@@ -4,6 +4,19 @@ Usage:
   python scripts/write_release_manifest.py <exe-path> [--out-dir <dir>]
       [--tag <tag>] [--commit <sha>] [--setup <setup-exe-path>]
       [--extra <platform>:<path> ...]
+      [--signature <file-name>:<sig-file> ...]
+
+Signatures (P1-6): ``--signature`` attaches a base64 Ed25519
+signature — produced by ``scripts/sign_release_artifact.py`` over
+the artifact bytes — to a ``files[]`` entry as its ``"signature"``
+field. The Platform serves the setup installer's signature from
+its ``.sig`` sidecar via ``releases/latest`` (D19); install.ps1
+reports a manifest signature when one is present. A manifest
+written without ``--signature`` carries no ``"signature"`` keys at
+all (the unsigned shape v1.4.0 shipped); the script never invents
+a signature — a bad base64 value, a wrong-length signature (an
+Ed25519 signature is 64 raw bytes), or an unknown file name fails
+loudly instead.
 
 Outputs (next to the exe unless --out-dir is given):
   NSE-MT5-Bridge.exe.sha256   "<sha256>  NSE-MT5-Bridge.exe\\n"
@@ -33,6 +46,8 @@ The script never invents a checksum — it hashes the real file.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import subprocess
@@ -108,6 +123,15 @@ def main(argv: list[str] | None = None) -> int:
         "e.g. --extra macos-arm64:dist/NSE-MT5-Bridge-1.3.0-macos-arm64.dmg "
         "(each gets its own .sha256 sidecar and a platform field in the manifest)",
     )
+    parser.add_argument(
+        "--signature",
+        action="append",
+        default=[],
+        metavar="NAME:SIGFILE",
+        help="repeatable: attach a base64 Ed25519 signature to a manifest "
+        "files[] entry, e.g. --signature NSE-MT5-Bridge.exe:dist/NSE-MT5-Bridge.exe.sig "
+        "(produced by scripts/sign_release_artifact.py)",
+    )
     args = parser.parse_args(argv)
 
     exe = args.exe
@@ -132,6 +156,29 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         extras.append((platform_label, extra_path))
+    signatures: dict[str, str] = {}
+    for spec in args.signature:
+        file_name, sep, raw_sig_path = spec.partition(":")
+        sig_path = Path(raw_sig_path)
+        if not sep or not file_name or not sig_path.is_file():
+            print(f"error: --signature must be NAME:SIGFILE to an existing file: {spec!r}", file=sys.stderr)
+            return 2
+        if file_name in signatures:
+            print(f"error: duplicate --signature for file: {file_name!r}", file=sys.stderr)
+            return 2
+        text = sig_path.read_text(encoding="utf-8").strip()
+        try:
+            raw_sig = base64.b64decode(text, validate=True)
+        except (binascii.Error, ValueError):
+            print(f"error: signature in {sig_path} is not valid base64: {spec!r}", file=sys.stderr)
+            return 2
+        if len(raw_sig) != 64:
+            print(
+                f"error: Ed25519 signature in {sig_path} must be 64 bytes, got {len(raw_sig)}: {spec!r}",
+                file=sys.stderr,
+            )
+            return 2
+        signatures[file_name] = text
     out_dir = args.out_dir or exe.parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -163,6 +210,16 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
         extras_written.append((platform_label, extra_sha_path, extra_digest))
+
+    for entry in files:
+        if entry["name"] in signatures:
+            entry["signature"] = signatures.pop(entry["name"])
+    if signatures:
+        print(
+            f"error: --signature for file(s) not in this manifest: {sorted(signatures)}",
+            file=sys.stderr,
+        )
+        return 2
 
     # One platform per file, in first-seen order; "platform" stays the
     # primary (Windows x64) for backwards compatibility.

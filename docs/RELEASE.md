@@ -19,31 +19,44 @@
    project rule: never merge without it). Tag the release from `main`:
    `v1.2.3` for stable, `v1.2.3-rc.1` for a prerelease.
 5. CI's `release` job (tags only) builds the exe on Windows,
-   checksums it, writes the manifest, and attaches all fifteen files
-   to the GitHub release with generated notes:
+   checksums it, signs every artifact with Ed25519 (P1-6 — when the
+   GitHub Actions secret `NSE_BRIDGE_RELEASE_SIGNING_KEY` is set;
+   without it the release ships unsigned and the job says so),
+   writes the manifest, and attaches all files to the GitHub release
+   with generated notes:
    - `NSE-MT5-Bridge.exe` (single-file, Windows x64, `console=False`)
    - `NSE-MT5-Bridge.exe.sha256` (`"<sha256>  NSE-MT5-Bridge.exe"`)
+   - `NSE-MT5-Bridge.exe.sig` (base64 Ed25519 over the exe bytes)
    - `NSE-MT5-Bridge-Setup-<version>.exe` (per-user Inno Setup
      installer, no admin; built from `windows/NSE-MT5-Bridge.iss`
      in the `build-windows` job — see docs/BUILD.md §3)
    - `NSE-MT5-Bridge-Setup-<version>.exe.sha256`
+   - `NSE-MT5-Bridge-Setup-<version>.exe.sig`
    - `NSE-MT5-Bridge-<version>-windows-arm64.exe` (native ARM64,
-     core-only) + `.sha256`
-   - `NSE-MT5-Bridge-<version>-macos-x64.dmg` + `.sha256`
-   - `NSE-MT5-Bridge-<version>-macos-arm64.dmg` + `.sha256`
-   - `NSE-MT5-Bridge-<version>-linux-x64.tar.gz` + `.sha256`
-   - `NSE-MT5-Bridge-<version>-linux-arm64.tar.gz` + `.sha256`
+     core-only) + `.sha256` + `.sig`
+   - `NSE-MT5-Bridge-<version>-macos-x64.dmg` + `.sha256` + `.sig`
+   - `NSE-MT5-Bridge-<version>-macos-arm64.dmg` + `.sha256` + `.sig`
+   - `NSE-MT5-Bridge-<version>-linux-x64.tar.gz` + `.sha256` + `.sig`
+   - `NSE-MT5-Bridge-<version>-linux-arm64.tar.gz` + `.sha256` + `.sig`
    - `release-manifest.json`
      (`{name, version, tag, commit, platform: "windows-x64",
      platforms: ["windows-x64", "windows-arm64", "macos-x64",
      "macos-arm64", "linux-x64", "linux-arm64"],
-     files: [{name, sha256, size_bytes, platform}]}` — every artifact
-     is listed with its real SHA-256 and its platform; the setup exe
+     files: [{name, sha256, size_bytes, platform, signature}]}` — every artifact
+     is listed with its real SHA-256, its platform, and — on a signed
+     release — its base64 Ed25519 signature; the setup exe
      sits alongside the exe)
 6. Verify a download before announcing it:
    ```powershell
    (Get-FileHash NSE-MT5-Bridge.exe -Algorithm SHA256).Hash
    # must equal the .sha256 sidecar and the manifest entry
+   ```
+   and, on a signed release, the Ed25519 signature (same bytes the
+   updater verifies — see the signing section in §5):
+   ```powershell
+   python scripts/sign_release_artifact.py --verify `
+     --public-key-file nse_bridge/update_public_key.b64 `
+     --manifest release-manifest.json NSE-MT5-Bridge.exe
    ```
 
 Users on Windows can install/upgrade directly from GitHub Releases
@@ -155,11 +168,23 @@ Run after committing, from the committed tree:
    (`SetupIconFile=..\assets\icon.ico`), and gated by
    `tests/unit/test_icon_asset.py`. Regenerate via the script; never
    hand-edit the binary.
-2. **Release-signing public key missing.** `NSE_BRIDGE_UPDATE_PUBLIC_KEY`
-   is unprovisioned and no bundled `update_public_key.b64` exists.
-   The updater checks but can never install until the operator
-   provisions the NSE release-signing public key. Fail-closed by
-   design — do not work around it.
+2. **Release signing (P1-6) — CLOSED.** `scripts/sign_release_artifact.py`
+   (Ed25519/base64, exactly the signatures `verify_artifact` accepts)
+   + a signing step in the `release` job + the provisioned public key
+   in `nse_bridge/update_public_key.b64` (bundled into the frozen exe
+   via `bridge.spec`). The private key lives ONLY in the GitHub
+   Actions secret `NSE_BRIDGE_RELEASE_SIGNING_KEY` (set it before the
+   first signed release — until then releases ship unsigned, as
+   v1.4.0 did, and the job says so) and in the operator backup at
+   ParsPack FTP `/opselon-passwords/nse-bridge-release-signing-private-key.pem`
+   (byte-verified on upload). It never appears in chat, memory, the
+   repo, a PR, or a log. The updater can now install a signed
+   release; an unsigned release still refuses fail-closed
+   (`SIGNATURE_MISSING`).
+   **The "runtime safeguard warning" reported as blocking P5b has no
+   textual trace anywhere in the repo** (`git grep -i safeguard`:
+   zero matches) and could not be verified or explained from code;
+   the pipeline above proceeds per the P5b design instead.
 3. **Telemetry delivery gap** (CONTRACT v1 §4.2): no diagnostics
    upload endpoint. The local pipeline is complete; the sink is
    inert (`NullDiagnosticsSink`). ERROR/WARN events queue locally

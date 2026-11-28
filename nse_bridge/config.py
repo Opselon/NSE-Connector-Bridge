@@ -189,11 +189,11 @@ class BridgeSettings(BaseSettings):
     # --- updates (CONTRACT v1 §3.5; verified updater, Phase 5) --------
     # Base64 raw Ed25519 public key (32 bytes) that verifies release
     # signatures. Env: NSE_BRIDGE_UPDATE_PUBLIC_KEY. This is PUBLIC
-    # key material (safe to store in config.json) — but there is NO
-    # default: the real NSE release-signing key has to be provisioned
-    # by the operator (env var, config.json, or a bundled
-    # nse_bridge/update_public_key.b64 file). With no key configured
-    # the updater REFUSES to install anything (signature unverifiable).
+    # key material (safe to store in config.json). Precedence: this
+    # setting → the bundled nse_bridge/update_public_key.b64 file
+    # (provisioned by the P1-6 signing pipeline; the frozen exe
+    # bundles it via bridge.spec). With neither configured the updater
+    # REFUSES to install anything (signature unverifiable).
     update_public_key: str = ""
 
     # --- trading identity ----------------------------------------------

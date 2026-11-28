@@ -8,11 +8,12 @@ Ed25519 signature **before** any install. Rules, fail-closed:
   ``NO_PUBLIC_KEY`` ("signature unverifiable — no key configured").
   The key comes from Bridge configuration (env
   ``NSE_BRIDGE_UPDATE_PUBLIC_KEY``, base64 raw 32-byte Ed25519 public
-  key) or a bundled ``nse_bridge/update_public_key.b64`` file if one
-  exists in the repo — **no such file exists today and no key value is
-  invented here**. The real NSE release-signing public key must be
-  provisioned by the operator; until then the updater can only
-  *check*, never install.
+  key) or the bundled ``nse_bridge/update_public_key.b64`` file —
+  provisioned by the P1-6 signing pipeline (the NSE release-signing
+  public key; the matching private key is held only in the GitHub
+  Actions secret ``NSE_BRIDGE_RELEASE_SIGNING_KEY`` and the operator's
+  FTP backup, never in this repo). A signed release is therefore
+  installable; an unsigned release still refuses fail-closed.
 - ``signature`` null in the release metadata → the release is
   unverifiable → refuse (``SIGNATURE_MISSING``).
 - SHA-256 mismatch, size mismatch (when ``size_bytes`` is present),
@@ -141,16 +142,19 @@ def _sanitize_version(version: str) -> str:
 # ---------------------------------------------------------------------------
 # public key
 # ---------------------------------------------------------------------------
-def load_update_public_key(settings: BridgeSettings) -> Any | None:
+def load_update_public_key(settings: BridgeSettings, *, bundled_path: Path | None = None) -> Any | None:
     """Ed25519 verification key, or None when none is configured.
 
     Precedence: ``settings.update_public_key`` (env
     ``NSE_BRIDGE_UPDATE_PUBLIC_KEY`` / config.json) → bundled
-    ``nse_bridge/update_public_key.b64`` file if one exists (none
-    does today). Raises :class:`UpdateError` when a key IS configured
-    but malformed. Returns None (not an exception) when no key is
-    configured — the caller turns that into the structured
-    ``NO_PUBLIC_KEY`` refusal.
+    ``nse_bridge/update_public_key.b64`` file (provisioned by the
+    P1-6 signing pipeline; the frozen exe bundles it via
+    ``bridge.spec``). Raises :class:`UpdateError` when a key IS
+    configured but malformed. Returns None (not an exception) when
+    no key is configured — the caller turns that into the structured
+    ``NO_PUBLIC_KEY`` refusal. ``bundled_path`` overrides the bundled
+    file location (tests only: point it at an absent path to exercise
+    the unconfigured case now that the real file ships).
     """
     if Ed25519PublicKey is None:
         raise UpdateError(
@@ -159,7 +163,7 @@ def load_update_public_key(settings: BridgeSettings) -> Any | None:
         )
     raw_b64 = (getattr(settings, "update_public_key", "") or "").strip()
     if not raw_b64:
-        bundled = Path(__file__).with_name("update_public_key.b64")
+        bundled = bundled_path if bundled_path is not None else Path(__file__).with_name("update_public_key.b64")
         if bundled.is_file():
             try:
                 raw_b64 = bundled.read_text(encoding="utf-8").strip()

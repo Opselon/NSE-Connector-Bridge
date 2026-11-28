@@ -105,3 +105,71 @@ def test_extra_without_platform_separator_fails(tmp_path: Path):
     exe = _write(tmp_path / "NSE-MT5-Bridge.exe", b"fake-exe")
     proc = _run(str(exe), "--extra", str(exe))
     assert proc.returncode != 0
+
+
+def test_signature_attaches_to_manifest_entry(tmp_path: Path):
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    exe = _write(tmp_path / "NSE-MT5-Bridge.exe", b"fake-exe")
+    priv = Ed25519PrivateKey.generate()
+    sig_b64 = base64.b64encode(priv.sign(b"fake-exe")).decode()
+    sig_file = tmp_path / "NSE-MT5-Bridge.exe.sig"
+    sig_file.write_text(sig_b64 + "\n", encoding="utf-8")
+    out = tmp_path / "out"
+    proc = _run(
+        str(exe),
+        "--tag",
+        "v1.4.1",
+        "--out-dir",
+        str(out),
+        "--signature",
+        f"NSE-MT5-Bridge.exe:{sig_file}",
+    )
+    assert proc.returncode == 0, proc.stderr
+    manifest = json.loads((out / "release-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["files"] == [
+        {
+            "name": exe.name,
+            "sha256": _sha(exe),
+            "size_bytes": exe.stat().st_size,
+            "platform": "windows-x64",
+            "signature": sig_b64,
+        }
+    ]
+    # The attached signature is the real Ed25519 over the exe bytes.
+    pub_raw = priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    Ed25519PublicKey.from_public_bytes(pub_raw).verify(base64.b64decode(sig_b64), b"fake-exe")
+
+
+def test_signature_rejects_bad_base64(tmp_path: Path):
+    exe = _write(tmp_path / "NSE-MT5-Bridge.exe", b"fake-exe")
+    sig_file = tmp_path / "NSE-MT5-Bridge.exe.sig"
+    sig_file.write_text("!!!not-base64!!!\n", encoding="utf-8")
+    proc = _run(str(exe), "--out-dir", str(tmp_path / "out"), "--signature", f"NSE-MT5-Bridge.exe:{sig_file}")
+    assert proc.returncode != 0
+    assert "not valid base64" in proc.stderr
+
+
+def test_signature_rejects_wrong_length(tmp_path: Path):
+    import base64
+
+    exe = _write(tmp_path / "NSE-MT5-Bridge.exe", b"fake-exe")
+    sig_file = tmp_path / "NSE-MT5-Bridge.exe.sig"
+    sig_file.write_text(base64.b64encode(b"too-short").decode() + "\n", encoding="utf-8")
+    proc = _run(str(exe), "--out-dir", str(tmp_path / "out"), "--signature", f"NSE-MT5-Bridge.exe:{sig_file}")
+    assert proc.returncode != 0
+    assert "64 bytes" in proc.stderr
+
+
+def test_signature_rejects_unknown_file(tmp_path: Path):
+    import base64
+
+    exe = _write(tmp_path / "NSE-MT5-Bridge.exe", b"fake-exe")
+    sig_file = tmp_path / "other.exe.sig"
+    sig_file.write_text(base64.b64encode(b"\x00" * 64).decode() + "\n", encoding="utf-8")
+    proc = _run(str(exe), "--out-dir", str(tmp_path / "out"), "--signature", f"other.exe:{sig_file}")
+    assert proc.returncode != 0
+    assert "not in this manifest" in proc.stderr

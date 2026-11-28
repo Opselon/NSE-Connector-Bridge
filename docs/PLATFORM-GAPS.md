@@ -67,8 +67,12 @@ commit `9f27432` PR #144, 2026-11-21) — not from vendored snapshots:
     `pending` only, not `delivered` (`gateway.rs:443-468`).
   - **D19 — §3.5 release signatures are not published:**
     `releases/latest` hardcodes `signature: null` until the signing
-    pipeline lands (`management.rs:810-812`). The Bridge updater and
-    `scripts/install.ps1` verify SHA-256 now and report the missing
+    pipeline lands. Bridge side LANDED (P1-6: signing script +
+    release-job signing step + bundled public key); the Platform side
+    — serve the setup installer's `.sig` sidecar from the live
+    release — lands in the paired Platform PR. Until that merges,
+    `releases/latest` still answers `null` and the Bridge updater
+    and `scripts/install.ps1` verify SHA-256 and report the missing
     signature honestly; neither fabricates a key.
   - **D20 — sync batches are stored raw** (`connector_events` /
     `account_snapshots`); the §3.3 "MUST feed the same services"
@@ -382,11 +386,15 @@ change.
   `create_app` lifespan and assigned to `SyncEngine.journal`, pinned
   by `tests/unit/test_production_wiring.py`. The Execution screen's
   journal feed is fed in production.
-- **Release-signing public key unprovisioned** (§25 item 27,
-  Partial): no `nse_bridge/update_public_key.b64` and no
-  `NSE_BRIDGE_UPDATE_PUBLIC_KEY` set; the updater refuses installs
-  fail-closed (`NO_PUBLIC_KEY`). An operator must provision the
-  Ed25519 public key before any update can install.
+- **~~Release-signing public key unprovisioned~~ — CLOSED by the
+  P1-6 signing pipeline** (§25 item 27): `nse_bridge/update_public_key.b64`
+  is provisioned and bundled into the frozen exe, the release job
+  signs every artifact when the `NSE_BRIDGE_RELEASE_SIGNING_KEY`
+  secret is set, and a signed release installs end-to-end (the
+  updater still refuses unsigned releases fail-closed). The private
+  key lives only in the GitHub Actions secret + the FTP backup
+  (`/opselon-passwords/nse-bridge-release-signing-private-key.pem`),
+  never in the repo.
 - **No `.ico` asset** (§25 item 27): `windows/` holds only the exe
   manifest; no icon asset exists for the frozen exe.
 - **No rollback/recovery strategy written** (§25 item 27): zero
