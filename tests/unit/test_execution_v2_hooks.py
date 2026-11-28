@@ -800,6 +800,14 @@ def test_v2_from_operation_negative_deviation_fails():
         V2OpenOrderRequest.from_operation({**PLATFORM_LIMIT, "order_type": "market", "deviation": -5, "price": None})
 
 
+def test_v2_from_operation_non_numeric_deviation_fails():
+    # Audit P2-6: the envelope no longer validates `deviation` — the
+    # v2 seam is the single place that reads it, so it must reject a
+    # non-numeric value here (previously also rejected at parse time).
+    with pytest.raises(ValueError, match="deviation"):
+        V2OpenOrderRequest.from_operation({**PLATFORM_LIMIT, "order_type": "market", "deviation": "abc", "price": None})
+
+
 def test_v2_from_operation_expiry_over_max_fails():
     with pytest.raises(ValueError, match="expiry_secs"):
         V2OpenOrderRequest.from_operation(
