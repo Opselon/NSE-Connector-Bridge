@@ -10,13 +10,25 @@ gates are open, and IS wired into the live server command path
 defaults ON (opt-out via ``NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0``);
 the v2-negotiation gate stays fail-closed.
 
+Behavioural wiring (audit P2-2): the ``test_channel_*`` tests at the
+end build a REAL ``ServerChannel``, run ``_ensure_components`` (the
+production startup path — no injected executor/validator), and send
+an ``open_order`` frame through the channel's receive handler. With
+the flag on + a negotiated v2 envelope the open reaches the mock MT5
+exactly once; with the flag off (or a v1 envelope) it never reaches
+MT5. These fail if ``channel.py`` stops passing the flag into the
+validator; the source-grep test above is kept only as a smoke pin.
+
 The Bridge alone does NOT enable new-position trading — these tests
 pin the gate behavior, not a live trading surface.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,6 +44,10 @@ from nse_bridge.engine.v2_open_order import (
 )
 from nse_bridge.errors import BridgeError, ErrorCode
 from nse_bridge.mt5.driver import Mt5Driver
+from nse_bridge.realtime.bus import EventBus
+from nse_bridge.realtime.channel import ServerChannel
+from nse_bridge.server.rest import Entitlements, RestClient
+from nse_bridge.server.uuid7 import new_uuid7_str
 
 pytestmark = pytest.mark.unit
 
@@ -489,6 +505,140 @@ def test_server_open_order_refused_under_v1_envelope_even_with_flag_on(monkeypat
     frame, now = _server_open_order_frame(protocol_version="1")
     outcome = _validator_wired_from_settings(settings, now).validate(frame)
     assert outcome.rejection is RejectionReason.UNSUPPORTED_OPERATION
+
+
+# ----------------------------------------------------------------------
+# behavioural wiring: real ServerChannel + _ensure_components (P2-2)
+# ----------------------------------------------------------------------
+def _wired_channel(monkeypatch, tmp_path, *, flag_env: str | None) -> tuple[ServerChannel, _FakeMt5]:
+    """A real ``ServerChannel`` whose executor/validator were built by
+    ``_ensure_components`` from the settings — the production startup
+    path, with NO injected executor/validator (that is the wiring
+    under test). Only the server-resolved entitlements are preset:
+    production resolves them via validate-key, which no test server
+    does (same provisioning the e2e channel tests use).
+
+    ``flag_env=None`` leaves the env var unset (flag defaults ON);
+    ``flag_env="0"`` opts out.
+    """
+    if flag_env is None:
+        monkeypatch.delenv("NSE_BRIDGE_ENABLE_V2_OPEN_ORDER", raising=False)
+    else:
+        monkeypatch.setenv("NSE_BRIDGE_ENABLE_V2_OPEN_ORDER", flag_env)
+    settings = BridgeSettings(
+        _env_file=None,
+        server_base_url="http://127.0.0.1:1",
+        environment="test",
+        server_token="tok-SECRET",
+        server_url="ws://127.0.0.1:1/api/v1/connector/ws",
+        device_id="dev-1",
+        data_dir=tmp_path,
+        log_dir=str(tmp_path / "logs"),
+    )
+    driver = Mt5Driver(settings)
+    fake = _FakeMt5()
+    driver._mt5 = fake
+    driver._connected = True
+    # Simulate a connected terminal with account 123456 logged in
+    # (connect() sets this from mt5.account_info(), which the fake
+    # also reports as 123456).
+    driver._login = 123456
+    context = BridgeContext(settings=settings, driver=driver)
+    rest = RestClient(settings, context.get_or_create_device_id())
+    rest.entitlements = Entitlements(position_manager=True, auto_trade=True)
+    rest.user_id = "user-1"
+    channel = ServerChannel(context, EventBus(), rest_client=rest)
+    channel._ensure_components()
+    assert channel._executor is not None
+    return channel, fake
+
+
+def _live_open_order_frame(*, protocol_version: str = "2") -> dict:
+    """A well-formed server-sent open_order frame, fresh against the
+    real wall clock the channel-built validator uses (no frozen
+    clock is injected anywhere on this path)."""
+    command_id = new_uuid7_str()
+    now = datetime.now(UTC)
+    issued = now - timedelta(minutes=1)
+    return {
+        "type": "command",
+        "command_id": command_id,
+        "account_id": "123456",
+        "device_id": "dev-1",
+        "operation": {"type": "open_order", "symbol": "EURUSD", "side": "buy", "volume": 0.1},
+        "issued_at": issued.isoformat().replace("+00:00", "Z"),
+        "expires_at": (issued + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+        "idempotency_key": command_id,
+        "protocol_version": protocol_version,
+    }
+
+
+async def _send_frame(channel: ServerChannel, frame: dict) -> dict:
+    """Drive a frame through the channel exactly as the receive loop
+    does (``_handle_server_message`` → ``_handle_command``) and
+    return the ``action.result`` the channel queued for the server."""
+    await channel._handle_server_message(json.dumps(frame))
+    return await asyncio.wait_for(channel._outbound.get(), timeout=10)
+
+
+async def test_channel_flag_on_open_order_reaches_mt5(monkeypatch, tmp_path):
+    """P2-2, enabled direction (the previously missing proof): flag
+    ON (default) + negotiated v2 envelope → the open proceeds all
+    the way to MT5 — the patched mock ``order_send`` is called
+    exactly once — and the channel answers ``executed``.
+
+    Fails if ``channel.py`` stops passing the flag into the
+    validator (the validator would refuse as UnsupportedOperation)
+    or if the executor is never wired to the channel.
+    """
+    channel, fake = _wired_channel(monkeypatch, tmp_path, flag_env=None)
+    try:
+        assert channel._executor.validator.open_order_authorized is True
+        frame = _live_open_order_frame(protocol_version="2")
+        result = await _send_frame(channel, frame)
+        assert result["status"] == "executed"
+        assert result["event_type"] == "action.result"
+        assert result["correlation_id"] == frame["command_id"]
+        assert result["command_protocol_version"] == "2"
+        assert fake.send_calls == 1
+        assert fake.sent_requests[0]["symbol"] == "EURUSD"
+        assert fake.sent_requests[0]["comment"] == "NSE_OPEN"
+        assert result["payload"]["order_ticket"] == 9000001
+    finally:
+        channel.ctx.driver.disconnect()
+
+
+async def test_channel_flag_off_open_order_never_reaches_mt5(monkeypatch, tmp_path):
+    """P2-2, disabled direction: flag opted out via env (``0``) +
+    negotiated v2 envelope → the open is refused as
+    UnsupportedOperation and the mock MT5 is never called."""
+    channel, fake = _wired_channel(monkeypatch, tmp_path, flag_env="0")
+    try:
+        assert channel._executor.validator.open_order_authorized is False
+        frame = _live_open_order_frame(protocol_version="2")
+        result = await _send_frame(channel, frame)
+        assert result["status"] == "rejected"
+        assert result["error"]["code"] == "UnsupportedOperation"
+        assert fake.send_calls == 0
+        assert fake.sent_requests == []
+    finally:
+        channel.ctx.driver.disconnect()
+
+
+async def test_channel_v1_envelope_open_order_never_reaches_mt5_even_with_flag_on(monkeypatch, tmp_path):
+    """P2-2, negotiation half through the same real path: flag ON
+    but a v1 envelope → still refused, MT5 never touched. The flag
+    alone never opens an open; negotiation stays fail-closed."""
+    channel, fake = _wired_channel(monkeypatch, tmp_path, flag_env=None)
+    try:
+        assert channel._executor.validator.open_order_authorized is True
+        frame = _live_open_order_frame(protocol_version="1")
+        result = await _send_frame(channel, frame)
+        assert result["status"] == "rejected"
+        assert result["error"]["code"] == "UnsupportedOperation"
+        assert fake.send_calls == 0
+    finally:
+        channel.ctx.driver.disconnect()
 
 
 # ----------------------------------------------------------------------
