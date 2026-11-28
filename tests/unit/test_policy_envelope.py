@@ -29,6 +29,7 @@ from nse_bridge.server.policy import (
     PolicyEnvelopeModel,
     PolicyGate,
     PolicyService,
+    _tp_target_for_move,
 )
 
 pytestmark = pytest.mark.unit
@@ -102,7 +103,7 @@ class _FakeMt5:
         return SimpleNamespace(retcode=10009, order=0, deal=0, price=0.0, volume=0.0, comment="")
 
 
-def _position(ticket=9000001, symbol="EURUSD", type_=0, volume=0.1, sl=0.0):
+def _position(ticket=9000001, symbol="EURUSD", type_=0, volume=0.1, sl=0.0, tp=0.0):
     return SimpleNamespace(
         ticket=ticket,
         symbol=symbol,
@@ -111,7 +112,7 @@ def _position(ticket=9000001, symbol="EURUSD", type_=0, volume=0.1, sl=0.0):
         price_open=1.1000,
         price_current=1.1050,
         sl=sl,
-        tp=0.0,
+        tp=tp,
         profit=0.0,
         swap=0.0,
         commission=0.0,
@@ -413,6 +414,227 @@ def test_no_local_strategy_only_mechanical_moves(tmp_path):
     for request in fake.sent_requests:
         assert request["action"] == fake.TRADE_ACTION_SLTP
         assert "volume" not in request
+
+
+# ----------------------------------------------------------------------
+# Trailing TP — the TP-ratchet math (audit P0-3, Part B)
+# ----------------------------------------------------------------------
+# The fake tick is bid 1.1050 / ask 1.1052 and the symbol point is
+# 0.00001, so distance_points=150 is 0.0015 and step_points=10 is
+# 0.0001. The math mirrors the Platform server loop
+# (connector::trailing_tp::ratchet_tp), which proves it first.
+
+TP_PARAMS = {"kind": "trailing_tp", "distance_points": 150, "step_points": 10}
+POINT = 0.00001
+
+
+def _tp_pos(*, type_=0, entry=1.1000, tp=0.0):
+    return SimpleNamespace(ticket=9000001, symbol="EURUSD", type=type_, price_open=entry, tp=tp, sl=0.0)
+
+
+def test_tp_ratchet_long_moves_tp_ahead_of_price():
+    # Entry 1.1000, TP 1.0900, bid 1.1050: candidate 1.1065 beats the
+    # TP by 165 points — the TP ratchets away from entry.
+    got = _tp_target_for_move(TP_PARAMS, pos=_tp_pos(tp=1.0900), tick_bid=1.1050, tick_ask=1.1052, point=POINT)
+    assert got == pytest.approx(1.1065)
+
+
+def test_tp_ratchet_short_moves_tp_ahead_of_price():
+    # Short, entry 1.1100, TP 1.1050, ask 1.1052: candidate 1.1037
+    # beats the TP by 13 points — the TP ratchets away from entry.
+    got = _tp_target_for_move(
+        TP_PARAMS, pos=_tp_pos(type_=1, entry=1.1100, tp=1.1050), tick_bid=1.1050, tick_ask=1.1052, point=POINT
+    )
+    assert got == pytest.approx(1.1037)
+
+
+def test_tp_ratchet_step_gate_blocks_a_small_improvement():
+    # Candidate 1.1065 improves on a TP of 1.1065 by 0 — under the
+    # 10-point step; a TP of 1.1064 improves by exactly the step and fires.
+    assert _tp_target_for_move(TP_PARAMS, pos=_tp_pos(tp=1.1065), tick_bid=1.1050, tick_ask=1.1052, point=POINT) is None
+    assert (
+        _tp_target_for_move(TP_PARAMS, pos=_tp_pos(tp=1.10645), tick_bid=1.1050, tick_ask=1.1052, point=POINT) is None
+    )
+    got = _tp_target_for_move(TP_PARAMS, pos=_tp_pos(tp=1.1064), tick_bid=1.1050, tick_ask=1.1052, point=POINT)
+    assert got == pytest.approx(1.1065)
+
+
+def test_tp_ratchet_never_moves_tp_back():
+    # Price fell back after the TP was set: the candidate trails the
+    # lower price, so it sits below the current TP — no move.
+    assert (
+        _tp_target_for_move(
+            {"kind": "trailing_tp", "distance_points": 150, "step_points": 10},
+            pos=_tp_pos(tp=1.1065),
+            tick_bid=1.1010,
+            tick_ask=1.1012,
+            point=POINT,
+        )
+        is None
+    )
+
+
+def test_tp_ratchet_never_toward_entry():
+    # Long losing (entry 1.1100 above the bid 1.1050): the candidate
+    # 1.1065 never clears the entry price — no move, even with no TP yet.
+    assert (
+        _tp_target_for_move(
+            TP_PARAMS, pos=_tp_pos(entry=1.1100, tp=1.0900), tick_bid=1.1050, tick_ask=1.1052, point=POINT
+        )
+        is None
+    )
+    assert (
+        _tp_target_for_move(TP_PARAMS, pos=_tp_pos(entry=1.1100), tick_bid=1.1050, tick_ask=1.1052, point=POINT) is None
+    )
+    # Short losing mirror: entry 1.1000 below the ask 1.1052.
+    assert (
+        _tp_target_for_move(
+            TP_PARAMS, pos=_tp_pos(type_=1, entry=1.1000, tp=1.1100), tick_bid=1.1050, tick_ask=1.1052, point=POINT
+        )
+        is None
+    )
+
+
+def test_tp_ratchet_no_tp_yet_baselines_on_entry():
+    # No TP yet: the first trailing move must clear the step measured
+    # from the ENTRY price. With a 1000-point step the candidate 1.1065
+    # is only 650 points above entry — blocked; with the 10-point step
+    # it fires.
+    assert (
+        _tp_target_for_move(
+            {"kind": "trailing_tp", "distance_points": 150, "step_points": 1000},
+            pos=_tp_pos(),
+            tick_bid=1.1050,
+            tick_ask=1.1052,
+            point=POINT,
+        )
+        is None
+    )
+    got = _tp_target_for_move(TP_PARAMS, pos=_tp_pos(), tick_bid=1.1050, tick_ask=1.1052, point=POINT)
+    assert got == pytest.approx(1.1065)
+
+
+def test_tp_ratchet_stops_level_distance_is_respected():
+    # A zero distance proposes a TP ON the tick — refused by the math,
+    # never left for order_check to catch. A 1-point distance sits
+    # exactly one point from the tick and is allowed.
+    assert (
+        _tp_target_for_move(
+            {"kind": "trailing_tp", "distance_points": 0, "step_points": 10},
+            pos=_tp_pos(tp=1.0900),
+            tick_bid=1.1050,
+            tick_ask=1.1052,
+            point=POINT,
+        )
+        is None
+    )
+    got = _tp_target_for_move(
+        {"kind": "trailing_tp", "distance_points": 1, "step_points": 10},
+        pos=_tp_pos(tp=1.0900),
+        tick_bid=1.1050,
+        tick_ask=1.1052,
+        point=POINT,
+    )
+    assert got == pytest.approx(1.10501)
+
+
+def test_tp_ratchet_invalid_inputs_never_move():
+    assert (
+        _tp_target_for_move(TP_PARAMS, pos=_tp_pos(entry=0.0, tp=1.0900), tick_bid=1.1050, tick_ask=1.1052, point=POINT)
+        is None
+    )
+    assert _tp_target_for_move(TP_PARAMS, pos=_tp_pos(tp=1.0900), tick_bid=0.0, tick_ask=1.1052, point=POINT) is None
+    assert _tp_target_for_move(TP_PARAMS, pos=_tp_pos(tp=1.0900), tick_bid=1.1050, tick_ask=1.1052, point=0.0) is None
+    # A negative step would re-issue on every tick — refused.
+    assert (
+        _tp_target_for_move(
+            {"kind": "trailing_tp", "distance_points": 150, "step_points": -5},
+            pos=_tp_pos(tp=1.0900),
+            tick_bid=1.1050,
+            tick_ask=1.1052,
+            point=POINT,
+        )
+        is None
+    )
+
+
+# ----------------------------------------------------------------------
+# Trailing TP — envelope-driven moves (mock MT5)
+# ----------------------------------------------------------------------
+
+
+def test_trailing_tp_rule_authorizes_its_own_kind(tmp_path):
+    gate = PolicyGate()
+    gate.apply_frame(
+        _envelope_frame(rules=[{"rule_id": "tp-1", "params": dict(TP_PARAMS)}]),
+        bound_account_id="123456",  # the frame's account (§7.1 login string)
+    )
+    envelope, _rule = gate.authorize(rule_id="tp-1", kind="trailing_tp", symbol="EURUSD", ws_connected=True)
+    assert envelope.version == 7
+    # …but the same rule does NOT authorize an SL-trailing move.
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate.authorize(rule_id="tp-1", kind="trailing", symbol="EURUSD", ws_connected=True)
+    assert excinfo.value.reason == "rule_kind_mismatch"
+
+
+def test_trailing_tp_envelope_move_executes(tmp_path):
+    # Long, SL 1.0900 / TP 1.0900, bid 1.1050: the TP ratchets to
+    # 1.1065 (150 points ahead of the bid) and the SL is untouched.
+    fake = _FakeMt5(positions=[_position(sl=1.0900, tp=1.0900)])
+    ctx = _ctx(fake, tmp_path)
+    service = PolicyService(ctx)
+    service.handle_envelope_frame(_envelope_frame(rules=[{"rule_id": "tp-1", "params": dict(TP_PARAMS)}]))
+    records = asyncio_run(service.poll_once(list(fake.positions.values())))
+    assert len(records) == 1
+    record = records[0]
+    assert record.status == "executed"
+    assert record.kind == "trailing_tp"
+    assert record.rule_id == "tp-1"
+    assert record.decision_id
+    assert record.envelope_version == 7
+    assert record.tp_from == pytest.approx(1.0900)
+    assert record.tp_to == pytest.approx(1.1065)
+    assert record.sl_from is None and record.sl_to is None
+    assert fake.send_calls == 1
+    sent = fake.sent_requests[0]
+    assert sent["action"] == fake.TRADE_ACTION_SLTP
+    assert sent["tp"] == pytest.approx(1.1065)
+    assert sent["sl"] == pytest.approx(1.0900)  # stop untouched
+    assert "volume" not in sent
+    history = service.executor.history
+    assert history[0]["tp_from"] == pytest.approx(1.0900)
+    assert history[0]["tp_to"] == pytest.approx(1.1065)
+
+
+def test_trailing_tp_step_gate_holds_the_move(tmp_path):
+    # TP already 1.1065: the candidate improves it by 0 — a no-op,
+    # recorded in history as no_better_tp, nothing sent.
+    fake = _FakeMt5(positions=[_position(sl=1.0900, tp=1.1065)])
+    ctx = _ctx(fake, tmp_path)
+    service = PolicyService(ctx)
+    service.handle_envelope_frame(_envelope_frame(rules=[{"rule_id": "tp-1", "params": dict(TP_PARAMS)}]))
+    records = asyncio_run(service.poll_once(list(fake.positions.values())))
+    assert records == []
+    assert fake.send_calls == 0
+    history = service.executor.history
+    assert len(history) == 1
+    assert history[0]["status"] == "refused"
+    assert history[0]["denial_reason"] == "no_better_tp"
+    assert history[0]["kind"] == "trailing_tp"
+
+
+def test_trailing_tp_never_moves_toward_entry(tmp_path):
+    # Entry 1.1100 is above the bid 1.1050 (losing long): the TP
+    # never moves, nothing is sent.
+    pos = _position(sl=1.0900, tp=1.0900)
+    pos.price_open = 1.1100
+    fake = _FakeMt5(positions=[pos])
+    ctx = _ctx(fake, tmp_path)
+    service = PolicyService(ctx)
+    service.handle_envelope_frame(_envelope_frame(rules=[{"rule_id": "tp-1", "params": dict(TP_PARAMS)}]))
+    records = asyncio_run(service.poll_once(list(fake.positions.values())))
+    assert records == []
+    assert fake.send_calls == 0
 
 
 def asyncio_run(coro):
