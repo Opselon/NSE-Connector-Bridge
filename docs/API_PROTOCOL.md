@@ -302,7 +302,8 @@ mutually-authenticated WSS session itself.
 
 ```
 malformed → expired → wrong-device → wrong-account → allowlist
-(→ modify_pending gate) → entitlement → replay
+(→ modify_pending gate → open_order §17.5 gate → symbol allowlist
+when configured, else no restriction) → entitlement → replay
 ```
 
 1. Envelope parses; `expires_at` is RFC 3339 → `Malformed`.
@@ -311,7 +312,14 @@ malformed → expired → wrong-device → wrong-account → allowlist
 3. `device_id` == this device → `WrongDevice`.
 4. `account_id` ∈ authorized accounts for this device (fail closed
    when no account is bound) → `WrongAccount`.
-5. `operation.type` ∈ allowlist → `UnsupportedOperation`.
+5. `operation.type` ∈ allowlist → `UnsupportedOperation`. A command
+   that names a symbol in the frame (`open_order`) must name one
+   inside the configured `allowed_symbols` allowlist (config.json /
+   `NSE_BRIDGE_ALLOWED_SYMBOLS`; empty = unconfigured, no
+   restriction) → `SymbolNotAllowed`. Matching is exact after
+   normalization (`EUR/USD` ≡ `EURUSD`; a broker suffix such as
+   `EURUSDm` is a different symbol and must be listed explicitly).
+   Ticket-based ops carry no symbol in the frame and are unaffected.
 6. Feature enabled locally (`position_manager` AND `auto_trade`
    entitlements from `validate-key`) → `AutoTradeNotEnabled`.
 7. `command_id` not in the bounded replay cache (10,000 ids) →

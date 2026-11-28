@@ -673,6 +673,11 @@ class ServerChannel:
             # never sends one), so the version floor is checked
             # locally against this Bridge's own version; the Platform
             # enforces the same floor server-side before sending.
+            # P1-5 symbol allowlist: the operator's configured
+            # ``allowed_symbols`` (config.json /
+            # ``NSE_BRIDGE_ALLOWED_SYMBOLS``; empty = unconfigured, no
+            # restriction). The validator enforces it at step 5c,
+            # before dispatch and before any MT5 call.
             validator = CommandValidator(
                 device_id,
                 get_account_id=self._bound_account_id,
@@ -682,6 +687,7 @@ class ServerChannel:
                     bridge_version=BRIDGE_VERSION,
                 ),
                 open_order_authorized=self.ctx.settings.enable_v2_open_order,
+                allowed_symbols=self.ctx.settings.allowed_symbols_set,
             )
             self._executor = CommandExecutor(
                 self.ctx,

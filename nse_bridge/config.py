@@ -126,6 +126,33 @@ def validate_network_proxy(url: str) -> None:
         raise ValueError(f"network_proxy {url!r} is missing a host")
 
 
+def parse_allowed_symbols(raw: str | list[str] | None) -> frozenset[str]:
+    """Normalize a configured symbol allowlist (audit P1-5) to comparable keys.
+
+    Accepts the comma-separated config/env string (``"EURUSD,XAUUSD"``)
+    or — defensively, for a config.json array — a list of strings. Each
+    entry is reduced with :func:`normalize_broker_name` (uppercase,
+    separators removed), so ``EUR/USD`` and ``EURUSD`` are the same
+    entry; empty entries are dropped. Broker suffixes are NOT folded:
+    ``EURUSDm`` normalizes to ``EURUSDM`` and is a different entry from
+    ``EURUSD`` — list suffixed broker spellings explicitly. This is the
+    same exact-match-after-normalization rule as the policy-envelope
+    ``bounds.allowed_symbols`` bound (``server/policy.py``).
+
+    The import is local: ``config`` sits at the bottom of the import
+    graph (``symbols`` → ``mt5.driver`` → ``config``), so a top-level
+    import of the symbols package would be circular (same reason
+    ``engine/common.py`` imports the resolver lazily).
+    """
+    from .symbols.canonical import normalize_broker_name
+
+    if raw is None:
+        return frozenset()
+    parts = raw.split(",") if isinstance(raw, str) else list(raw)
+    keys = {normalize_broker_name(str(part).strip()) for part in parts}
+    return frozenset(key for key in keys if key)
+
+
 class BridgeSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="NSE_BRIDGE_", env_file=".env", extra="ignore")
 
@@ -252,6 +279,39 @@ class BridgeSettings(BaseSettings):
     # flag takes effect on the next channel (re)build / Bridge
     # restart, not mid-session (P2-1 staleness, same as the v2 flag).
     enable_modify_pending: bool = False
+
+    # --- symbol allowlist (audit P1-5) --------------------------------
+    # Optional, config-driven allowlist of tradable symbols, enforced by
+    # the command validator (step 5c) BEFORE dispatch — no MT5 call is
+    # made for a rejected symbol. Comma-separated broker symbols:
+    # ``allowed_symbols: "EURUSD,XAUUSD"`` in config.json or
+    # ``NSE_BRIDGE_ALLOWED_SYMBOLS="EURUSD,XAUUSD"``. Default empty =
+    # NO allowlist: every broker-listed symbol is tradable, exactly
+    # today's behaviour — nothing breaks until this is configured.
+    # Matching is exact after normalization (uppercase, separators
+    # removed), the same spelling rule as the policy-envelope
+    # ``bounds.allowed_symbols`` bound: ``EUR/USD`` and ``EURUSD``
+    # are the same entry, but a broker suffix makes a different symbol
+    # — list ``EURUSDm`` explicitly if that is the broker's spelling.
+    # Only commands that name a symbol in the frame (``open_order``)
+    # are gated: ticket-based ops (close / modify / cancel) carry no
+    # symbol in the frame — their symbol was fixed when the
+    # position/order was opened, under this same gate. Deliberately
+    # NOT persisted by persist_settings — the config file / env var is
+    # the durable source, same as the v2 and modify_pending flags.
+    allowed_symbols: str = ""
+
+    @property
+    def allowed_symbols_set(self) -> frozenset[str] | None:
+        """Configured allowlist as normalized keys, or None when unconfigured.
+
+        None = no allowlist configured (the default): the validator
+        imposes no symbol restriction and behaviour is exactly today's.
+        A non-empty set is the configured allowlist — the validator
+        rejects any command naming a symbol outside it.
+        """
+        parsed = parse_allowed_symbols(self.allowed_symbols)
+        return parsed or None
 
     # --- streaming ------------------------------------------------------
     stream_account_interval_ms: int = 1000

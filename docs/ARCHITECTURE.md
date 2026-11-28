@@ -256,7 +256,8 @@ it does not own the server-side lifecycle.
 malformed → expired → wrong-device → wrong-account → allowlist
 (→ modify_pending capability gate §17.4, CLOSED by default →
 open_order activation gate §17.5: flag default ON, v2 negotiation
-fail-closed) → entitlement (position_manager + auto_trade) → replay
+fail-closed → symbol allowlist step 5c when configured, else no
+restriction) → entitlement (position_manager + auto_trade) → replay
 ```
 
 Only a SUCCESSFUL validation consumes the replay id. Rejections

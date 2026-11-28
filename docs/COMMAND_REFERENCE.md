@@ -31,8 +31,8 @@ rejection the server decides; on `mcp_failed` with
 must re-authorize with a NEW `command_id`. On `UNKNOWN` the server
 must wait for reconciliation — never blind-retry. Error codes: the
 §6.3 rejection reasons (`Malformed`, `Expired`, `WrongDevice`,
-`WrongAccount`, `UnsupportedOperation`, `AutoTradeNotEnabled`,
-`Replayed`) returned as `action.result` with `status: "rejected"`;
+`WrongAccount`, `UnsupportedOperation`, `SymbolNotAllowed`,
+`AutoTradeNotEnabled`, `Replayed`) returned as `action.result` with `status: "rejected"`;
 execution failures return `status: "mcp_failed"` with an `error`
 object (`code`, `category`, `cause`, `recovery`, `retry_safe`).
 
@@ -49,13 +49,17 @@ negotiated v2 envelope (`protocol_version: "2"`), `open_order`,
 `cancel_order`, and `partial_close` are sendable subject to the
 §17.5 gate (flag default ON, opt-out
 `NSE_BRIDGE_ENABLE_V2_OPEN_ORDER=0`); a v1 envelope still refuses
-all v2-only ops. Entitlement:
+all v2-only ops. An `open_order` naming a symbol outside the
+configured `allowed_symbols` allowlist (config.json /
+`NSE_BRIDGE_ALLOWED_SYMBOLS`; empty = unconfigured, no restriction)
+is rejected as `SymbolNotAllowed` at validation step 5c, before any
+MT5 call. Entitlement:
 `position_manager` AND `auto_trade` (from `validate-key`) must both
 be enabled, else `AutoTradeNotEnabled` (step 6).
 
 Validation order (§6.3, exact): malformed → expired → wrong-device →
 wrong-account → allowlist (→ `modify_pending` gate → `open_order`
-§17.5 gate) → entitlement → replay. Lifecycle (spec §7): `RECEIVED → VALIDATED → AUTHORIZED →
+§17.5 gate → symbol allowlist when configured) → entitlement → replay. Lifecycle (spec §7): `RECEIVED → VALIDATED → AUTHORIZED →
 DISPATCHED → EXECUTING → COMPLETED | PARTIALLY_COMPLETED | FAILED |
 UNKNOWN | EXPIRED`. `PARTIALLY_COMPLETED` is a LOCAL terminal state:
 a partial close (requested partial volume, or broker retcode 10010
